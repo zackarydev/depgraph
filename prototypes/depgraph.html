@@ -2083,11 +2083,16 @@ function clusterLabelDrag(getMembersFn) {
       d3.select(this).style('cursor', 'grabbing');
     })
     .on('drag', function(e, d) {
-      if (d._clusterGathering || clusterGatherHeld) return; // cluster gather overrides drag
       if (!d._clusterMembers || !d._clusterMembers.length) return;
       for (const n of d._clusterMembers) {
         n.x += e.dx;
         n.y += e.dy;
+      }
+      // Update saved positions so the gather loop's anchor pin tracks the drag
+      if (d._clusterGathering || clusterGatherHeld) {
+        for (const n of d._clusterMembers) {
+          savedPositions.set(n.id, { x: n.x, y: n.y });
+        }
       }
       renderPositions();
     })
@@ -3105,6 +3110,60 @@ function stopNeighborGather() {
 // Pull all clusters connected via meta-edges toward the clicked cluster.
 // Uninvolved clusters are gently repulsed.
 // ═══════════════════════════════════════════════════════
+function clusterBounds(cid) {
+  // Compute centroid and bounding radius for a cluster
+  const members = currentNodes.filter(n => n.cluster === cid);
+  if (members.length === 0) return { cx: 0, cy: 0, r: 0, members };
+  let cx = 0, cy = 0;
+  for (const m of members) { cx += m.x; cy += m.y; }
+  cx /= members.length; cy /= members.length;
+  let maxR = 0;
+  for (const m of members) {
+    const dx = m.x - cx, dy = m.y - cy;
+    maxR = Math.max(maxR, Math.sqrt(dx * dx + dy * dy) + (m.radius || 4));
+  }
+  return { cx, cy, r: maxR + 10, members }; // +10 padding
+}
+
+function separateClusters(cidList, anchorCid, dt) {
+  // Pairwise circle-circle collision: push non-anchor clusters apart
+  const bounds = new Map();
+  for (const cid of cidList) bounds.set(cid, clusterBounds(cid));
+
+  const cidArr = [...cidList];
+  for (let i = 0; i < cidArr.length; i++) {
+    for (let j = i + 1; j < cidArr.length; j++) {
+      const a = bounds.get(cidArr[i]), b = bounds.get(cidArr[j]);
+      if (a.members.length === 0 || b.members.length === 0) continue;
+      const dx = b.cx - a.cx, dy = b.cy - a.cy;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const minDist = a.r + b.r;
+      if (dist >= minDist) continue;
+
+      const overlap = minDist - dist;
+      const push = overlap * 0.3 * dt;
+      const nx = dx / dist, ny = dy / dist;
+
+      const aIsAnchor = cidArr[i] === anchorCid;
+      const bIsAnchor = cidArr[j] === anchorCid;
+      // Distribute push: anchor doesn't move, otherwise 50/50
+      const aShare = aIsAnchor ? 0 : bIsAnchor ? 1 : 0.5;
+      const bShare = bIsAnchor ? 0 : aIsAnchor ? 1 : 0.5;
+
+      for (const n of a.members) {
+        if (lockedNodes.has(n.id)) continue;
+        n.x -= nx * push * aShare;
+        n.y -= ny * push * aShare;
+      }
+      for (const n of b.members) {
+        if (lockedNodes.has(n.id)) continue;
+        n.x += nx * push * bShare;
+        n.y += ny * push * bShare;
+      }
+    }
+  }
+}
+
 function startClusterGather(anchorCid) {
   if (clusterGatherRAF || !currentGraph || !currentNodes) return;
   clusterGatherHeld = true;
@@ -3119,7 +3178,7 @@ function startClusterGather(anchorCid) {
   if (connectedCids.size === 0) { clusterGatherHeld = false; return; }
 
   // All cluster IDs present in the graph
-  const allCids = new Set(currentNodes.filter(n => n.cluster != null && n.cluster >= 0).map(n => n.cluster));
+  const allCids = [...new Set(currentNodes.filter(n => n.cluster != null && n.cluster >= 0).map(n => n.cluster))];
 
   // Uninvolved clusters (not anchor, not connected)
   const uninvolvedCids = new Set();
@@ -3131,7 +3190,6 @@ function startClusterGather(anchorCid) {
   focusedClusterId = anchorCid;
   applyMetaLinkFocus();
 
-  const anchor = clusterCentroid(anchorCid);
   let lastFrameTime = performance.now();
   const startTime = performance.now();
 
@@ -3143,7 +3201,7 @@ function startClusterGather(anchorCid) {
     lastFrameTime = now;
     const ramp = Math.min(1, (now - startTime) / 800);
 
-    // Recompute anchor centroid (it's pinned, but members may shift from collision)
+    // Recompute anchor centroid each frame (tracks drag movement)
     const ac = clusterCentroid(anchorCid);
 
     // Pull connected clusters toward anchor
@@ -3151,7 +3209,6 @@ function startClusterGather(anchorCid) {
       const cc = clusterCentroid(cid);
       const dx = ac.x - cc.x, dy = ac.y - cc.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      // Coupling weight affects pull strength
       let coupling = 1;
       for (const ml of currentMetaLinks) {
         if ((ml.sourceCluster === anchorCid && ml.targetCluster === cid) ||
@@ -3175,7 +3232,6 @@ function startClusterGather(anchorCid) {
       const cc = clusterCentroid(cid);
       const dx = cc.x - ac.x, dy = cc.y - ac.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      // Repulsion gets stronger when closer to the gathering
       const repulse = Math.max(0, 300 - dist) * 0.003 * ramp * dt;
       if (repulse > 0) {
         const mx = (dx / dist) * repulse, my = (dy / dist) * repulse;
@@ -3188,7 +3244,10 @@ function startClusterGather(anchorCid) {
       }
     }
 
-    // Pin anchor cluster nodes
+    // Cluster-cluster collision: prevent overlapping bounding circles
+    separateClusters(allCids, anchorCid, dt);
+
+    // Pin anchor cluster nodes to their saved (drag-updated) positions
     for (const n of currentNodes) {
       if (n.cluster === anchorCid) {
         const saved = savedPositions.get(n.id);
