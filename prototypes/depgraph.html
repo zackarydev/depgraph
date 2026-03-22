@@ -234,6 +234,10 @@ let xKeyDown = false; // tracks physical X key state
 let xKeyRAF = null;
 let xDismissRAFs = new Map(); // per-node dismiss animations
 
+// Space-pull (pull selected nodes together)
+let spacePullRAF = null;
+let spacePullHeld = false;
+
 // SVG layers
 let svg, gLinks, gNodes, gHulls, gLabels, gClusterLabels;
 let width, height;
@@ -1491,6 +1495,11 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
         d._dragStartTime = Date.now();
         d._isDragging = true;
         forcePressDragNode = d;
+        // Stop centroid pull if dragging a selected node while space is held
+        if (spacePullRAF && selectedNodes.has(d.id)) {
+          cancelAnimationFrame(spacePullRAF);
+          spacePullRAF = null;
+        }
         // Shift-hold fallback for non-pressure devices: start attractor after 550ms delay
         if (!hasForceTouch && !hasPressure && e.sourceEvent && e.sourceEvent.shiftKey) {
           if (shiftAttractorTimer) clearTimeout(shiftAttractorTimer);
@@ -1503,8 +1512,18 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
         }
       })
       .on('drag', (e, d) => {
-        if (xKeyHeld && xStartPositions?.has(d.id)) return; // X relaxation controls position
-        d.x = e.x; d.y = e.y;
+        if (xKeyRAF) return; // X step animation controls position
+        if (spacePullHeld && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
+          // Move all selected nodes toward cursor, maintaining relative positions
+          const dx = e.x - d.x, dy = e.y - d.y;
+          for (const n of currentNodes) {
+            if (!selectedNodes.has(n.id)) continue;
+            n.x += dx;
+            n.y += dy;
+          }
+        } else {
+          d.x = e.x; d.y = e.y;
+        }
         renderPositions();
       })
       .on('end', (e, d) => {
@@ -1515,8 +1534,17 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
         const dx = d.x - d._dragStart.x, dy = d.y - d._dragStart.y;
         const moved = Math.sqrt(dx * dx + dy * dy) > 5;
         if (moved) {
-          stickyNodes.add(d.id);
-          savedPositions.set(d.id, { x: d.x, y: d.y });
+          // If space+drag moved all selected nodes, save all their positions
+          if (spacePullHeld && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
+            for (const n of currentNodes) {
+              if (!selectedNodes.has(n.id)) continue;
+              stickyNodes.add(n.id);
+              savedPositions.set(n.id, { x: n.x, y: n.y });
+            }
+          } else {
+            stickyNodes.add(d.id);
+            savedPositions.set(d.id, { x: d.x, y: d.y });
+          }
           trackDragProximity(d.id);
           pushArrangement('drag', [d.id]);
         }
@@ -2173,6 +2201,8 @@ function stopXForces() {
     }
   }
 
+  pushArrangement('x-step', []);
+
   xRelaxFactor = 0;
   xStartPositions = null;
   xT0Positions = null;
@@ -2206,13 +2236,91 @@ function dismissNodeToT0(d) {
 }
 
 // ═══════════════════════════════════════════════════════
+// SPACE-PULL (pull selected nodes toward their centroid)
+// ═══════════════════════════════════════════════════════
+function startSpacePull() {
+  if (spacePullRAF || selectedNodes.size < 2) return;
+  spacePullHeld = true;
+  let lastFrameTime = performance.now();
+  const startTime = performance.now();
+
+  function loop() {
+    if (!spacePullHeld || !currentNodes || !currentGraph) return;
+
+    const now = performance.now();
+    const dt = Math.min(now - lastFrameTime, 50) / 16.67;
+    lastFrameTime = now;
+    const ramp = Math.min(1, (now - startTime) / 1000);
+
+    // Compute centroid of selected nodes
+    let cx = 0, cy = 0, count = 0;
+    for (const n of currentNodes) {
+      if (!selectedNodes.has(n.id)) continue;
+      cx += n.x; cy += n.y; count++;
+    }
+    if (count < 2) { spacePullRAF = requestAnimationFrame(loop); return; }
+    cx /= count; cy /= count;
+
+    // Pull selected nodes toward centroid
+    for (const n of currentNodes) {
+      if (!selectedNodes.has(n.id)) continue;
+      const dx = cx - n.x, dy = cy - n.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const pull = dist * 0.03 * ramp * dt;
+      n.x += (dx / dist) * pull;
+      n.y += (dy / dist) * pull;
+    }
+
+    // Collision resolution among selected nodes
+    const selected = currentNodes.filter(n => selectedNodes.has(n.id));
+    for (let i = 0; i < selected.length; i++) {
+      for (let j = i + 1; j < selected.length; j++) {
+        const a = selected[i], b = selected[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = a.radius + b.radius + 6;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.4;
+          a.x -= (dx / dist) * push;
+          a.y -= (dy / dist) * push;
+          b.x += (dx / dist) * push;
+          b.y += (dy / dist) * push;
+        }
+      }
+    }
+
+    renderPositions();
+    spacePullRAF = requestAnimationFrame(loop);
+  }
+  spacePullRAF = requestAnimationFrame(loop);
+}
+
+function stopSpacePull() {
+  spacePullHeld = false;
+  if (spacePullRAF) { cancelAnimationFrame(spacePullRAF); spacePullRAF = null; }
+  // Save positions of pulled nodes
+  for (const id of selectedNodes) {
+    const n = currentGraph?.nodeMap.get(id);
+    if (n) {
+      stickyNodes.add(n.id);
+      savedPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+  pushArrangement('space-pull', [...selectedNodes].slice(0, 5));
+}
+
+// ═══════════════════════════════════════════════════════
 // KEYBOARD
 // ═══════════════════════════════════════════════════════
 document.addEventListener('keydown', (e) => {
-  // SPACEBAR: unlock all locked nodes
-  if (e.code === 'Space' && lockedNodes.size > 0) {
+  // SPACEBAR: pull selected nodes together, or unlock if none selected
+  if (e.code === 'Space') {
     e.preventDefault();
-    unlockNodes();
+    if (selectedNodes.size >= 2 && !e.repeat) {
+      startSpacePull();
+    } else if (lockedNodes.size > 0 && !e.repeat) {
+      unlockNodes();
+    }
     return;
   }
 
@@ -2256,6 +2364,9 @@ document.addEventListener('keyup', (e) => {
   if (e.code === 'KeyX') {
     xKeyDown = false;
     if (xKeyHeld) stopXForces();
+  }
+  if (e.code === 'Space' && spacePullHeld) {
+    stopSpacePull();
   }
 });
 
