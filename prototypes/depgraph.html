@@ -965,7 +965,7 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
       }
     }
     for (const [gname, users] of globalUsage) {
-      if (users.size < 2) continue;
+      if (users.size < 2 || nodeMap.has(gname)) continue;
       const gScores = new Map();
       const addGScore = (cid, w) => gScores.set(cid, (gScores.get(cid) || 0) + w);
       for (const token of tokenizeName(gname)) {
