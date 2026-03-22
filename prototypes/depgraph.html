@@ -101,6 +101,7 @@ body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', mo
 
 svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 .link { transition: none; }
+.meta-link { transition: none; }
 .node circle { cursor: pointer; stroke-width: 1.5; }
 .node text { fill: #999; font-size: 10px; pointer-events: none; user-select: none; }
 .label { pointer-events: none; user-select: none; }
@@ -137,7 +138,6 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
   </label>
   <div class="sep"></div>
   <label><input type="checkbox" id="show-labels" checked> Labels</label>
-  <label><input type="checkbox" id="show-edges"> Edges</label>
   <button id="lock-btn" title="Lock selected nodes (Space to unlock)">Lock</button>
   <span id="lock-indicator" style="display:none; color:#ff0; font-size:11px">Locked</span>
   <label><input type="checkbox" id="live-reload" checked> Live</label>
@@ -174,6 +174,8 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
   <label><input type="checkbox" id="show-hulls" checked> Clusters</label>
   <label><input type="checkbox" id="show-cluster-labels" checked> Cluster labels</label>
   <label><input type="checkbox" id="show-boundary-labels" checked> Boundary labels</label>
+  <label><input type="checkbox" id="show-edges"> Edges</label>
+  <label><input type="checkbox" id="show-meta-edges" checked> Meta edges</label>
   <div id="zoom-debug" style="color:#555; font-size:10px; margin-top:2px">zoom: 0.80</div>
 </div>
 
@@ -240,6 +242,7 @@ let clickPullRAF = null;
 // X-key spread forces
 let xKeyHeld = false;
 let xKeyDown = false; // tracks physical X key state
+let spaceKeyDown = false; // tracks physical Space key state
 let xKeyRAF = null;
 let xDismissRAFs = new Map(); // per-node dismiss animations
 
@@ -259,6 +262,11 @@ let spacePullHeld = false;
 // Neighbor-gather (pull neighbors toward a clicked node)
 let neighborGatherRAF = null;
 let neighborGatherHeld = false;
+
+// Cluster-gather (pull connected clusters toward a clicked cluster label)
+let clusterGatherRAF = null;
+let clusterGatherHeld = false;
+let clusterGatherAnchorCid = null;
 
 // User-defined clusters (parsed from codemap <!-- user-cluster --> sections)
 let userClusterSections = []; // [{name, nodeIds: [...]}] — derived from codemap
@@ -322,7 +330,7 @@ async function deleteUserCluster(sectionName) {
 }
 
 // SVG layers
-let svg, gLinks, gNodes, gHulls, gLabels, gClusterLabels, svgDefs;
+let svg, gLinks, gMetaLinks, gNodes, gHulls, gLabels, gClusterLabels, svgDefs;
 let width, height;
 
 // ═══════════════════════════════════════════════════════
@@ -1434,6 +1442,7 @@ function initSVG() {
 
   svgDefs = svg.append('defs');
   gHulls = svg.append('g').attr('class', 'hulls');
+  gMetaLinks = svg.append('g').attr('class', 'meta-links');
   gLinks = svg.append('g').attr('class', 'links');
   gNodes = svg.append('g').attr('class', 'nodes');
   gLabels = svg.append('g').attr('class', 'labels');
@@ -1443,6 +1452,7 @@ function initSVG() {
     .scaleExtent([0.1, 12])
     .on('zoom', e => {
       gHulls.attr('transform', e.transform);
+      gMetaLinks.attr('transform', e.transform);
       gLinks.attr('transform', e.transform);
       gNodes.attr('transform', e.transform);
       gLabels.attr('transform', e.transform);
@@ -1513,15 +1523,44 @@ function applySemanticZoom() {
   }
 
   const showEdges = document.getElementById('show-edges').checked;
+  const showMetaEdges = document.getElementById('show-meta-edges').checked;
   const zoomedIn = k > 3.5;
-  // When zoomed in enough, show edges regardless of toggle
-  if (zoomedIn && !showEdges) {
-    gLinks.selectAll('.link').style('display', null);
-  } else if (!showEdges) {
-    gLinks.selectAll('.link').style('display', 'none');
+  const metaZoom = k < 1.5; // zoomed out enough for meta-edges
+
+  // ── Meta-edges vs individual edges ──
+  if (metaZoom && !showEdges && showMetaEdges) {
+    // Zoomed out: show meta-edges, hide individual edges (except important ones)
+    gMetaLinks.style('display', null);
+    const metaOpacity = k < 0.3 ? 0.25 : k < 0.7 ? 0.45 : 0.6;
+    gMetaLinks.attr('opacity', metaOpacity);
+
+    // Hide individual edges, but keep edges between two high-importance nodes
+    gLinks.attr('opacity', 1);
+    gLinks.selectAll('.link').each(function(d) {
+      const sImp = codemapImportance.get(d.source) || 0;
+      const tImp = codemapImportance.get(d.target) || 0;
+      const important = sImp > 8 && tImp > 8;
+      d3.select(this)
+        .style('display', important ? null : 'none')
+        .attr('stroke-opacity', important ? 0.35 : null);
+    });
+  } else {
+    // Zoomed in or edges toggled on: hide meta-edges, show individual edges
+    gMetaLinks.style('display', 'none');
+
+    if (showEdges || zoomedIn) {
+      gLinks.selectAll('.link').style('display', null);
+    } else {
+      gLinks.selectAll('.link').style('display', 'none');
+    }
+    if (showEdges) {
+      gLinks.selectAll('.link').attr('stroke-opacity', 0.45);
+      gLinks.attr('opacity', 1);
+    } else {
+      const edgeOpacity = k < 0.3 ? 0.02 : k < 0.6 ? 0.1 : k < 2.5 ? 1 : Math.min(1, 1 + (k - 2.5) * 0.5);
+      gLinks.attr('opacity', edgeOpacity);
+    }
   }
-  const edgeOpacity = k < 0.3 ? 0.02 : k < 0.6 ? 0.1 : k < 2.5 ? 1 : Math.min(1, 0.3 + (k - 2.5) * 0.2);
-  gLinks.attr('opacity', edgeOpacity);
 
   const hullOpacity = k < 0.5 ? 0.15 : k < 1.5 ? 0.08 : 0.04;
   gHulls.selectAll('.hull').attr('fill-opacity', hullOpacity);
@@ -1835,6 +1874,10 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .map(([id, name]) => `<div class="item"><div class="dot" style="background:${CLUSTER_COLORS[id % CLUSTER_COLORS.length]}"></div>${name} (${[...clusters.entries()].filter(([, c]) => c === id).length})</div>`)
     .join('');
 
+  // Meta-edges between clusters
+  computeMetaLinks();
+  renderMetaLinks();
+
   applySemanticZoom();
 
   // Render user-defined clusters
@@ -2023,14 +2066,24 @@ function renderUserClusterLegend() {
 }
 
 let clusterDragActive = false;
+let focusedClusterId = null; // cluster being dragged — boosts its meta-edge opacity
 function clusterLabelDrag(getMembersFn) {
   return d3.drag()
     .on('start', function(e, d) {
       d._clusterMembers = getMembersFn(d);
+      d._clusterGathering = false;
       clusterDragActive = true;
+      focusedClusterId = d.cid ?? null;
+      applyMetaLinkFocus();
+      // If space is already held, start cluster gather instead of drag
+      if (spaceKeyDown && d.cid != null) {
+        d._clusterGathering = true;
+        startClusterGather(d.cid);
+      }
       d3.select(this).style('cursor', 'grabbing');
     })
     .on('drag', function(e, d) {
+      if (d._clusterGathering || clusterGatherHeld) return; // cluster gather overrides drag
       if (!d._clusterMembers || !d._clusterMembers.length) return;
       for (const n of d._clusterMembers) {
         n.x += e.dx;
@@ -2040,6 +2093,8 @@ function clusterLabelDrag(getMembersFn) {
     })
     .on('end', function(e, d) {
       clusterDragActive = false;
+      focusedClusterId = null;
+      applyMetaLinkFocus();
       d3.select(this).style('cursor', null);
       if (d._clusterMembers) {
         for (const n of d._clusterMembers) {
@@ -2051,6 +2106,22 @@ function clusterLabelDrag(getMembersFn) {
       }
       renderPositions();
     });
+}
+
+function applyMetaLinkFocus() {
+  for (const d of currentMetaLinks) {
+    const grad = svgDefs.select(`#${d.gradId}`);
+    if (!grad.node()) continue;
+    const involved = focusedClusterId != null &&
+      (d.sourceCluster === focusedClusterId || d.targetCluster === focusedClusterId);
+    const mult = involved ? 5 : 1;
+    const stops = grad.selectAll('stop');
+    // Base opacities: [0.7, 0.08, 0.05, 0.08, 0.7]
+    const baseOps = [0.7, 0.08, 0.05, 0.08, 0.7];
+    stops.each(function(_, i) {
+      d3.select(this).attr('stop-opacity', Math.min(1, baseOps[i] * mult));
+    });
+  }
 }
 
 function rebuildClusterMemberCache() {
@@ -2194,6 +2265,119 @@ function renderClusterLabels() {
   labelPlacementTimer = setTimeout(computeClusterLabelPlacement, 200);
 }
 
+// ── Meta-edges: aggregated inter-cluster edges shown when zoomed out ──
+let currentMetaLinks = []; // [{sourceCluster, targetCluster, weight, color1, color2}]
+
+function computeMetaLinks() {
+  currentMetaLinks = [];
+  if (!currentGraph || !currentNodes) return;
+
+  // Tally inter-cluster coupling, weighted by AI importance scores.
+  // An edge between two importance-9 nodes counts ~9x more than one between importance-1 nodes.
+  const coupling = new Map(); // "cid1\0cid2" → importanceWeightedScore
+  const nodeMap = currentGraph.nodeMap;
+  for (const l of currentGraph.links) {
+    const sn = nodeMap.get(l.source);
+    const tn = nodeMap.get(l.target);
+    if (!sn || !tn || sn.cluster == null || tn.cluster == null) continue;
+    if (sn.cluster === tn.cluster) continue;
+    const [a, b] = sn.cluster < tn.cluster ? [sn.cluster, tn.cluster] : [tn.cluster, sn.cluster];
+    const key = a + '\0' + b;
+    // Geometric mean of the two endpoints' importance — emphasizes when both sides matter
+    const sImp = codemapImportance.get(l.source) || 3;
+    const tImp = codemapImportance.get(l.target) || 3;
+    const impWeight = Math.sqrt(sImp * tImp) / 3; // normalize so imp=3 ≈ 1x
+    coupling.set(key, (coupling.get(key) || 0) + (l.weight || 1) * impWeight);
+  }
+
+  const maxCoupling = Math.max(1, ...coupling.values());
+  for (const [key, weight] of coupling) {
+    const [a, b] = key.split('\0').map(Number);
+    currentMetaLinks.push({
+      sourceCluster: a,
+      targetCluster: b,
+      weight,
+      normalizedWeight: weight / maxCoupling,
+      color1: CLUSTER_COLORS[a % CLUSTER_COLORS.length],
+      color2: CLUSTER_COLORS[b % CLUSTER_COLORS.length],
+    });
+  }
+}
+
+function clusterCentroid(cid) {
+  if (!currentNodes) return { x: 0, y: 0 };
+  const members = currentNodes.filter(n => n.cluster === cid);
+  if (members.length === 0) return { x: 0, y: 0 };
+  let cx = 0, cy = 0;
+  for (const m of members) { cx += m.x; cy += m.y; }
+  return { x: cx / members.length, y: cy / members.length };
+}
+
+function renderMetaLinks() {
+  if (!gMetaLinks) return;
+
+  // Clean up old gradients
+  svgDefs.selectAll('.meta-grad').remove();
+
+  // Create a gradient for each meta-edge: opaque near clusters, translucent in the middle
+  for (const d of currentMetaLinks) {
+    const gradId = `meta-grad-${d.sourceCluster}-${d.targetCluster}`;
+    d.gradId = gradId;
+    const s = clusterCentroid(d.sourceCluster);
+    const t = clusterCentroid(d.targetCluster);
+    const blended = d3.interpolateRgb(d.color1, d.color2)(0.5);
+    d.blendedColor = blended;
+
+    const grad = svgDefs.append('linearGradient')
+      .attr('class', 'meta-grad')
+      .attr('id', gradId)
+      .attr('gradientUnits', 'userSpaceOnUse')
+      .attr('x1', s.x).attr('y1', s.y)
+      .attr('x2', t.x).attr('y2', t.y);
+
+    grad.append('stop').attr('offset', '0%')
+      .attr('stop-color', d.color1).attr('stop-opacity', 0.7);
+    grad.append('stop').attr('offset', '25%')
+      .attr('stop-color', blended).attr('stop-opacity', 0.12);
+    grad.append('stop').attr('offset', '50%')
+      .attr('stop-color', blended).attr('stop-opacity', 0.05);
+    grad.append('stop').attr('offset', '75%')
+      .attr('stop-color', blended).attr('stop-opacity', 0.08);
+    grad.append('stop').attr('offset', '100%')
+      .attr('stop-color', d.color2).attr('stop-opacity', 0.7);
+  }
+
+  gMetaLinks.selectAll('line')
+    .data(currentMetaLinks, d => d.sourceCluster + '\0' + d.targetCluster)
+    .join('line')
+    .attr('class', 'meta-link')
+    .each(function(d) {
+      const s = clusterCentroid(d.sourceCluster);
+      const t = clusterCentroid(d.targetCluster);
+      d3.select(this)
+        .attr('x1', s.x).attr('y1', s.y)
+        .attr('x2', t.x).attr('y2', t.y);
+    })
+    .attr('stroke', d => `url(#${d.gradId})`)
+    .attr('stroke-width', d => 0.5 + d.normalizedWeight * 4)
+    .attr('stroke-linecap', 'round');
+}
+
+function updateMetaLinkPositions() {
+  gMetaLinks.selectAll('.meta-link').each(function(d) {
+    const s = clusterCentroid(d.sourceCluster);
+    const t = clusterCentroid(d.targetCluster);
+    d3.select(this)
+      .attr('x1', s.x).attr('y1', s.y)
+      .attr('x2', t.x).attr('y2', t.y);
+
+    // Update gradient endpoints to track cluster positions
+    svgDefs.select(`#${d.gradId}`)
+      .attr('x1', s.x).attr('y1', s.y)
+      .attr('x2', t.x).attr('y2', t.y);
+  });
+}
+
 function renderPositions() {
   if (!currentNodes || !currentGraph) return;
   const nodeMap = currentGraph.nodeMap;
@@ -2211,6 +2395,7 @@ function renderPositions() {
     .attr('x', d => d.x)
     .attr('y', d => d.y);
 
+  updateMetaLinkPositions();
   renderHulls();
   renderClusterLabels();
 }
@@ -2916,6 +3101,125 @@ function stopNeighborGather() {
 }
 
 // ═══════════════════════════════════════════════════════
+// CLUSTER-GATHER (Click cluster label + Hold Space)
+// Pull all clusters connected via meta-edges toward the clicked cluster.
+// Uninvolved clusters are gently repulsed.
+// ═══════════════════════════════════════════════════════
+function startClusterGather(anchorCid) {
+  if (clusterGatherRAF || !currentGraph || !currentNodes) return;
+  clusterGatherHeld = true;
+  clusterGatherAnchorCid = anchorCid;
+
+  // Find connected cluster IDs via meta-links
+  const connectedCids = new Set();
+  for (const ml of currentMetaLinks) {
+    if (ml.sourceCluster === anchorCid) connectedCids.add(ml.targetCluster);
+    if (ml.targetCluster === anchorCid) connectedCids.add(ml.sourceCluster);
+  }
+  if (connectedCids.size === 0) { clusterGatherHeld = false; return; }
+
+  // All cluster IDs present in the graph
+  const allCids = new Set(currentNodes.filter(n => n.cluster != null && n.cluster >= 0).map(n => n.cluster));
+
+  // Uninvolved clusters (not anchor, not connected)
+  const uninvolvedCids = new Set();
+  for (const cid of allCids) {
+    if (cid !== anchorCid && !connectedCids.has(cid)) uninvolvedCids.add(cid);
+  }
+
+  // Highlight meta-edges for involved clusters
+  focusedClusterId = anchorCid;
+  applyMetaLinkFocus();
+
+  const anchor = clusterCentroid(anchorCid);
+  let lastFrameTime = performance.now();
+  const startTime = performance.now();
+
+  function loop() {
+    if (!clusterGatherHeld || !currentNodes || !currentGraph) return;
+
+    const now = performance.now();
+    const dt = Math.min(now - lastFrameTime, 50) / 16.67;
+    lastFrameTime = now;
+    const ramp = Math.min(1, (now - startTime) / 800);
+
+    // Recompute anchor centroid (it's pinned, but members may shift from collision)
+    const ac = clusterCentroid(anchorCid);
+
+    // Pull connected clusters toward anchor
+    for (const cid of connectedCids) {
+      const cc = clusterCentroid(cid);
+      const dx = ac.x - cc.x, dy = ac.y - cc.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      // Coupling weight affects pull strength
+      let coupling = 1;
+      for (const ml of currentMetaLinks) {
+        if ((ml.sourceCluster === anchorCid && ml.targetCluster === cid) ||
+            (ml.targetCluster === anchorCid && ml.sourceCluster === cid)) {
+          coupling = 0.5 + ml.normalizedWeight * 1.5;
+          break;
+        }
+      }
+      const pull = dist * 0.025 * ramp * dt * coupling;
+      const mx = (dx / dist) * pull, my = (dy / dist) * pull;
+      for (const n of currentNodes) {
+        if (n.cluster === cid && !lockedNodes.has(n.id)) {
+          n.x += mx;
+          n.y += my;
+        }
+      }
+    }
+
+    // Gently repulse uninvolved clusters away from the gathering mass
+    for (const cid of uninvolvedCids) {
+      const cc = clusterCentroid(cid);
+      const dx = cc.x - ac.x, dy = cc.y - ac.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      // Repulsion gets stronger when closer to the gathering
+      const repulse = Math.max(0, 300 - dist) * 0.003 * ramp * dt;
+      if (repulse > 0) {
+        const mx = (dx / dist) * repulse, my = (dy / dist) * repulse;
+        for (const n of currentNodes) {
+          if (n.cluster === cid && !lockedNodes.has(n.id)) {
+            n.x += mx;
+            n.y += my;
+          }
+        }
+      }
+    }
+
+    // Pin anchor cluster nodes
+    for (const n of currentNodes) {
+      if (n.cluster === anchorCid) {
+        const saved = savedPositions.get(n.id);
+        if (saved) { n.x = saved.x; n.y = saved.y; }
+      }
+    }
+
+    renderPositions();
+    clusterGatherRAF = requestAnimationFrame(loop);
+  }
+  clusterGatherRAF = requestAnimationFrame(loop);
+}
+
+function stopClusterGather() {
+  clusterGatherHeld = false;
+  clusterGatherAnchorCid = null;
+  if (clusterGatherRAF) { cancelAnimationFrame(clusterGatherRAF); clusterGatherRAF = null; }
+  focusedClusterId = null;
+  applyMetaLinkFocus();
+  if (currentNodes) {
+    for (const n of currentNodes) {
+      if (n.x != null) {
+        stickyNodes.add(n.id);
+        savedPositions.set(n.id, { x: n.x, y: n.y });
+      }
+    }
+  }
+  pushArrangement('cluster-gather', []);
+}
+
+// ═══════════════════════════════════════════════════════
 // QUICK-GATHER / GROUP-GATHER (pull selected nodes toward centroid or target)
 // ═══════════════════════════════════════════════════════
 let spacePullIsGroupGather = false;
@@ -3001,10 +3305,16 @@ function stopSpacePull() {
 // KEYBOARD
 // ═══════════════════════════════════════════════════════
 document.addEventListener('keydown', (e) => {
-  // SPACEBAR: gather neighbors, pull selected, or unlock
+  // SPACEBAR: gather neighbors, pull selected, cluster-gather, or unlock
   if (e.code === 'Space') {
     e.preventDefault();
+    spaceKeyDown = true;
     if (!e.repeat) {
+      // If a cluster label is being dragged, start cluster gather instead
+      if (clusterDragActive && focusedClusterId != null) {
+        startClusterGather(focusedClusterId);
+        return;
+      }
       const anchorNode = forcePressDragNode || selectedNode;
       if (anchorNode && e.shiftKey && selectedNodes.size >= 2) {
         // Click node + Shift+Space: pull selected nodes toward clicked node
@@ -3084,8 +3394,10 @@ document.addEventListener('keyup', (e) => {
     if (zKeyHeld) stopZTimeTravel();
   }
   if (e.code === 'Space') {
+    spaceKeyDown = false;
     if (spacePullHeld) stopSpacePull();
     if (neighborGatherHeld) stopNeighborGather();
+    if (clusterGatherHeld) stopClusterGather();
   }
 });
 
@@ -3214,10 +3526,7 @@ document.getElementById('min-shared').addEventListener('input', e => {
   rebuild();
 });
 document.getElementById('show-labels').addEventListener('change', () => applySemanticZoom());
-document.getElementById('show-edges').addEventListener('change', () => {
-  const show = document.getElementById('show-edges').checked;
-  gLinks.selectAll('.link').style('display', show ? null : 'none');
-});
+document.getElementById('show-edges').addEventListener('change', () => applySemanticZoom());
 document.getElementById('show-hulls').addEventListener('change', () => {
   const showHulls = document.getElementById('show-hulls').checked;
   if (showHulls && currentNodes) {
@@ -3231,6 +3540,7 @@ document.getElementById('show-hulls').addEventListener('change', () => {
 
 document.getElementById('show-cluster-labels').addEventListener('change', () => applySemanticZoom());
 document.getElementById('show-boundary-labels').addEventListener('change', () => applySemanticZoom());
+document.getElementById('show-meta-edges').addEventListener('change', () => applySemanticZoom());
 
 document.getElementById('lock-btn').addEventListener('click', () => {
   if (lockedNodes.size > 0 && selectedNodes.size === 0) {
