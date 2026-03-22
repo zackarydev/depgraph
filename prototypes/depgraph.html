@@ -245,6 +245,10 @@ let zTravelStartIndex = -1; // arrangement index when Z was pressed
 let spacePullRAF = null;
 let spacePullHeld = false;
 
+// Neighbor-gather (pull neighbors toward a clicked node)
+let neighborGatherRAF = null;
+let neighborGatherHeld = false;
+
 // SVG layers
 let svg, gLinks, gNodes, gHulls, gLabels, gClusterLabels;
 let width, height;
@@ -2392,11 +2396,100 @@ function dismissNodeToT0(d) {
 }
 
 // ═══════════════════════════════════════════════════════
-// SPACE-PULL (pull selected nodes toward their centroid)
+// STRANGER-GATHER (pull neighbors, except selected, toward a clicked node)
 // ═══════════════════════════════════════════════════════
-function startSpacePull() {
+function startNeighborGather(anchorNode) {
+  if (neighborGatherRAF || !currentGraph) return;
+  neighborGatherHeld = true;
+  const adj = currentGraph.adjacency;
+  const neighborIds = adj.get(anchorNode.id);
+  if (!neighborIds || neighborIds.size === 0) return;
+
+  let lastFrameTime = performance.now();
+  const startTime = performance.now();
+
+  function loop() {
+    if (!neighborGatherHeld || !currentNodes || !currentGraph) return;
+
+    const now = performance.now();
+    const dt = Math.min(now - lastFrameTime, 50) / 16.67;
+    lastFrameTime = now;
+    const ramp = Math.min(1, (now - startTime) / 1000);
+
+    // Pin anchor position — restore after all physics
+    const anchorX = anchorNode.x, anchorY = anchorNode.y;
+
+    // Pull neighbors toward anchor node (skip selected and locked nodes)
+    for (const nid of neighborIds) {
+      const n = currentGraph.nodeMap.get(nid);
+      if (!n || lockedNodes.has(n.id) || selectedNodes.has(n.id)) continue;
+      const dx = anchorX - n.x, dy = anchorY - n.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const pull = dist * 0.03 * ramp * dt;
+      n.x += (dx / dist) * pull;
+      n.y += (dy / dist) * pull;
+    }
+
+    // Collision resolution among neighbors + against anchor (anchor never moves, skip selected)
+    const neighbors = [...neighborIds].map(id => currentGraph.nodeMap.get(id)).filter(n => n && !selectedNodes.has(n.id));
+    for (let i = 0; i < neighbors.length; i++) {
+      for (let j = i + 1; j < neighbors.length; j++) {
+        const a = neighbors[i], b = neighbors[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = a.radius + b.radius + 6;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.4;
+          a.x -= (dx / dist) * push;
+          a.y -= (dy / dist) * push;
+          b.x += (dx / dist) * push;
+          b.y += (dy / dist) * push;
+        }
+      }
+      // Push neighbor away from anchor (only neighbor moves)
+      const dx = neighbors[i].x - anchorX, dy = neighbors[i].y - anchorY;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const minDist = neighbors[i].radius + anchorNode.radius + 6;
+      if (dist < minDist) {
+        const push = (minDist - dist) * 0.5;
+        neighbors[i].x += (dx / dist) * push;
+        neighbors[i].y += (dy / dist) * push;
+      }
+    }
+
+    // Force anchor back to pinned position (in case anything else touched it)
+    anchorNode.x = anchorX;
+    anchorNode.y = anchorY;
+
+    renderPositions();
+    neighborGatherRAF = requestAnimationFrame(loop);
+  }
+  neighborGatherRAF = requestAnimationFrame(loop);
+}
+
+function stopNeighborGather() {
+  neighborGatherHeld = false;
+  if (neighborGatherRAF) { cancelAnimationFrame(neighborGatherRAF); neighborGatherRAF = null; }
+  // Save positions of pulled neighbors
+  if (currentGraph) {
+    for (const n of currentNodes) {
+      if (n.x != null) {
+        stickyNodes.add(n.id);
+        savedPositions.set(n.id, { x: n.x, y: n.y });
+      }
+    }
+  }
+  pushArrangement('stranger-gather', []);
+}
+
+// ═══════════════════════════════════════════════════════
+// QUICK-GATHER / GROUP-GATHER (pull selected nodes toward centroid or target)
+// ═══════════════════════════════════════════════════════
+let spacePullIsGroupGather = false;
+function startSpacePull(targetNode) {
   if (spacePullRAF || selectedNodes.size < 2) return;
   spacePullHeld = true;
+  spacePullIsGroupGather = !!targetNode;
   let lastFrameTime = performance.now();
   const startTime = performance.now();
 
@@ -2408,18 +2501,24 @@ function startSpacePull() {
     lastFrameTime = now;
     const ramp = Math.min(1, (now - startTime) / 1000);
 
-    // Compute centroid of selected nodes
-    let cx = 0, cy = 0, count = 0;
-    for (const n of currentNodes) {
-      if (!selectedNodes.has(n.id)) continue;
-      cx += n.x; cy += n.y; count++;
+    // Pull toward target node if provided, otherwise toward centroid
+    let cx, cy;
+    if (targetNode) {
+      cx = targetNode.x;
+      cy = targetNode.y;
+    } else {
+      cx = 0; cy = 0; let count = 0;
+      for (const n of currentNodes) {
+        if (!selectedNodes.has(n.id)) continue;
+        cx += n.x; cy += n.y; count++;
+      }
+      if (count < 2) { spacePullRAF = requestAnimationFrame(loop); return; }
+      cx /= count; cy /= count;
     }
-    if (count < 2) { spacePullRAF = requestAnimationFrame(loop); return; }
-    cx /= count; cy /= count;
 
-    // Pull selected nodes toward centroid
+    // Pull selected nodes toward target
     for (const n of currentNodes) {
-      if (!selectedNodes.has(n.id)) continue;
+      if (!selectedNodes.has(n.id) || n === targetNode) continue;
       const dx = cx - n.x, dy = cy - n.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
       const pull = dist * 0.03 * ramp * dt;
@@ -2462,20 +2561,28 @@ function stopSpacePull() {
       savedPositions.set(n.id, { x: n.x, y: n.y });
     }
   }
-  pushArrangement('space-pull', [...selectedNodes].slice(0, 5));
+  pushArrangement(spacePullIsGroupGather ? 'group-gather' : 'quick-gather', [...selectedNodes].slice(0, 5));
 }
 
 // ═══════════════════════════════════════════════════════
 // KEYBOARD
 // ═══════════════════════════════════════════════════════
 document.addEventListener('keydown', (e) => {
-  // SPACEBAR: pull selected nodes together, or unlock if none selected
+  // SPACEBAR: gather neighbors, pull selected, or unlock
   if (e.code === 'Space') {
     e.preventDefault();
-    if (selectedNodes.size >= 2 && !e.repeat) {
-      startSpacePull();
-    } else if (lockedNodes.size > 0 && !e.repeat) {
-      unlockNodes();
+    if (!e.repeat) {
+      if (forcePressDragNode && e.shiftKey && selectedNodes.size >= 2) {
+        // Click node + Shift+Space: pull selected nodes toward clicked node
+        startSpacePull(forcePressDragNode);
+      } else if (forcePressDragNode) {
+        // Click node + Space: pull neighbors (except selected) toward clicked node
+        startNeighborGather(forcePressDragNode);
+      } else if (selectedNodes.size >= 2) {
+        startSpacePull(null);
+      } else if (lockedNodes.size > 0) {
+        unlockNodes();
+      }
     }
     return;
   }
@@ -2533,8 +2640,9 @@ document.addEventListener('keyup', (e) => {
     zKeyDown = false;
     if (zKeyHeld) stopZTimeTravel();
   }
-  if (e.code === 'Space' && spacePullHeld) {
-    stopSpacePull();
+  if (e.code === 'Space') {
+    if (spacePullHeld) stopSpacePull();
+    if (neighborGatherHeld) stopNeighborGather();
   }
 });
 

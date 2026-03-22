@@ -44,8 +44,9 @@ Z is the temporal opposite of X: X rewinds node positions toward the original la
 
 ## Gather
 
-- **Hold Space** (with 2+ selected nodes) — *Gather*: pull selected nodes toward their centroid
-- **Click node + Hold Space** (with 2+ selected nodes) - *Gather*: pull selected nodes towards clicked node
+- **Hold Space** (with 2+ selected nodes) — *Quick Gather*: pull selected nodes toward their centroid
+- **Click node + Hold space** - *Stranger Gather*: pull neighbors (except selected nodes) towards clicked node
+- **Click node + Shift + Hold Space** (with 2+ selected nodes) - *Group Gather*: pull selected nodes towards clicked node
 - **Shift+Drag** — *Group Move*: drag all selected nodes together (see Drag section)
 - Locked nodes are not affected by gather/group move
 
@@ -66,7 +67,9 @@ Z is the temporal opposite of X: X rewinds node positions toward the original la
 | **Hold X** | Rewind to T0 |
 | **Shift+X + Click** | Dismiss node to T0 |
 | **Hold Z** | Time-travel backwards through history |
-| **Hold Space** | Gather selected nodes |
+| **Hold Space** | Gather selected nodes (to centroid) |
+| **Click node + Space** | Gather neighbors (not selected) toward node |
+| **Click node + Shift+Space** | Gather selected nodes toward node |
 | **Space** (nothing selected) | Unlock all |
 | **Alt+Arrow** | Step through time points |
 | **Escape** | Close panel / clear selection |
