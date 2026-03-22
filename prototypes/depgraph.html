@@ -241,6 +241,9 @@ let zKeyDown = false;
 let zKeyRAF = null;
 let zTravelStartIndex = -1; // arrangement index when Z was pressed
 
+// Group move (shift+drag) — disables all gather while active
+let groupMoveActive = false;
+
 // Space-pull (pull selected nodes together)
 let spacePullRAF = null;
 let spacePullHeld = false;
@@ -1518,7 +1521,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
           if (shiftAttractorTimer) clearTimeout(shiftAttractorTimer);
           shiftAttractorTimer = setTimeout(() => {
             shiftAttractorTimer = null;
-            if (d._isDragging && !attractorNode) {
+            if (d._isDragging && !attractorNode && !groupMoveActive) {
               startAttractor(d);
             }
           }, 550);
@@ -1528,6 +1531,12 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
         if (xKeyRAF) return; // X step animation controls position
         if (e.sourceEvent && e.sourceEvent.shiftKey && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
           // Shift+drag selected node: move all selected nodes together
+          if (!groupMoveActive) {
+            groupMoveActive = true;
+            // Cancel attractor timer — group move takes priority
+            if (shiftAttractorTimer) { clearTimeout(shiftAttractorTimer); shiftAttractorTimer = null; }
+            if (attractorNode) lockAttractor();
+          }
           const dx = e.x - d.x, dy = e.y - d.y;
           for (const n of currentNodes) {
             if (!selectedNodes.has(n.id)) continue;
@@ -1544,6 +1553,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
       .on('end', (e, d) => {
         d._isDragging = false;
         forcePressDragNode = null;
+        groupMoveActive = false;
         if (shiftAttractorTimer) { clearTimeout(shiftAttractorTimer); shiftAttractorTimer = null; }
         if (xKeyHeld) stopXForces(); // release during X relaxation — stop and keep position
         const dx = d.x - d._dragStart.x, dy = d.y - d._dragStart.y;
@@ -2399,7 +2409,7 @@ function dismissNodeToT0(d) {
 // STRANGER-GATHER (pull neighbors, except selected, toward a clicked node)
 // ═══════════════════════════════════════════════════════
 function startNeighborGather(anchorNode) {
-  if (neighborGatherRAF || !currentGraph) return;
+  if (neighborGatherRAF || !currentGraph || groupMoveActive) return;
   neighborGatherHeld = true;
   const adj = currentGraph.adjacency;
   const neighborIds = adj.get(anchorNode.id);
@@ -2487,7 +2497,7 @@ function stopNeighborGather() {
 // ═══════════════════════════════════════════════════════
 let spacePullIsGroupGather = false;
 function startSpacePull(targetNode) {
-  if (spacePullRAF || selectedNodes.size < 2) return;
+  if (spacePullRAF || selectedNodes.size < 2 || groupMoveActive) return;
   spacePullHeld = true;
   spacePullIsGroupGather = !!targetNode;
   let lastFrameTime = performance.now();
