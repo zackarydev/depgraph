@@ -101,6 +101,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 .cluster-label { font-size: 11px; font-weight: 600; fill-opacity: 0.6; pointer-events: none; text-anchor: middle; dominant-baseline: central; }
 .node circle.focus-glow { filter: drop-shadow(0 0 6px currentColor); }
 .node circle.attractor-glow { filter: drop-shadow(0 0 8px #fff) drop-shadow(0 0 20px currentColor); stroke-width: 3; }
+.node circle.selected-glow { filter: drop-shadow(0 0 6px #ff0) drop-shadow(0 0 12px #ff0); stroke: #ff0 !important; stroke-width: 2.5; }
 </style>
 </head>
 <body>
@@ -126,6 +127,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
   <div class="sep"></div>
   <label><input type="checkbox" id="show-labels" checked> Labels</label>
   <label><input type="checkbox" id="show-hulls" checked> Clusters</label>
+  <label><input type="checkbox" id="show-edges"> Edges</label>
   <label><input type="checkbox" id="live-reload" checked> Live</label>
   <label><input type="range" id="min-shared" min="1" max="15" value="3" style="width:80px"> Min shared: <span id="min-shared-val">3</span></label>
   <div class="sep"></div>
@@ -145,9 +147,11 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 </div>
 
 <div id="arr-nav">
+  <button id="arr-first" disabled>T0</button>
   <button id="arr-back" disabled>&larr;</button>
   <span class="arr-label" id="arr-label">1 / 1</span>
   <button id="arr-fwd" disabled>&rarr;</button>
+  <button id="arr-last" disabled>Last</button>
 </div>
 
 <div id="comparison-badge">COMPARISON MODE — click or navigate to exit</div>
@@ -188,6 +192,7 @@ let currentK = 0.8;
 let currentGraph = null;
 let currentClusterNames = new Map();
 let currentNodes = null;
+let initialLayoutPositions = new Map(); // immutable T0 positions from layout
 let currentLinks = null;
 let currentHullClusterIds = null;
 
@@ -198,9 +203,25 @@ let attractorRAF = null;
 let attractorHoldStrength = 0;
 let attractorLocked = false;
 let lastAttractorDuration = 0;
+let forcePressDragNode = null; // node being dragged when force press activates
+let hasForceTouch = false; // webkit force events detected (Safari)
+let hasPressure = false; // pointer events pressure detected (Chrome)
+let pressureActive = false; // currently above pressure threshold
+const PRESSURE_THRESHOLD = 0.75; // above default 0.5 that mice report
+let shiftAttractorTimer = null; // fallback shift-hold delay for non-Force Touch/pressure
 
 // Animation
 let animationRAF = null;
+
+// Multi-select
+let selectedNodes = new Set();
+
+// Click-pull animation
+let clickPullRAF = null;
+
+// X-key spread forces
+let xKeyHeld = false;
+let xKeyRAF = null;
 
 // SVG layers
 let svg, gLinks, gNodes, gHulls, gLabels, gClusterLabels;
@@ -413,9 +434,25 @@ function updateArrNav() {
   const total = spatialMemory.arrangements.length;
   if (total <= 1) { nav.classList.remove('visible'); return; }
   nav.classList.add('visible');
+  document.getElementById('arr-first').disabled = arrangementIndex <= 0;
   document.getElementById('arr-back').disabled = arrangementIndex <= 0;
   document.getElementById('arr-fwd').disabled = arrangementIndex >= total - 1;
+  document.getElementById('arr-last').disabled = arrangementIndex >= total - 1;
   document.getElementById('arr-label').textContent = `${arrangementIndex + 1} / ${total}`;
+}
+
+function navigateToArrangement(targetIdx) {
+  if (targetIdx < 0 || targetIdx >= spatialMemory.arrangements.length) return;
+  if (targetIdx === arrangementIndex) return;
+  if (comparisonMode) exitComparisonMode();
+  arrangementIndex = targetIdx;
+  const arr = spatialMemory.arrangements[arrangementIndex];
+  const targetPositions = new Map();
+  for (const [id, pos] of Object.entries(arr.positions)) {
+    targetPositions.set(id, { x: pos[0], y: pos[1] });
+  }
+  animateToPositions(targetPositions, 300);
+  updateArrNav();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1378,6 +1415,12 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     if (n.x != null) savedPositions.set(n.id, { x: n.x, y: n.y });
   }
 
+  // Snapshot immutable T0 layout positions (for X-key relaxation)
+  initialLayoutPositions = new Map();
+  for (const n of nodes) {
+    if (n.x != null) initialLayoutPositions.set(n.id, { x: n.x, y: n.y });
+  }
+
   // Store references
   currentNodes = nodes;
   currentLinks = links;
@@ -1393,7 +1436,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
   // Density-adaptive edge styling helpers
   function baseEdgeOpacity(l) {
     const maxDeg = Math.max(nodeDegree.get(l.source) || 1, nodeDegree.get(l.target) || 1);
-    return Math.max(0.08, 0.4 / Math.sqrt(maxDeg));
+    return Math.max(0.03, 0.15 / Math.sqrt(maxDeg));
   }
   function baseEdgeWidth(l) {
     const maxDeg = Math.max(nodeDegree.get(l.source) || 1, nodeDegree.get(l.target) || 1);
@@ -1411,6 +1454,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .attr('stroke-width', d => baseEdgeWidth(d))
     .attr('stroke-opacity', d => baseEdgeOpacity(d))
     .attr('stroke-dasharray', d => d.type === 'uses' ? '3,3' : null)
+    .style('display', document.getElementById('show-edges').checked ? null : 'none')
     .attr('x1', d => nodeMap.get(d.source)?.x || 0)
     .attr('y1', d => nodeMap.get(d.source)?.y || 0)
     .attr('x2', d => nodeMap.get(d.target)?.x || 0)
@@ -1425,13 +1469,28 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .call(d3.drag()
       .on('start', (e, d) => {
         d._dragStart = { x: d.x, y: d.y };
-        startAttractor(d);
+        d._dragStartTime = Date.now();
+        d._isDragging = true;
+        forcePressDragNode = d;
+        // Shift-hold fallback for non-pressure devices: start attractor after 550ms delay
+        if (!hasForceTouch && !hasPressure && e.sourceEvent && e.sourceEvent.shiftKey) {
+          if (shiftAttractorTimer) clearTimeout(shiftAttractorTimer);
+          shiftAttractorTimer = setTimeout(() => {
+            shiftAttractorTimer = null;
+            if (d._isDragging && !attractorNode && !attractorLocked) {
+              startAttractor(d);
+            }
+          }, 550);
+        }
       })
       .on('drag', (e, d) => {
         d.x = e.x; d.y = e.y;
         renderPositions();
       })
       .on('end', (e, d) => {
+        d._isDragging = false;
+        forcePressDragNode = null;
+        if (shiftAttractorTimer) { clearTimeout(shiftAttractorTimer); shiftAttractorTimer = null; }
         const dx = d.x - d._dragStart.x, dy = d.y - d._dragStart.y;
         const moved = Math.sqrt(dx * dx + dy * dy) > 5;
         if (moved) {
@@ -1440,7 +1499,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
           trackDragProximity(d.id);
           pushArrangement('drag', [d.id]);
         }
-        lockAttractor();
+        if (attractorNode) lockAttractor();
       })
     );
 
@@ -1450,13 +1509,62 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .attr('stroke', d => d.type === 'global' ? '#666' : d3.color(d.color).brighter(0.8))
     .on('click', (e, d) => {
       e.stopPropagation();
-      if (lastAttractorDuration < 300 && !attractorLocked) {
+      const dragDuration = d._dragStartTime ? Date.now() - d._dragStartTime : 0;
+      d._dragStartTime = null;
+      if (dragDuration < 300 && !attractorLocked) {
+        if (e.shiftKey) {
+          // Shift-click: toggle multi-select
+          if (selectedNodes.has(d.id)) {
+            selectedNodes.delete(d.id);
+            d3.select(e.target).classed('selected-glow', false);
+          } else {
+            selectedNodes.add(d.id);
+            d3.select(e.target).classed('selected-glow', true);
+          }
+          return;
+        }
         selectNode(d, analysis);
         trackClickCoOccurrence(d.id);
+        clickPull(d);
       }
     })
     .on('mouseenter', (e, d) => { if (!attractorNode && !attractorLocked) highlightNeighbors(d, graph); })
-    .on('mouseleave', () => { if (!attractorNode && !attractorLocked) clearHighlight(); });
+    .on('mouseleave', () => { if (!attractorNode && !attractorLocked) clearHighlight(); })
+    .each(function(d) {
+      // Force Touch events for attractor (Safari)
+      this.addEventListener('webkitmouseforcewillbegin', (e) => {
+        e.preventDefault();
+        hasForceTouch = true;
+      });
+      this.addEventListener('webkitmouseforcedown', (e) => {
+        if (!attractorNode && !attractorLocked) startAttractor(d);
+      });
+      this.addEventListener('webkitmouseforceup', (e) => {
+        if (attractorNode) lockAttractor();
+      });
+      // Pointer Events pressure fallback (Chrome/Firefox)
+      this.addEventListener('pointerdown', (e) => {
+        pressureActive = false;
+      });
+      this.addEventListener('pointermove', (e) => {
+        if (hasForceTouch) return; // webkit events take priority
+        if (e.pressure > 0 && e.pressure !== 0.5) hasPressure = true;
+        if (!hasPressure) return;
+        if (e.pressure >= PRESSURE_THRESHOLD && !pressureActive) {
+          pressureActive = true;
+          if (!attractorNode && !attractorLocked) startAttractor(d);
+        } else if (e.pressure < PRESSURE_THRESHOLD && pressureActive) {
+          pressureActive = false;
+          if (attractorNode) lockAttractor();
+        }
+      });
+      this.addEventListener('pointerup', () => {
+        if (pressureActive) {
+          pressureActive = false;
+          if (attractorNode) lockAttractor();
+        }
+      });
+    });
 
   // Secondary affinity rings
   node.filter(d => {
@@ -1613,20 +1721,6 @@ function highlightNeighbors(d, graph) {
 
   gNodes.selectAll('.node').style('opacity', n => nodeOpacity(distances.has(n.id) ? distances.get(n.id) : 99));
 
-  gLinks.selectAll('.link')
-    .attr('stroke-opacity', l => {
-      const sd = distances.has(l.source) ? distances.get(l.source) : 99;
-      const td = distances.has(l.target) ? distances.get(l.target) : 99;
-      const maxD = Math.max(sd, td);
-      return maxD === 0 ? 0.8 : maxD === 1 ? 0.6 : maxD === 2 ? 0.15 : 0.02;
-    })
-    .attr('stroke-width', l => {
-      const sd = distances.has(l.source) ? distances.get(l.source) : 99;
-      const td = distances.has(l.target) ? distances.get(l.target) : 99;
-      const maxD = Math.max(sd, td);
-      return maxD <= 1 ? Math.min(3, 1 + (l.weight || 1) * 0.4) : Math.min(2, 0.3 + (l.weight || 1) * 0.15);
-    });
-
   gLabels.selectAll('text').attr('opacity', d => {
     const dist = distances.has(d.id) ? distances.get(d.id) : 99;
     return dist <= 1 ? 1 : dist <= 2 ? 0.3 : 0.05;
@@ -1635,20 +1729,6 @@ function highlightNeighbors(d, graph) {
 
 function clearHighlight() {
   gNodes.selectAll('.node').style('opacity', 1);
-  const nodeDeg = currentGraph?.nodeDegree;
-  if (!nodeDeg) return;
-
-  gLinks.selectAll('.link')
-    .attr('stroke-opacity', l => {
-      const maxDeg = Math.max(nodeDeg.get(l.source) || 1, nodeDeg.get(l.target) || 1);
-      return Math.max(0.08, 0.4 / Math.sqrt(maxDeg));
-    })
-    .attr('stroke-width', l => {
-      const maxDeg = Math.max(nodeDeg.get(l.source) || 1, nodeDeg.get(l.target) || 1);
-      const w = 0.5 + (l.weight || 1) * 0.3;
-      return Math.min(3, w / Math.max(1, Math.sqrt(maxDeg) * 0.4));
-    });
-
   applySemanticZoom();
 }
 
@@ -1667,10 +1747,39 @@ function affinityBarsHTML(d, clusterNames) {
   return `<div class="section"><div class="section-title">Affinities</div>${bars}</div>`;
 }
 
+function applyContextualEdgeWeights(focusId) {
+  if (!currentGraph || !currentNodes) return;
+  const adj = currentGraph.adjacency;
+  const distances = bfsDistances(focusId, adj, 3);
+
+  gLinks.selectAll('.link')
+    .transition().duration(300)
+    .attr('stroke-opacity', l => {
+      const sd = distances.get(l.source) ?? 99;
+      const td = distances.get(l.target) ?? 99;
+      const minD = Math.min(sd, td);
+      const maxD = Math.max(sd, td);
+      if (maxD <= 1) return 0.8;
+      if (maxD <= 2) return 0.35;
+      if (minD <= 2) return 0.12;
+      return 0.03;
+    })
+    .attr('stroke-width', l => {
+      const sd = distances.get(l.source) ?? 99;
+      const td = distances.get(l.target) ?? 99;
+      const maxD = Math.max(sd, td);
+      const w = (l.weight || 1);
+      if (maxD <= 1) return Math.min(4, 1.5 + w * 0.5);
+      if (maxD <= 2) return Math.min(3, 0.8 + w * 0.3);
+      return Math.min(2, 0.3 + w * 0.15);
+    });
+}
+
 function selectNode(d, analysis) {
   selectedNode = d;
   const panel = document.getElementById('info-panel');
   panel.classList.add('open');
+  applyContextualEdgeWeights(d.id);
   document.getElementById('info-name').textContent = d.id;
   const clusterNames = currentClusterNames;
   const affinitySection = affinityBarsHTML(d, clusterNames);
@@ -1819,6 +1928,91 @@ function attractorLoop() {
   attractorRAF = requestAnimationFrame(attractorLoop);
 }
 
+// ═══════════════════════════════════════════════════════
+// CLICK-PULL: pull connected nodes toward clicked node
+// ═══════════════════════════════════════════════════════
+function clickPull(d) {
+  if (!currentGraph || !currentNodes) return;
+  if (clickPullRAF) cancelAnimationFrame(clickPullRAF);
+
+  const adj = currentGraph.adjacency;
+  const edgeWeights = currentGraph.edgeWeights;
+  const distances = bfsDistances(d.id, adj, 2);
+  const startTime = performance.now();
+  const duration = 500;
+
+  // Snapshot start positions for connected nodes
+  const startPos = new Map();
+  for (const n of currentNodes) {
+    if (n.id !== d.id && distances.has(n.id)) {
+      startPos.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+
+  function step(now) {
+    const t = Math.min(1, (now - startTime) / duration);
+    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+    for (const [id, from] of startPos) {
+      const n = currentGraph.nodeMap.get(id);
+      if (!n) continue;
+      const graphDist = distances.get(id);
+
+      // Compute target: pull toward d, with distance based on hop count and importance
+      const importanceSep = (n.radius || 4) + (d.radius || 4) + 8;
+      const edgeKey = d.id + '\0' + id;
+      const ew = edgeWeights.get(edgeKey) || edgeWeights.get(id + '\0' + d.id) || 1;
+      let targetDist;
+      if (graphDist === 1) {
+        targetDist = importanceSep + 15 / Math.min(3, ew);
+      } else {
+        targetDist = importanceSep + 60;
+      }
+
+      const dx = d.x - from.x, dy = d.y - from.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      if (dist <= targetDist) continue; // already close enough
+
+      const pullAmount = (dist - targetDist) * (graphDist === 1 ? 0.6 : 0.25);
+      const tx = from.x + (dx / dist) * pullAmount;
+      const ty = from.y + (dy / dist) * pullAmount;
+
+      n.x = from.x + (tx - from.x) * ease;
+      n.y = from.y + (ty - from.y) * ease;
+    }
+
+    // Collision resolution among pulled nodes
+    const pulled = [...startPos.keys()].map(id => currentGraph.nodeMap.get(id)).filter(Boolean);
+    for (let i = 0; i < pulled.length; i++) {
+      for (let j = i + 1; j < pulled.length; j++) {
+        const a = pulled[i], b = pulled[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = a.radius + b.radius + 6;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.3;
+          a.x -= (dx / dist) * push;
+          a.y -= (dy / dist) * push;
+          b.x += (dx / dist) * push;
+          b.y += (dy / dist) * push;
+        }
+      }
+    }
+
+    renderPositions();
+    if (t < 1) {
+      clickPullRAF = requestAnimationFrame(step);
+    } else {
+      clickPullRAF = null;
+      for (const n of currentNodes) {
+        savedPositions.set(n.id, { x: n.x, y: n.y });
+      }
+      pushArrangement('click-pull', [d.id]);
+    }
+  }
+  clickPullRAF = requestAnimationFrame(step);
+}
+
 function lockAttractor() {
   lastAttractorDuration = Date.now() - attractorStartTime;
   if (attractorRAF) { cancelAnimationFrame(attractorRAF); attractorRAF = null; }
@@ -1836,6 +2030,9 @@ function lockAttractor() {
     }
   }
   pushArrangement('attractor', attractorNode ? [attractorNode.id] : []);
+  gNodes.selectAll('circle').classed('attractor-glow', false);
+  attractorNode = null;
+  attractorHoldStrength = 0;
 }
 
 function releaseAttractor() {
@@ -1844,6 +2041,83 @@ function releaseAttractor() {
   attractorNode = null;
   attractorHoldStrength = 0;
   attractorLocked = false;
+}
+
+// ═══════════════════════════════════════════════════════
+// X-KEY EDGE RELAXATION
+// ═══════════════════════════════════════════════════════
+let xRelaxFactor = 0; // 0 = current positions, 1 = fully back to T0
+let xT0Positions = null; // snapshot: where nodes were at X-press (to lerp back toward)
+let xStartPositions = null; // snapshot: where nodes are now (lerp from)
+
+function startXForces() {
+  if (xKeyRAF) return;
+  xKeyHeld = true;
+  const xStartTime = performance.now();
+
+  const targetIds = selectedNodes.size > 0 ? selectedNodes : null;
+
+  // Snapshot current positions (start) and saved/layout positions (T0)
+  xStartPositions = new Map();
+  xT0Positions = new Map();
+  for (const n of currentNodes) {
+    if (targetIds && !targetIds.has(n.id)) continue;
+    xStartPositions.set(n.id, { x: n.x, y: n.y });
+    const t0 = initialLayoutPositions.get(n.id);
+    xT0Positions.set(n.id, t0 ? { x: t0.x, y: t0.y } : { x: n.x, y: n.y });
+  }
+
+  function xLoop() {
+    if (!xKeyHeld || !currentNodes || !currentGraph) return;
+
+    const now = performance.now();
+    const elapsed = now - xStartTime;
+    // Ramp relaxation from 0 to 1 over 3 seconds
+    xRelaxFactor = Math.min(1, elapsed / 3000);
+
+    // Lerp nodes from start positions back toward T0
+    for (const n of currentNodes) {
+      const start = xStartPositions.get(n.id);
+      const t0 = xT0Positions.get(n.id);
+      if (!start || !t0) continue;
+      n.x = start.x + (t0.x - start.x) * xRelaxFactor;
+      n.y = start.y + (t0.y - start.y) * xRelaxFactor;
+    }
+
+    // Fade edges visually as they relax
+    gLinks.selectAll('.link')
+      .attr('stroke-opacity', d => {
+        if (targetIds && !targetIds.has(d.source) && !targetIds.has(d.target)) return null;
+        const w = d.weight || 1;
+        return Math.max(0.02, (1 - xRelaxFactor * 0.8) * w * 0.3);
+      });
+
+    renderPositions();
+    xKeyRAF = requestAnimationFrame(xLoop);
+  }
+  xKeyRAF = requestAnimationFrame(xLoop);
+}
+
+function stopXForces() {
+  xKeyHeld = false;
+  if (xKeyRAF) { cancelAnimationFrame(xKeyRAF); xKeyRAF = null; }
+  xRelaxFactor = 0;
+  xStartPositions = null;
+  xT0Positions = null;
+
+  // Restore edge opacity
+  gLinks.selectAll('.link').attr('stroke-opacity', null);
+
+  // Fix affected nodes in place
+  const affected = selectedNodes.size > 0 ? selectedNodes : new Set(currentNodes?.map(n => n.id) || []);
+  for (const id of affected) {
+    const n = currentGraph?.nodeMap.get(id);
+    if (n) {
+      stickyNodes.add(n.id);
+      savedPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+  pushArrangement('x-relax', [...affected].slice(0, 5));
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1857,10 +2131,10 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  // X: re-run layout (smooth transition)
-  if (e.code === 'KeyX' && !attractorLocked && !attractorNode && currentNodes) {
+  // X: hold to apply spread + cohesion forces (on selected nodes, or all if none selected)
+  if (e.code === 'KeyX' && !e.repeat && !attractorLocked && !attractorNode && currentNodes) {
     e.preventDefault();
-    reLayout();
+    startXForces();
     return;
   }
 
@@ -1876,12 +2150,62 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Escape: close info panel or exit comparison mode
+  // Escape: close info panel, exit comparison mode, or clear selection
   if (e.code === 'Escape') {
     if (comparisonMode) { exitComparisonMode(); return; }
+    if (selectedNodes.size > 0) {
+      selectedNodes.clear();
+      gNodes.selectAll('circle').classed('selected-glow', false);
+      return;
+    }
     document.getElementById('info-panel').classList.remove('open');
     selectedNode = null;
   }
+});
+
+document.addEventListener('keyup', (e) => {
+  if (e.code === 'KeyX' && xKeyHeld) {
+    stopXForces();
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// FORCE TOUCH / PRESSURE (document-level for drag+force-press)
+// ═══════════════════════════════════════════════════════
+// Webkit Force Touch (Safari)
+document.addEventListener('webkitmouseforcewillbegin', (e) => {
+  if (forcePressDragNode) e.preventDefault();
+  hasForceTouch = true;
+});
+document.addEventListener('webkitmouseforcedown', (e) => {
+  if (forcePressDragNode && !attractorNode && !attractorLocked) {
+    startAttractor(forcePressDragNode);
+  }
+});
+document.addEventListener('webkitmouseforceup', (e) => {
+  if (attractorNode && !attractorLocked) lockAttractor();
+});
+// Pointer Events pressure fallback (Chrome/Firefox) — for drag+force-press
+document.addEventListener('pointermove', (e) => {
+  if (hasForceTouch || !forcePressDragNode) return;
+  if (e.pressure > 0 && e.pressure !== 0.5) hasPressure = true;
+  if (!hasPressure) return;
+  if (e.pressure >= PRESSURE_THRESHOLD && !pressureActive) {
+    pressureActive = true;
+    if (!attractorNode && !attractorLocked) startAttractor(forcePressDragNode);
+  } else if (e.pressure < PRESSURE_THRESHOLD && pressureActive) {
+    pressureActive = false;
+    if (attractorNode && !attractorLocked) lockAttractor();
+  }
+});
+// Full release cleanup
+document.addEventListener('mouseup', () => {
+  pressureActive = false;
+  if (attractorNode && !attractorLocked) lockAttractor();
+});
+document.addEventListener('pointerup', () => {
+  pressureActive = false;
+  if (attractorNode && !attractorLocked) lockAttractor();
 });
 
 // ═══════════════════════════════════════════════════════
@@ -1970,6 +2294,10 @@ document.getElementById('min-shared').addEventListener('input', e => {
   rebuild();
 });
 document.getElementById('show-labels').addEventListener('change', () => applySemanticZoom());
+document.getElementById('show-edges').addEventListener('change', () => {
+  const show = document.getElementById('show-edges').checked;
+  gLinks.selectAll('.link').style('display', show ? null : 'none');
+});
 document.getElementById('show-hulls').addEventListener('change', () => {
   const showHulls = document.getElementById('show-hulls').checked;
   if (showHulls && currentNodes) {
@@ -1991,8 +2319,10 @@ document.getElementById('graph').addEventListener('click', e => {
 });
 
 // Arrangement nav buttons
+document.getElementById('arr-first').addEventListener('click', () => navigateToArrangement(0));
 document.getElementById('arr-back').addEventListener('click', () => navigateArrangement(-1));
 document.getElementById('arr-fwd').addEventListener('click', () => navigateArrangement(1));
+document.getElementById('arr-last').addEventListener('click', () => navigateToArrangement(spatialMemory.arrangements.length - 1));
 
 // ═══════════════════════════════════════════════════════
 // FOCUS SSE
