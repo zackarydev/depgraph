@@ -1489,8 +1489,8 @@ function applySemanticZoom() {
   const showClusterLabels = document.getElementById('show-cluster-labels').checked;
   const floatingLabelOpacity = !showClusterLabels ? 0
     : k < 0.7 ? 0.4 : k < 2.5 ? 0.7 : Math.max(0.2, 0.7 - (k - 2.5) * 0.7);
-  // Font shrinks in SVG units faster than 1/k so labels get smaller on screen when zoomed in
-  const clusterFontSize = Math.max(1, 13 / Math.pow(k, 0.75));
+  // Font stays constant on screen up to k=2, then shrinks very gently
+  const clusterFontSize = k <= 2 ? 13 / k : 13 / (2 * Math.pow(k / 2, 0.75));
   gClusterLabels.selectAll('text').each(function() {
     d3.select(this).attr('font-size', clusterFontSize).attr('opacity', floatingLabelOpacity);
   });
@@ -2074,7 +2074,7 @@ function estimateLabelBBox(text, fontSize) {
 function computeClusterLabelPlacement() {
   if (!currentNodes || currentNodes.length === 0) return;
 
-  const fontSize = Math.max(2, 13 / Math.pow(currentK, 1.4));
+  const fontSize = (currentK <= 2 ? 13 / currentK : 13 / (2 * Math.pow(currentK / 2, 0.75)));
   const nudgeStrength = 0.15; // how far to nudge per tick (fraction of force)
 
   // Collect labels and their current positions
@@ -2091,7 +2091,7 @@ function computeClusterLabelPlacement() {
     // Get or seed current placement
     if (!clusterLabelPlacement.has(d.cid)) {
       const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
-      const gap = Math.max(2, 12 / Math.pow(currentK, 1.2))
+      const gap = (currentK <= 2 ? 12 / currentK : 12 / (2 * Math.pow(currentK / 2, 0.75)));
       clusterLabelPlacement.set(d.cid, { dx: 0, dy: (minY - gap) - mcy, angle: 0 });
     }
     const p = clusterLabelPlacement.get(d.cid);
@@ -2140,7 +2140,7 @@ function computeClusterLabelPlacement() {
 
     // Gentle pull toward "above cluster" default position
     const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
-    const gap = Math.max(0.5, 12 / (currentK * currentK));
+    const gap = (currentK <= 2 ? 12 / currentK : 12 / (2 * Math.pow(currentK / 2, 0.75)));
     const defaultDy = (minY - gap) - mcy;
     fy += (defaultDy - p.dy) * 0.05;
     fx += (0 - p.dx) * 0.05; // prefer centered horizontally
@@ -2177,7 +2177,7 @@ function applyClusterLabelPlacements() {
     } else {
       // No placement yet — fallback above cluster
       const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
-      const gap = Math.max(0.5, 12 / (currentK * currentK));
+      const gap = (currentK <= 2 ? 12 / currentK : 12 / (2 * Math.pow(currentK / 2, 0.75)));
       d3.select(this)
         .attr('transform', null)
         .attr('x', cx).attr('y', minY - gap);
