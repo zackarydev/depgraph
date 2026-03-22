@@ -256,6 +256,11 @@ let neighborGatherHeld = false;
 // User-defined clusters (parsed from codemap <!-- user-cluster --> sections)
 let userClusterSections = []; // [{name, nodeIds: [...]}] — derived from codemap
 
+// Cluster label placement caches
+let clusterMemberCache = new Map(); // cid -> Node[]
+let clusterLabelPlacement = new Map(); // cid -> { dx, dy, angle }
+let labelPlacementTimer = null;
+
 async function createUserCluster(nodeIds) {
   const existingClusters = currentClusterNames ? [...currentClusterNames.values()] : [];
 
@@ -1791,7 +1796,8 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .attr('fill', d => d.color)
     .text(d => d.name)
     .call(clusterLabelDrag(d => currentNodes.filter(n => n.cluster === d.cid)));
-  renderClusterLabels();
+  rebuildClusterMemberCache();
+  computeClusterLabelPlacement();
 
   // Stats
   const clusterCount = new Set([...clusters.values()]).size;
@@ -1972,18 +1978,268 @@ function clusterLabelDrag(getMembersFn) {
     });
 }
 
-function renderClusterLabels() {
+function rebuildClusterMemberCache() {
+  clusterMemberCache.clear();
   if (!currentNodes) return;
+  for (const n of currentNodes) {
+    if (n.cid != null || n.cluster != null) {
+      const cid = n.cluster;
+      if (!clusterMemberCache.has(cid)) clusterMemberCache.set(cid, []);
+      clusterMemberCache.get(cid).push(n);
+    }
+  }
+}
+
+function estimateLabelBBox(text, fontSize) {
+  const w = text.length * fontSize * 0.62;
+  const h = fontSize * 1.3;
+  return { w, h };
+}
+
+function rotatedCorners(cx, cy, w, h, angleDeg) {
+  const a = angleDeg * Math.PI / 180;
+  const cos = Math.cos(a), sin = Math.sin(a);
+  const hw = w / 2, hh = h / 2;
+  return [
+    [cx + (-hw * cos - -hh * sin), cy + (-hw * sin + -hh * cos)],
+    [cx + ( hw * cos - -hh * sin), cy + ( hw * sin + -hh * cos)],
+    [cx + ( hw * cos -  hh * sin), cy + ( hw * sin +  hh * cos)],
+    [cx + (-hw * cos -  hh * sin), cy + (-hw * sin +  hh * cos)],
+  ];
+}
+
+function rectCircleOverlap(cx, cy, w, h, angleDeg, nx, ny, nr) {
+  // Transform node center into label's rotated coordinate frame
+  const a = -angleDeg * Math.PI / 180;
+  const cos = Math.cos(a), sin = Math.sin(a);
+  const dx = nx - cx, dy = ny - cy;
+  const lx = dx * cos - dy * sin;
+  const ly = dx * sin + dy * cos;
+  // Closest point on rect to circle center
+  const hw = w / 2, hh = h / 2;
+  const closestX = Math.max(-hw, Math.min(hw, lx));
+  const closestY = Math.max(-hh, Math.min(hh, ly));
+  const distSq = (lx - closestX) ** 2 + (ly - closestY) ** 2;
+  return distSq < nr * nr;
+}
+
+function rectRectOverlap(ax, ay, aw, ah, aAngle, bx, by, bw, bh, bAngle) {
+  // Quick center-distance check first
+  const dx = ax - bx, dy = ay - by;
+  const maxDist = Math.hypot(aw, ah) / 2 + Math.hypot(bw, bh) / 2;
+  if (dx * dx + dy * dy > maxDist * maxDist) return false;
+  // SAT with rotated rects
+  const cornersA = rotatedCorners(ax, ay, aw, ah, aAngle);
+  const cornersB = rotatedCorners(bx, by, bw, bh, bAngle);
+  function getAxes(corners) {
+    const axes = [];
+    for (let i = 0; i < corners.length; i++) {
+      const j = (i + 1) % corners.length;
+      const ex = corners[j][0] - corners[i][0], ey = corners[j][1] - corners[i][1];
+      axes.push([-ey, ex]);
+    }
+    return axes;
+  }
+  function project(corners, axis) {
+    let min = Infinity, max = -Infinity;
+    for (const c of corners) {
+      const p = c[0] * axis[0] + c[1] * axis[1];
+      if (p < min) min = p;
+      if (p > max) max = p;
+    }
+    return [min, max];
+  }
+  for (const axis of [...getAxes(cornersA), ...getAxes(cornersB)]) {
+    const [minA, maxA] = project(cornersA, axis);
+    const [minB, maxB] = project(cornersB, axis);
+    if (maxA < minB || maxB < minA) return false;
+  }
+  return true;
+}
+
+function computeClusterLabelPlacement() {
+  if (!currentNodes || currentNodes.length === 0) return;
+
+  const fontSize = Math.max(8, Math.min(18, 13 / currentK));
+  const placedLabels = []; // { cx, cy, w, h, angle }
+
+  // Collect all labels sorted by cluster size (largest first for priority)
+  const labels = [];
   gClusterLabels.selectAll('text:not(.user-cluster-label)').each(function(d) {
     if (!d || d.cid == null) return;
-    const members = currentNodes.filter(n => n.cluster === d.cid && n.type === 'function');
-    if (!members.length) return;
+    const members = clusterMemberCache.get(d.cid);
+    if (!members || !members.length) return;
+    labels.push({ el: this, d, members });
+  });
+  labels.sort((a, b) => b.members.length - a.members.length);
+
+  for (const { el, d, members } of labels) {
+    const bbox = estimateLabelBBox(d.name, fontSize);
+
+    // Compute cluster centroid and hull
     let cx = 0, cy = 0;
     for (const m of members) { cx += m.x; cy += m.y; }
     cx /= members.length; cy /= members.length;
-    const minY = Math.min(...members.map(m => m.y - m.radius));
-    d3.select(this).attr('x', cx).attr('y', minY - 12);
+
+    let hull = null, expanded = null;
+    if (members.length >= 3) {
+      hull = d3.polygonHull(members.map(m => [m.x, m.y]));
+      if (hull) expanded = expandHull(hull, 20);
+    }
+
+    // Generate candidates
+    const candidates = [];
+    const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
+    const maxY = Math.max(...members.map(m => m.y + (m.radius || 4)));
+    const minX = Math.min(...members.map(m => m.x - (m.radius || 4)));
+    const maxX = Math.max(...members.map(m => m.x + (m.radius || 4)));
+
+    // Basic candidates at 0 degrees
+    candidates.push({ x: cx, y: minY - bbox.h, angle: 0 }); // top center
+    candidates.push({ x: cx, y: maxY + bbox.h, angle: 0 }); // bottom center
+    candidates.push({ x: minX - bbox.w * 0.6, y: cy, angle: 0 }); // left
+    candidates.push({ x: maxX + bbox.w * 0.6, y: cy, angle: 0 }); // right
+
+    // Hull edge midpoints with tangent-aligned angles
+    if (hull && hull.length >= 3) {
+      for (let i = 0; i < hull.length; i++) {
+        const j = (i + 1) % hull.length;
+        const mx = (hull[i][0] + hull[j][0]) / 2;
+        const my = (hull[i][1] + hull[j][1]) / 2;
+        const edgeDx = hull[j][0] - hull[i][0];
+        const edgeDy = hull[j][1] - hull[i][1];
+        const edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
+        if (edgeLen < bbox.w * 0.5) continue; // too short
+
+        let edgeAngle = Math.atan2(edgeDy, edgeDx) * 180 / Math.PI;
+        // Normalize to ±90 so text isn't upside down
+        if (edgeAngle > 90) edgeAngle -= 180;
+        if (edgeAngle < -90) edgeAngle += 180;
+        // Clamp to ±30 degrees
+        edgeAngle = Math.max(-30, Math.min(30, edgeAngle));
+
+        // Push outward from centroid
+        const outDx = mx - cx, outDy = my - cy;
+        const outDist = Math.sqrt(outDx * outDx + outDy * outDy) || 1;
+        const pushOut = bbox.h * 0.8;
+        const ox = mx + (outDx / outDist) * pushOut;
+        const oy = my + (outDy / outDist) * pushOut;
+        candidates.push({ x: ox, y: oy, angle: edgeAngle });
+      }
+    }
+
+    // Interior "dark spot" candidates — sample grid within bounding box
+    const stepX = (maxX - minX) / 4 || 20;
+    const stepY = (maxY - minY) / 4 || 20;
+    for (let gx = minX; gx <= maxX; gx += stepX) {
+      for (let gy = minY; gy <= maxY; gy += stepY) {
+        // Only include if inside hull (or if no hull, within bounding box)
+        if (hull && !d3.polygonContains(hull, [gx, gy])) continue;
+        candidates.push({ x: gx, y: gy, angle: 0 });
+      }
+    }
+
+    // Also try rotated variants of top/bottom
+    for (const angle of [-20, 20]) {
+      candidates.push({ x: cx, y: minY - bbox.h * 0.7, angle });
+      candidates.push({ x: cx, y: maxY + bbox.h * 0.7, angle });
+    }
+
+    // Score each candidate
+    let bestScore = Infinity, bestCand = candidates[0];
+
+    for (const cand of candidates) {
+      let score = 0;
+
+      // Node overlap penalty — check all nodes, not just cluster members
+      for (const n of currentNodes) {
+        const nr = (n.radius || 4) + 2;
+        if (rectCircleOverlap(cand.x, cand.y, bbox.w + 4, bbox.h + 4, cand.angle, n.x, n.y, nr)) {
+          score += 100;
+        } else {
+          // Proximity penalty (soft repulsion from nearby nodes)
+          const dist = Math.hypot(cand.x - n.x, cand.y - n.y);
+          if (dist < bbox.w) score += (bbox.w - dist) * 0.3;
+        }
+      }
+
+      // Already-placed label overlap penalty
+      for (const pl of placedLabels) {
+        if (rectRectOverlap(cand.x, cand.y, bbox.w + 6, bbox.h + 6, cand.angle,
+                            pl.cx, pl.cy, pl.w + 6, pl.h + 6, pl.angle)) {
+          score += 80;
+        }
+      }
+
+      // Distance from centroid (mild — prefer staying near cluster)
+      const distFromCenter = Math.hypot(cand.x - cx, cand.y - cy);
+      score += distFromCenter * 0.3;
+
+      // Outside own hull penalty
+      if (hull && !d3.polygonContains(expanded || hull, [cand.x, cand.y])) {
+        score += 15;
+      }
+
+      // Inside other cluster's hull penalty
+      for (const [otherCid, otherMembers] of clusterMemberCache) {
+        if (otherCid === d.cid || otherMembers.length < 3) continue;
+        const otherHull = d3.polygonHull(otherMembers.map(m => [m.x, m.y]));
+        if (otherHull && d3.polygonContains(otherHull, [cand.x, cand.y])) {
+          score += 200;
+        }
+      }
+
+      // Rotation penalty (slight preference for horizontal)
+      score += Math.abs(cand.angle) * 0.15;
+
+      if (score < bestScore) { bestScore = score; bestCand = cand; }
+    }
+
+    // Store placement as offset from centroid
+    clusterLabelPlacement.set(d.cid, {
+      dx: bestCand.x - cx,
+      dy: bestCand.y - cy,
+      angle: bestCand.angle,
+    });
+    placedLabels.push({ cx: bestCand.x, cy: bestCand.y, w: bbox.w, h: bbox.h, angle: bestCand.angle });
+  }
+
+  // Apply placements
+  applyClusterLabelPlacements();
+}
+
+function applyClusterLabelPlacements() {
+  gClusterLabels.selectAll('text:not(.user-cluster-label)').each(function(d) {
+    if (!d || d.cid == null) return;
+    const members = clusterMemberCache.get(d.cid);
+    if (!members || !members.length) return;
+    let cx = 0, cy = 0;
+    for (const m of members) { cx += m.x; cy += m.y; }
+    cx /= members.length; cy /= members.length;
+
+    const placement = clusterLabelPlacement.get(d.cid);
+    if (placement) {
+      const x = cx + placement.dx, y = cy + placement.dy;
+      d3.select(this)
+        .attr('x', null).attr('y', null)
+        .attr('transform', `translate(${x},${y}) rotate(${placement.angle})`);
+    } else {
+      // Fallback: above cluster
+      const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
+      d3.select(this)
+        .attr('transform', null)
+        .attr('x', cx).attr('y', minY - 12);
+    }
   });
+}
+
+function renderClusterLabels() {
+  if (!currentNodes) return;
+  rebuildClusterMemberCache();
+  applyClusterLabelPlacements();
+  // Debounce the full solver
+  if (labelPlacementTimer) clearTimeout(labelPlacementTimer);
+  labelPlacementTimer = setTimeout(computeClusterLabelPlacement, 200);
 }
 
 function renderPositions() {
