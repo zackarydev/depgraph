@@ -3,14 +3,15 @@
 // Usage: node tools/depgraph-server.mjs [port]
 
 import { createServer } from 'node:http';
-import { readFile, watch } from 'node:fs';
+import { readFile, writeFile, watch } from 'node:fs';
 import { join, extname, resolve } from 'node:path';
-import { execFile } from 'node:child_process';
+import { exec } from 'node:child_process';
 
 const PORT = parseInt(process.argv[2] || '3800', 10);
 const EQUINOX = resolve(import.meta.dirname, '../Equinox');
 const ROOT = resolve(import.meta.dirname, '.');
 const FOCUS_FILE = join(import.meta.dirname, '/runtime/depgraph-focus.json');
+const CODEMAP_FILE = join(import.meta.dirname, '/runtime/project_codemap.md');
 
 const MIME = {
   '.html': 'text/html',
@@ -67,43 +68,117 @@ const server = createServer((req, res) => {
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
-  // Cluster naming endpoint — spawns claude CLI to name a cluster
+  // Cluster creation — immediately writes unnamed section, then renames async via Claude
   if (url.pathname === '/cluster' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('end', () => {
       try {
         const { nodeIds, existingClusters, nodeDetails } = JSON.parse(body);
-        const prompt = [
-          'You are naming a user-defined cluster of functions in a dependency graph.',
-          'The user has selected these functions to group together:',
-          nodeIds.map(id => {
-            const d = nodeDetails[id];
-            if (!d) return `- ${id}`;
-            return `- ${id} (system: ${d.system}, reads: ${d.reads}, writes: ${d.writes}, calls: ${d.calls})`;
-          }).join('\n'),
-          '',
-          'Existing system clusters in this graph: ' + existingClusters.join(', '),
-          '',
-          'Give this cluster a short, descriptive name (2-4 words max) that captures what these functions have in common.',
-          'The name should be distinct from the existing clusters listed above.',
-          'Reply with ONLY the cluster name, nothing else.',
-        ].join('\n');
+        const tempName = `Unnamed Cluster ${Date.now()}`;
+        const section = `\n## ${tempName}\n<!-- user-cluster -->\n` +
+          nodeIds.map(id => `- \`${id}\``).join('\n') + '\n';
 
-        execFile('claude', ['-p', prompt, '--model', 'haiku'], {
-          timeout: 30000,
-          env: { ...process.env, PATH: process.env.PATH },
-        }, (err, stdout, stderr) => {
+        // Step 1: write placeholder immediately
+        readFile(CODEMAP_FILE, 'utf8', (err, content) => {
           if (err) {
-            console.error('[cluster] claude error:', err.message, stderr);
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: err.message }));
+            res.end(JSON.stringify({ error: 'read error' }));
             return;
           }
-          const name = stdout.trim().replace(/^["']|["']$/g, '');
-          console.log(`[cluster] named: ${name}`);
-          res.writeHead(200, { 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff' });
-          res.end(JSON.stringify({ name }));
+          writeFile(CODEMAP_FILE, content.trimEnd() + '\n' + section, 'utf8', (err2) => {
+            if (err2) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'write error' }));
+              return;
+            }
+            // Respond immediately with the temp name
+            console.log(`[cluster] created placeholder: ${tempName}`);
+            res.writeHead(200, { 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff' });
+            res.end(JSON.stringify({ name: tempName }));
+
+            // Step 2: spawn Claude in background to name it, then rename in codemap
+            const prompt = [
+              'You are naming a user-defined cluster of variables/functions in a dependency graph.',
+              'The user has selected these functions to group together:',
+              nodeIds.map(id => {
+                const d = nodeDetails[id];
+                if (!d) return `- ${id}`;
+                return `- ${id} (system: ${d.system}, reads: ${d.reads}, writes: ${d.writes}, calls: ${d.calls})`;
+              }).join('\n'),
+              '',
+              'Existing system clusters in this graph: ' + existingClusters.join(', '),
+              '',
+              'Give this cluster a short, descriptive name (4 words max) that captures what these functions have in common.',
+              'The name should be distinct from the existing clusters listed above.',
+              'Reply with ONLY the cluster name, nothing else.',
+            ].join('\n');
+
+            const escaped = prompt.replace(/'/g, "'\\''");
+            exec(`claude -p '${escaped}' --model haiku`, {
+              timeout: 30000,
+              shell: '/bin/zsh',
+            }, (err3, stdout, stderr) => {
+              if (err3) {
+                console.error('[cluster] claude naming error:', err3.message, stderr);
+                return;
+              }
+              const finalName = stdout.trim().replace(/^["']|["']$/g, '');
+              console.log(`[cluster] renaming "${tempName}" → "${finalName}"`);
+              // Replace the temp name in codemap
+              readFile(CODEMAP_FILE, 'utf8', (err4, current) => {
+                if (err4) return;
+                const updated = current.replace(`## ${tempName}`, `## ${finalName}`);
+                if (updated !== current) {
+                  writeFile(CODEMAP_FILE, updated, 'utf8', (err5) => {
+                    if (err5) console.error('[cluster] rename write error:', err5.message);
+                    else console.log(`[cluster] renamed to: ${finalName}`);
+                  });
+                }
+              });
+            });
+          });
+        });
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid JSON' }));
+      }
+    });
+    return;
+  }
+
+  // Delete a user cluster section from codemap
+  if (url.pathname === '/cluster' && req.method === 'DELETE') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { sectionName } = JSON.parse(body);
+        readFile(CODEMAP_FILE, 'utf8', (err, content) => {
+          if (err) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'read error' }));
+            return;
+          }
+          // Remove the section: from "## Name\n<!-- user-cluster -->" to next "## " or EOF
+          const escaped = sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const re = new RegExp(`\\n## ${escaped}\\n<!-- user-cluster -->\\n(?:- [^\\n]*\\n?)*`, 'g');
+          const updated = content.replace(re, '');
+          if (updated === content) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'section not found' }));
+            return;
+          }
+          writeFile(CODEMAP_FILE, updated, 'utf8', (err2) => {
+            if (err2) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'write error' }));
+              return;
+            }
+            console.log(`[cluster] deleted: ${sectionName}`);
+            res.writeHead(200, { 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff' });
+            res.end(JSON.stringify({ deleted: true }));
+          });
         });
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json' });

@@ -252,32 +252,11 @@ let spacePullHeld = false;
 let neighborGatherRAF = null;
 let neighborGatherHeld = false;
 
-// User-defined clusters (persist across resets)
-const USER_CLUSTERS_KEY = 'equinox-depgraph-user-clusters';
-let userClusters = []; // [{id, name, nodeIds: [...], color}]
-let nextUserClusterId = 1;
-
-function loadUserClusters() {
-  try {
-    const raw = localStorage.getItem(USER_CLUSTERS_KEY);
-    if (raw) {
-      userClusters = JSON.parse(raw);
-      nextUserClusterId = userClusters.reduce((max, c) => Math.max(max, c.id + 1), 1);
-    }
-  } catch (e) { console.warn('[user-clusters] Failed to load:', e); }
-}
-
-function saveUserClusters() {
-  try {
-    localStorage.setItem(USER_CLUSTERS_KEY, JSON.stringify(userClusters));
-  } catch (e) { console.warn('[user-clusters] Failed to save:', e); }
-}
+// User-defined clusters (parsed from codemap <!-- user-cluster --> sections)
+let userClusterSections = []; // [{name, nodeIds: [...]}] — derived from codemap
 
 async function createUserCluster(nodeIds) {
-  // Gather context for Claude
   const existingClusters = currentClusterNames ? [...currentClusterNames.values()] : [];
-  const existingUserNames = userClusters.map(c => c.name);
-  const allClusterNames = [...existingClusters, ...existingUserNames];
 
   const nodeDetails = {};
   for (const id of nodeIds) {
@@ -292,38 +271,41 @@ async function createUserCluster(nodeIds) {
     }
   }
 
-  // Pick a color (offset from system colors to avoid collisions)
-  const colorOffset = (currentClusterNames?.size || 0) + userClusters.length;
-  const color = CLUSTER_COLORS[colorOffset % CLUSTER_COLORS.length];
-
-  // Optimistic: create cluster immediately with a placeholder name
-  const clusterId = nextUserClusterId++;
-  const cluster = { id: clusterId, name: 'naming...', nodeIds, color };
-  userClusters.push(cluster);
-  renderUserClusters();
-  renderUserClusterLegend();
-
-  // Ask server to name it via Claude
+  // Ask server — it writes placeholder to codemap immediately, names via Claude in background
   try {
     const resp = await fetch('/cluster', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodeIds, existingClusters: allClusterNames, nodeDetails }),
+      body: JSON.stringify({ nodeIds, existingClusters, nodeDetails }),
     });
     const data = await resp.json();
     if (data.name) {
-      cluster.name = data.name;
-    } else {
-      cluster.name = `cluster ${clusterId}`;
+      console.log(`[cluster] placeholder created: ${data.name}`);
+      // Force reload to show the new section immediately
+      lastHash = null;
+      await loadAndAnalyze(true);
     }
   } catch (e) {
-    console.warn('[user-cluster] naming failed:', e);
-    cluster.name = `cluster ${clusterId}`;
+    console.warn('[user-cluster] creation failed:', e);
   }
+}
 
-  saveUserClusters();
-  renderUserClusters();
-  renderUserClusterLegend();
+async function deleteUserCluster(sectionName) {
+  try {
+    const resp = await fetch('/cluster', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sectionName }),
+    });
+    const data = await resp.json();
+    if (data.deleted) {
+      console.log(`[cluster] deleted: ${sectionName}`);
+      lastHash = null;
+      loadAndAnalyze(true);
+    }
+  } catch (e) {
+    console.warn('[user-cluster] deletion failed:', e);
+  }
 }
 
 // SVG layers
@@ -573,20 +555,35 @@ function hashStr(s) {
 function parseCodemap(md) {
   const sections = new Map();
   codemapImportance = new Map();
+  userClusterSections = [];
   let currentSection = null;
-  for (const line of md.split('\n')) {
+  let isUserCluster = false;
+  const lines = md.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const secMatch = line.match(/^## (.+)/);
     if (secMatch) {
       currentSection = secMatch[1].trim();
       if (currentSection === 'Controls' || currentSection === 'Constants') { currentSection = null; continue; }
-      if (!sections.has(currentSection)) sections.set(currentSection, []);
+      // Check if next line marks this as a user cluster
+      isUserCluster = (lines[i + 1] || '').trim() === '<!-- user-cluster -->';
+      if (isUserCluster) {
+        userClusterSections.push({ name: currentSection, nodeIds: [] });
+        i++; // skip the marker line
+      } else {
+        if (!sections.has(currentSection)) sections.set(currentSection, []);
+      }
       continue;
     }
     if (!currentSection) continue;
     const funcMatch = line.match(/^- `(\w+)`/);
     if (funcMatch) {
       const name = funcMatch[1];
-      sections.get(currentSection).push(name);
+      if (isUserCluster) {
+        userClusterSections[userClusterSections.length - 1].nodeIds.push(name);
+      } else if (sections.has(currentSection)) {
+        sections.get(currentSection).push(name);
+      }
       const impMatch = line.match(/importance:(\d+)/);
       if (impMatch) codemapImportance.set(name, parseInt(impMatch[1]));
     }
@@ -1847,10 +1844,13 @@ function renderUserClusters() {
   gHulls.selectAll('.user-hull').remove();
   gClusterLabels.selectAll('.user-cluster-label').remove();
 
-  for (const uc of userClusters) {
+  for (let i = 0; i < userClusterSections.length; i++) {
+    const uc = userClusterSections[i];
+    // Pick color based on position after system clusters
+    const colorIdx = (currentClusterNames?.size || 0) + i;
+    const color = CLUSTER_COLORS[colorIdx % CLUSTER_COLORS.length];
     const members = uc.nodeIds.map(id => nodeMap.get(id)).filter(n => n && n.x != null);
     if (members.length < 3) {
-      // For 1-2 nodes, draw a circle around them
       if (members.length > 0) {
         const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
         const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
@@ -1858,13 +1858,13 @@ function renderUserClusters() {
         gHulls.append('circle')
           .attr('class', 'user-hull')
           .attr('cx', cx).attr('cy', cy).attr('r', r)
-          .attr('fill', uc.color).attr('fill-opacity', 0.08)
-          .attr('stroke', uc.color).attr('stroke-opacity', 0.3)
+          .attr('fill', color).attr('fill-opacity', 0.08)
+          .attr('stroke', color).attr('stroke-opacity', 0.3)
           .attr('stroke-width', 2).attr('stroke-dasharray', '6,3');
         gClusterLabels.append('text')
           .attr('class', 'user-cluster-label cluster-label')
           .attr('x', cx).attr('y', cy - r - 8)
-          .attr('fill', uc.color)
+          .attr('fill', color)
           .text(uc.name);
       }
       continue;
@@ -1876,51 +1876,57 @@ function renderUserClusters() {
     gHulls.append('path')
       .attr('class', 'user-hull')
       .attr('d', `M${expanded.join('L')}Z`)
-      .attr('fill', uc.color).attr('fill-opacity', 0.08)
-      .attr('stroke', uc.color).attr('stroke-opacity', 0.3)
+      .attr('fill', color).attr('fill-opacity', 0.08)
+      .attr('stroke', color).attr('stroke-opacity', 0.3)
       .attr('stroke-width', 2).attr('stroke-dasharray', '6,3');
-    // Label above hull
     const centroid = d3.polygonCentroid(hull);
     const topY = Math.min(...hull.map(p => p[1]));
     gClusterLabels.append('text')
       .attr('class', 'user-cluster-label cluster-label')
       .attr('x', centroid[0]).attr('y', topY - 12)
-      .attr('fill', uc.color)
+      .attr('fill', color)
       .text(uc.name);
   }
 }
 
 function renderUserClusterLegend() {
-  // Add user clusters to the legend
-  let legendEl = document.getElementById('legend');
-  // Remove old user cluster legend entries
+  const legendEl = document.getElementById('legend');
   legendEl.querySelectorAll('.user-cluster-item').forEach(el => el.remove());
-  if (userClusters.length === 0) return;
-  const sep = document.createElement('div');
-  sep.className = 'user-cluster-item';
-  sep.style.cssText = 'border-top:1px solid #333;margin:6px 0 4px;padding-top:4px;color:#666;font-size:10px';
-  sep.textContent = 'User Clusters';
-  legendEl.appendChild(sep);
-  for (const uc of userClusters) {
+  if (userClusterSections.length === 0) return;
+  for (let i = 0; i < userClusterSections.length; i++) {
+    const uc = userClusterSections[i];
+    const colorIdx = (currentClusterNames?.size || 0) + i;
+    const color = CLUSTER_COLORS[colorIdx % CLUSTER_COLORS.length];
     const item = document.createElement('div');
     item.className = 'item user-cluster-item';
     item.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;cursor:pointer';
-    item.innerHTML = `<div class="dot" style="background:${uc.color};border:1px dashed #888"></div>${uc.name} (${uc.nodeIds.length})`;
-    item.addEventListener('click', () => {
-      // Highlight nodes in this user cluster
+    const label = document.createElement('span');
+    label.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1';
+    label.innerHTML = `<div class="dot" style="background:${color};border:1px dashed #888"></div>${uc.name} (${uc.nodeIds.length})`;
+    label.addEventListener('click', () => {
       if (currentGraph?.nodeMap) {
         selectedNodes.clear();
         for (const id of uc.nodeIds) selectedNodes.add(id);
         gNodes.selectAll('circle').classed('selected-glow', d => selectedNodes.has(d.id));
       }
     });
+    const delBtn = document.createElement('span');
+    delBtn.textContent = '\u00d7';
+    delBtn.title = 'Delete cluster';
+    delBtn.style.cssText = 'color:#666;cursor:pointer;font-size:14px;line-height:1;padding:0 2px';
+    delBtn.addEventListener('mouseenter', () => { delBtn.style.color = '#f66'; });
+    delBtn.addEventListener('mouseleave', () => { delBtn.style.color = '#666'; });
+    delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteUserCluster(uc.name); });
+    item.appendChild(label);
+    item.appendChild(delBtn);
     legendEl.appendChild(item);
   }
 }
 
 function renderClusterLabels() {
   if (!currentNodes) return;
-  gClusterLabels.selectAll('text').each(function(d) {
+  gClusterLabels.selectAll('text:not(.user-cluster-label)').each(function(d) {
+    if (!d || d.cid == null) return;
     const members = currentNodes.filter(n => n.cluster === d.cid && n.type === 'function');
     if (!members.length) return;
     let cx = 0, cy = 0;
@@ -3137,7 +3143,6 @@ async function loadAndAnalyze(force) {
 // INIT
 // ═══════════════════════════════════════════════════════
 loadSpatialMemory();
-loadUserClusters();
 initSVG();
 
 window.addEventListener('resize', () => {
