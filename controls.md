@@ -25,16 +25,27 @@
 
 ## Rewind
 
-- **Hold X** — *Rewind*: all unlocked nodes smoothly return to their original layout (T0). Saves a time step on release.
+- **Hold X** — *Rewind*: all unlocked nodes smoothly return to their original layout (T0). Saves a time point on release.
 - **Click+Hold a node, then X** — *Snap Back*: only that held node returns to T0 (fast)
 - **Shift+X held, then click nodes** — *Dismiss*: each clicked node snaps back to T0 individually
 - **Control+Click node** - *Dismiss*: the clicked node snaps back to T0
 - Release X or mouse at any time to stop — nodes stay where they are
 - Locked nodes are not affected by rewind
 
+## Time Travel
+
+Every interaction that moves nodes (drag, rewind, gravity well, gather, etc.) saves a **time point** — a snapshot of where all nodes are. These time points form a linear history that you can navigate.
+
+- **Hold Z** — *Reverse*: smoothly animate backwards through time points, rewinding through your arrangement history one step at a time. Saves a new time point on release.
+- **Alt+Left / Alt+Right** — *Step*: jump one time point forward or backward
+- Rapidly alternating Alt+Left/Right enters **comparison mode**, overlaying two arrangements
+
+Z is the temporal opposite of X: X rewinds node positions toward the original layout (T0), while Z rewinds through your history of arrangements.
+
 ## Gather
 
 - **Hold Space** (with 2+ selected nodes) — *Gather*: pull selected nodes toward their centroid
+- **Click node + Hold Space** (with 2+ selected nodes) - *Gather*: pull selected nodes towards clicked node
 - **Shift+Drag** — *Group Move*: drag all selected nodes together (see Drag section)
 - Locked nodes are not affected by gather/group move
 
@@ -45,11 +56,6 @@
 - Locked nodes are pinned — they resist rewind, gather, and gravity well from unselected nodes
 - Shift+clicked (pinned) nodes are auto-locked
 
-## Time Steps
-
-- **X release** saves current state as a time step
-- **Alt+Left / Alt+Right** — *Time Travel*: navigate arrangement history
-
 ## Keyboard Summary
 
 | Key | Action |
@@ -59,9 +65,10 @@
 | **Shift+Drag** | Group move selected nodes |
 | **Hold X** | Rewind to T0 |
 | **Shift+X + Click** | Dismiss node to T0 |
+| **Hold Z** | Time-travel backwards through history |
 | **Hold Space** | Gather selected nodes |
 | **Space** (nothing selected) | Unlock all |
-| **Alt+Arrow** | Time travel |
+| **Alt+Arrow** | Step through time points |
 | **Escape** | Close panel / clear selection |
 
 ## Toolbar Toggles

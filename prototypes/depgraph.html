@@ -156,6 +156,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 </div>
 
 <div id="arr-nav">
+  <button id="arr-reset" title="Reset to initial layout">Reset</button>
   <button id="arr-first" disabled>T0</button>
   <button id="arr-back" disabled>&larr;</button>
   <span class="arr-label" id="arr-label">1 / 1</span>
@@ -233,6 +234,12 @@ let xKeyHeld = false;
 let xKeyDown = false; // tracks physical X key state
 let xKeyRAF = null;
 let xDismissRAFs = new Map(); // per-node dismiss animations
+
+// Z-key time travel (backwards through arrangement history)
+let zKeyHeld = false;
+let zKeyDown = false;
+let zKeyRAF = null;
+let zTravelStartIndex = -1; // arrangement index when Z was pressed
 
 // Space-pull (pull selected nodes together)
 let spacePullRAF = null;
@@ -1410,8 +1417,8 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
   const { nodes, links, nodeDegree } = graph;
   const showHulls = document.getElementById('show-hulls').checked;
 
-  // Save current positions before clearing
-  if (currentNodes) {
+  // Save current positions before clearing (unless just reset)
+  if (currentNodes && savedPositions.size > 0) {
     for (const n of currentNodes) {
       if (n.x != null && n.y != null) savedPositions.set(n.id, { x: n.x, y: n.y });
     }
@@ -1423,6 +1430,14 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     isWarmRestart,
     spatialEdgesMap: spatialMemory.spatialEdges,
   });
+
+  // Snapshot T0 layout positions BEFORE sticky overrides (only for new nodes)
+  // Existing T0 positions are preserved across reloads so X always returns to the original layout
+  for (const n of nodes) {
+    if (n.x != null && !initialLayoutPositions.has(n.id)) {
+      initialLayoutPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
 
   // Apply sticky positions (user-dragged nodes override layout)
   for (const n of nodes) {
@@ -1436,12 +1451,6 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
   // Save computed positions
   for (const n of nodes) {
     if (n.x != null) savedPositions.set(n.id, { x: n.x, y: n.y });
-  }
-
-  // Snapshot immutable T0 layout positions (for X-key relaxation)
-  initialLayoutPositions = new Map();
-  for (const n of nodes) {
-    if (n.x != null) initialLayoutPositions.set(n.id, { x: n.x, y: n.y });
   }
 
   // Store references
@@ -2144,6 +2153,8 @@ let xStartPositions = null; // snapshot: where nodes are now (lerp from)
 // singleNode: if provided, only this node lerps to T0
 function startXForces(singleNode) {
   if (xKeyRAF) return;
+  // Cancel any running arrangement animation to prevent position conflicts
+  if (animationRAF) { cancelAnimationFrame(animationRAF); animationRAF = null; }
   xKeyHeld = true;
   const xStartTime = performance.now();
 
@@ -2210,6 +2221,98 @@ function stopXForces() {
   xRelaxFactor = 0;
   xStartPositions = null;
   xT0Positions = null;
+}
+
+// ═══════════════════════════════════════════════════════
+// Z-KEY TIME TRAVEL (backwards through arrangement history)
+// ═══════════════════════════════════════════════════════
+function startZTimeTravel() {
+  if (zKeyRAF || !currentNodes) return;
+  if (spatialMemory.arrangements.length < 2) return;
+  zKeyHeld = true;
+  zTravelStartIndex = arrangementIndex;
+
+  const stepDuration = 3000; // ms per arrangement step (matches X rewind ramp)
+  let lastStepTime = performance.now();
+  let currentLerpFrom = null; // positions at start of current step
+  let currentLerpTo = null;   // target positions for current step
+  let stepStart = performance.now();
+
+  function snapshotCurrent() {
+    const m = new Map();
+    for (const n of currentNodes) {
+      m.set(n.id, { x: n.x, y: n.y });
+    }
+    return m;
+  }
+
+  function arrPositions(idx) {
+    const arr = spatialMemory.arrangements[idx];
+    if (!arr) return null;
+    const m = new Map();
+    for (const [id, pos] of Object.entries(arr.positions)) {
+      m.set(id, { x: pos[0], y: pos[1] });
+    }
+    return m;
+  }
+
+  // Start first step: lerp from current positions to previous arrangement
+  currentLerpFrom = snapshotCurrent();
+  const prevIdx = arrangementIndex - 1;
+  if (prevIdx < 0) { zKeyHeld = false; return; }
+  currentLerpTo = arrPositions(prevIdx);
+  arrangementIndex = prevIdx;
+  updateArrNav();
+
+  function zLoop() {
+    if (!zKeyHeld || !currentNodes) return;
+
+    const now = performance.now();
+    const elapsed = now - stepStart;
+    const t = Math.min(1, elapsed / stepDuration);
+    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+    // Lerp nodes toward current target
+    if (currentLerpFrom && currentLerpTo) {
+      for (const n of currentNodes) {
+        const from = currentLerpFrom.get(n.id);
+        const to = currentLerpTo.get(n.id);
+        if (from && to) {
+          n.x = from.x + (to.x - from.x) * ease;
+          n.y = from.y + (to.y - from.y) * ease;
+        }
+      }
+      renderPositions();
+    }
+
+    // When step completes, move to next arrangement back
+    if (t >= 1 && arrangementIndex > 0) {
+      currentLerpFrom = currentLerpTo;
+      const nextIdx = arrangementIndex - 1;
+      currentLerpTo = arrPositions(nextIdx);
+      arrangementIndex = nextIdx;
+      stepStart = now;
+      updateArrNav();
+    }
+
+    zKeyRAF = requestAnimationFrame(zLoop);
+  }
+  zKeyRAF = requestAnimationFrame(zLoop);
+}
+
+function stopZTimeTravel() {
+  zKeyHeld = false;
+  if (zKeyRAF) { cancelAnimationFrame(zKeyRAF); zKeyRAF = null; }
+
+  // Save current positions into savedPositions
+  if (currentNodes && currentGraph) {
+    for (const n of currentNodes) {
+      if (n.x != null) savedPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+
+  // Push a new arrangement capturing where we landed
+  pushArrangement('z-travel', []);
 }
 
 // Repulse nearby nodes toward T0 from a point in SVG space
@@ -2388,6 +2491,14 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
+  // Z: hold to time-travel backwards through arrangement history
+  if (e.code === 'KeyZ' && !e.repeat && currentNodes && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault();
+    zKeyDown = true;
+    startZTimeTravel();
+    return;
+  }
+
   // Alt+Left / Alt+Right: arrangement navigation
   if (e.altKey && e.code === 'ArrowLeft') {
     e.preventDefault();
@@ -2417,6 +2528,10 @@ document.addEventListener('keyup', (e) => {
   if (e.code === 'KeyX') {
     xKeyDown = false;
     if (xKeyHeld) stopXForces();
+  }
+  if (e.code === 'KeyZ') {
+    zKeyDown = false;
+    if (zKeyHeld) stopZTimeTravel();
   }
   if (e.code === 'Space' && spacePullHeld) {
     stopSpacePull();
@@ -2592,6 +2707,20 @@ document.getElementById('graph').addEventListener('contextmenu', e => {
 });
 
 // Arrangement nav buttons
+document.getElementById('arr-reset').addEventListener('click', () => {
+  // Clear all user modifications, spatial memory, and localStorage
+  stickyNodes.clear();
+  savedPositions.clear();
+  lockedNodes.clear();
+  selectedNodes.clear();
+  initialLayoutPositions.clear();
+  spatialMemory = { arrangements: [], spatialEdges: {}, clickLog: [] };
+  arrangementIndex = -1;
+  localStorage.removeItem(SPATIAL_KEY);
+  gNodes.selectAll('circle').classed('selected-glow', false);
+  updateLockUI();
+  rebuild();
+});
 document.getElementById('arr-first').addEventListener('click', () => navigateToArrangement(0));
 document.getElementById('arr-back').addEventListener('click', () => navigateArrangement(-1));
 document.getElementById('arr-fwd').addEventListener('click', () => navigateArrangement(1));
