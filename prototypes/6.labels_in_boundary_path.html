@@ -44,12 +44,11 @@ body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', mo
 #legend .item:hover { color: #fff; }
 #legend .dot { width: 10px; height: 10px; border-radius: 50%; }
 
-#styles {
+#stats {
   position: fixed; bottom: 16px; right: 16px; z-index: 5;
   background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
-  padding: 10px 14px; font-size: 11px; display: flex; flex-direction: column; gap: 6px;
+  padding: 12px; font-size: 11px; text-align: right;
 }
-#styles label { color: #888; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
 
 #focus-panel {
   position: fixed; top: 50px; left: 50%; transform: translateX(-50%); z-index: 15;
@@ -106,7 +105,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 .label { pointer-events: none; user-select: none; }
 .node.highlighted circle { stroke-width: 3; }
 .hull { fill-opacity: 0.04; stroke-opacity: 0.15; stroke-width: 1.5; }
-.cluster-label { font-weight: 600; fill-opacity: 0.6; text-anchor: middle; dominant-baseline: central; cursor: grab; }
+.cluster-label { font-size: 11px; font-weight: 600; fill-opacity: 0.6; text-anchor: middle; dominant-baseline: central; cursor: grab; }
 .cluster-label:active { cursor: grabbing; }
 .hull-label { font-weight: 600; letter-spacing: 2px; cursor: grab; }
 .hull-label:active { cursor: grabbing; }
@@ -137,6 +136,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
   </label>
   <div class="sep"></div>
   <label><input type="checkbox" id="show-labels" checked> Labels</label>
+  <label><input type="checkbox" id="show-hulls" checked> Clusters</label>
   <label><input type="checkbox" id="show-edges"> Edges</label>
   <button id="lock-btn" title="Lock selected nodes (Space to unlock)">Lock</button>
   <span id="lock-indicator" style="display:none; color:#ff0; font-size:11px">Locked</span>
@@ -170,12 +170,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 <div id="comparison-badge">COMPARISON MODE — click or navigate to exit</div>
 
 <div id="legend"></div>
-<div id="styles">
-  <label><input type="checkbox" id="show-hulls" checked> Clusters</label>
-  <label><input type="checkbox" id="show-cluster-labels" checked> Cluster labels</label>
-  <label><input type="checkbox" id="show-boundary-labels" checked> Boundary labels</label>
-  <div id="zoom-debug" style="color:#555; font-size:10px; margin-top:2px">zoom: 0.80</div>
-</div>
+<div id="stats"></div>
 
 <svg id="graph"></svg>
 
@@ -265,7 +260,7 @@ let userClusterSections = []; // [{name, nodeIds: [...]}] — derived from codem
 
 // Cluster label placement caches
 let clusterMemberCache = new Map(); // cid -> Node[]
-let clusterLabelPlacement = new Map(); // cid -> { dx, dy, angle } — nudged each tick
+let clusterLabelPlacement = new Map(); // cid -> { dx, dy, angle }
 let labelPlacementTimer = null;
 
 async function createUserCluster(nodeIds) {
@@ -1467,7 +1462,6 @@ function expandHull(hull, pad) {
 
 function applySemanticZoom() {
   const k = currentK;
-  document.getElementById('zoom-debug').textContent = `zoom: ${k.toFixed(2)}`;
 
   gLabels.selectAll('text').each(function(d) {
     const el = d3.select(this);
@@ -1485,32 +1479,19 @@ function applySemanticZoom() {
       .attr('fill', '#fff');
   });
 
-  // Floating cluster labels: fade out as textPath labels fade in (k 2.5→3.5)
-  const showClusterLabels = document.getElementById('show-cluster-labels').checked;
-  const floatingLabelOpacity = !showClusterLabels ? 0
-    : k < 0.7 ? 0.4 : k < 2.5 ? 0.7 : Math.max(0.2, 0.7 - (k - 2.5) * 0.7);
-  // Font shrinks in SVG units faster than 1/k so labels get smaller on screen when zoomed in
-  const clusterFontSize = Math.max(1, 13 / Math.pow(k, 0.75));
+  // Floating cluster labels: fade out as textPath labels fade in (k 0.8→1.5)
+  const floatingLabelOpacity = k < 0.2 ? 0.4 : k < 0.8 ? 0.7 : Math.max(0, 0.7 - (k - 0.8) * 1.0);
   gClusterLabels.selectAll('text').each(function() {
-    d3.select(this).attr('font-size', clusterFontSize).attr('opacity', floatingLabelOpacity);
+    const fontSize = Math.max(8, Math.min(18, 13 / k));
+    d3.select(this).attr('font-size', fontSize).attr('opacity', floatingLabelOpacity);
   });
 
-  // TextPath boundary labels: fade in from k=3, full at k=4
-  const showBoundaryLabels = document.getElementById('show-boundary-labels').checked;
-  const textPathOpacity = !showBoundaryLabels ? 0
-    : Math.min(0.45, Math.max(0, (k - 3) * 0.45));
-  const hullFontSize = Math.max(1.5, Math.min(5, 4 / k));
+  // TextPath boundary labels: fade in from k=0.8, full at k=1.5
+  const textPathOpacity = Math.min(0.55, Math.max(0, (k - 0.8) * 0.8));
+  const hullFontSize = Math.max(4, Math.min(12, 10 / k));
   gHulls.selectAll('.hull-label')
     .attr('fill-opacity', textPathOpacity)
     .attr('font-size', hullFontSize);
-
-  // Recompute label placement on zoom (font size changes bbox)
-  if (showClusterLabels && clusterMemberCache.size > 0) {
-    if (labelPlacementTimer) clearTimeout(labelPlacementTimer);
-    labelPlacementTimer = setTimeout(() => {
-      computeClusterLabelPlacement();
-    }, 150);
-  }
 
   const showEdges = document.getElementById('show-edges').checked;
   const zoomedIn = k > 3.5;
@@ -1829,6 +1810,14 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
   rebuildClusterMemberCache();
   computeClusterLabelPlacement();
 
+  // Stats
+  const clusterCount = new Set([...clusters.values()]).size;
+  document.getElementById('stats').innerHTML = `
+    <div>${nodes.filter(n => n.type === 'function').length} functions</div>
+    ${nodes.filter(n => n.type === 'global').length > 0 ? `<div>${nodes.filter(n => n.type === 'global').length} globals</div>` : ''}
+    <div>${links.length} edges</div>
+    <div>${clusterCount} systems</div>`;
+
   // Legend
   document.getElementById('legend').innerHTML = [...clusterNames.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -2071,89 +2060,216 @@ function estimateLabelBBox(text, fontSize) {
   return { w, h };
 }
 
+function rotatedCorners(cx, cy, w, h, angleDeg) {
+  const a = angleDeg * Math.PI / 180;
+  const cos = Math.cos(a), sin = Math.sin(a);
+  const hw = w / 2, hh = h / 2;
+  return [
+    [cx + (-hw * cos - -hh * sin), cy + (-hw * sin + -hh * cos)],
+    [cx + ( hw * cos - -hh * sin), cy + ( hw * sin + -hh * cos)],
+    [cx + ( hw * cos -  hh * sin), cy + ( hw * sin +  hh * cos)],
+    [cx + (-hw * cos -  hh * sin), cy + (-hw * sin +  hh * cos)],
+  ];
+}
+
+function rectCircleOverlap(cx, cy, w, h, angleDeg, nx, ny, nr) {
+  // Transform node center into label's rotated coordinate frame
+  const a = -angleDeg * Math.PI / 180;
+  const cos = Math.cos(a), sin = Math.sin(a);
+  const dx = nx - cx, dy = ny - cy;
+  const lx = dx * cos - dy * sin;
+  const ly = dx * sin + dy * cos;
+  // Closest point on rect to circle center
+  const hw = w / 2, hh = h / 2;
+  const closestX = Math.max(-hw, Math.min(hw, lx));
+  const closestY = Math.max(-hh, Math.min(hh, ly));
+  const distSq = (lx - closestX) ** 2 + (ly - closestY) ** 2;
+  return distSq < nr * nr;
+}
+
+function rectRectOverlap(ax, ay, aw, ah, aAngle, bx, by, bw, bh, bAngle) {
+  // Quick center-distance check first
+  const dx = ax - bx, dy = ay - by;
+  const maxDist = Math.hypot(aw, ah) / 2 + Math.hypot(bw, bh) / 2;
+  if (dx * dx + dy * dy > maxDist * maxDist) return false;
+  // SAT with rotated rects
+  const cornersA = rotatedCorners(ax, ay, aw, ah, aAngle);
+  const cornersB = rotatedCorners(bx, by, bw, bh, bAngle);
+  function getAxes(corners) {
+    const axes = [];
+    for (let i = 0; i < corners.length; i++) {
+      const j = (i + 1) % corners.length;
+      const ex = corners[j][0] - corners[i][0], ey = corners[j][1] - corners[i][1];
+      axes.push([-ey, ex]);
+    }
+    return axes;
+  }
+  function project(corners, axis) {
+    let min = Infinity, max = -Infinity;
+    for (const c of corners) {
+      const p = c[0] * axis[0] + c[1] * axis[1];
+      if (p < min) min = p;
+      if (p > max) max = p;
+    }
+    return [min, max];
+  }
+  for (const axis of [...getAxes(cornersA), ...getAxes(cornersB)]) {
+    const [minA, maxA] = project(cornersA, axis);
+    const [minB, maxB] = project(cornersB, axis);
+    if (maxA < minB || maxB < minA) return false;
+  }
+  return true;
+}
+
 function computeClusterLabelPlacement() {
   if (!currentNodes || currentNodes.length === 0) return;
 
-  const fontSize = Math.max(2, 13 / Math.pow(currentK, 1.4));
-  const nudgeStrength = 0.15; // how far to nudge per tick (fraction of force)
+  const fontSize = Math.max(8, Math.min(18, 13 / currentK));
+  const placedLabels = []; // { cx, cy, w, h, angle }
 
-  // Collect labels and their current positions
-  const labelData = [];
+  // Collect all labels sorted by cluster size (largest first for priority)
+  const labels = [];
   gClusterLabels.selectAll('text:not(.user-cluster-label)').each(function(d) {
     if (!d || d.cid == null) return;
     const members = clusterMemberCache.get(d.cid);
     if (!members || !members.length) return;
-
-    let mcx = 0, mcy = 0;
-    for (const m of members) { mcx += m.x; mcy += m.y; }
-    mcx /= members.length; mcy /= members.length;
-
-    // Get or seed current placement
-    if (!clusterLabelPlacement.has(d.cid)) {
-      const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
-      const gap = Math.max(2, 12 / Math.pow(currentK, 1.2))
-      clusterLabelPlacement.set(d.cid, { dx: 0, dy: (minY - gap) - mcy, angle: 0 });
-    }
-    const p = clusterLabelPlacement.get(d.cid);
-    labelData.push({ d, members, mcx, mcy, p, bbox: estimateLabelBBox(d.name, fontSize) });
+    labels.push({ el: this, d, members });
   });
+  labels.sort((a, b) => b.members.length - a.members.length);
 
-  // Apply forces to nudge each label
-  for (const label of labelData) {
-    const { d, members, mcx, mcy, p, bbox } = label;
-    const lx = mcx + p.dx, ly = mcy + p.dy;
-    let fx = 0, fy = 0, torque = 0;
+  for (const { el, d, members } of labels) {
+    const bbox = estimateLabelBBox(d.name, fontSize);
 
-    // Repel from nodes
-    for (const n of currentNodes) {
-      const nr = (n.radius || 4) + 4;
-      const dx = lx - n.x, dy = ly - n.y;
-      const dist = Math.hypot(dx, dy) || 0.1;
-      const minDist = nr + Math.max(bbox.w, bbox.h) * 0.5;
-      if (dist < minDist) {
-        const push = (minDist - dist) / minDist;
-        fx += (dx / dist) * push * 3;
-        fy += (dy / dist) * push * 3;
-      }
+    // Compute cluster centroid and hull
+    let cx = 0, cy = 0;
+    for (const m of members) { cx += m.x; cy += m.y; }
+    cx /= members.length; cy /= members.length;
+
+    let hull = null, expanded = null;
+    if (members.length >= 3) {
+      hull = d3.polygonHull(members.map(m => [m.x, m.y]));
+      if (hull) expanded = expandHull(hull, 20);
     }
 
-    // Repel from other labels
-    for (const other of labelData) {
-      if (other.d.cid === d.cid) continue;
-      const ox = other.mcx + other.p.dx, oy = other.mcy + other.p.dy;
-      const dx = lx - ox, dy = ly - oy;
-      const dist = Math.hypot(dx, dy) || 0.1;
-      const minDist = (bbox.w + other.bbox.w) * 0.5 + 4;
-      if (dist < minDist) {
-        const push = (minDist - dist) / minDist;
-        fx += (dx / dist) * push * 2;
-        fy += (dy / dist) * push * 2;
-      }
-    }
-
-    // Gentle pull toward cluster centroid (stay close)
-    const distFromCenter = Math.hypot(p.dx, p.dy);
-    if (distFromCenter > 1) {
-      fx -= (p.dx / distFromCenter) * 0.15;
-      fy -= (p.dy / distFromCenter) * 0.15;
-    }
-
-    // Gentle pull toward "above cluster" default position
+    // Generate candidates
+    const candidates = [];
     const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
-    const gap = Math.max(0.5, 12 / (currentK * currentK));
-    const defaultDy = (minY - gap) - mcy;
-    fy += (defaultDy - p.dy) * 0.05;
-    fx += (0 - p.dx) * 0.05; // prefer centered horizontally
+    const maxY = Math.max(...members.map(m => m.y + (m.radius || 4)));
+    const minX = Math.min(...members.map(m => m.x - (m.radius || 4)));
+    const maxX = Math.max(...members.map(m => m.x + (m.radius || 4)));
 
-    // Decay rotation toward 0
-    torque -= p.angle * 0.1;
+    // Basic candidates at 0 degrees
+    candidates.push({ x: cx, y: minY - bbox.h, angle: 0 }); // top center
+    candidates.push({ x: cx, y: maxY + bbox.h, angle: 0 }); // bottom center
+    candidates.push({ x: minX - bbox.w * 0.6, y: cy, angle: 0 }); // left
+    candidates.push({ x: maxX + bbox.w * 0.6, y: cy, angle: 0 }); // right
 
-    // Apply nudge
-    p.dx += fx * nudgeStrength;
-    p.dy += fy * nudgeStrength;
-    p.angle += torque * nudgeStrength;
-    p.angle = Math.max(-30, Math.min(30, p.angle));
+    // Hull edge midpoints with tangent-aligned angles
+    if (hull && hull.length >= 3) {
+      for (let i = 0; i < hull.length; i++) {
+        const j = (i + 1) % hull.length;
+        const mx = (hull[i][0] + hull[j][0]) / 2;
+        const my = (hull[i][1] + hull[j][1]) / 2;
+        const edgeDx = hull[j][0] - hull[i][0];
+        const edgeDy = hull[j][1] - hull[i][1];
+        const edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
+        if (edgeLen < bbox.w * 0.5) continue; // too short
+
+        let edgeAngle = Math.atan2(edgeDy, edgeDx) * 180 / Math.PI;
+        // Normalize to ±90 so text isn't upside down
+        if (edgeAngle > 90) edgeAngle -= 180;
+        if (edgeAngle < -90) edgeAngle += 180;
+        // Clamp to ±30 degrees
+        edgeAngle = Math.max(-30, Math.min(30, edgeAngle));
+
+        // Push outward from centroid
+        const outDx = mx - cx, outDy = my - cy;
+        const outDist = Math.sqrt(outDx * outDx + outDy * outDy) || 1;
+        const pushOut = bbox.h * 0.8;
+        const ox = mx + (outDx / outDist) * pushOut;
+        const oy = my + (outDy / outDist) * pushOut;
+        candidates.push({ x: ox, y: oy, angle: edgeAngle });
+      }
+    }
+
+    // Interior "dark spot" candidates — sample grid within bounding box
+    const stepX = (maxX - minX) / 4 || 20;
+    const stepY = (maxY - minY) / 4 || 20;
+    for (let gx = minX; gx <= maxX; gx += stepX) {
+      for (let gy = minY; gy <= maxY; gy += stepY) {
+        // Only include if inside hull (or if no hull, within bounding box)
+        if (hull && !d3.polygonContains(hull, [gx, gy])) continue;
+        candidates.push({ x: gx, y: gy, angle: 0 });
+      }
+    }
+
+    // Also try rotated variants of top/bottom
+    for (const angle of [-20, 20]) {
+      candidates.push({ x: cx, y: minY - bbox.h * 0.7, angle });
+      candidates.push({ x: cx, y: maxY + bbox.h * 0.7, angle });
+    }
+
+    // Score each candidate
+    let bestScore = Infinity, bestCand = candidates[0];
+
+    for (const cand of candidates) {
+      let score = 0;
+
+      // Node overlap penalty — check all nodes, not just cluster members
+      for (const n of currentNodes) {
+        const nr = (n.radius || 4) + 2;
+        if (rectCircleOverlap(cand.x, cand.y, bbox.w + 4, bbox.h + 4, cand.angle, n.x, n.y, nr)) {
+          score += 100;
+        } else {
+          // Proximity penalty (soft repulsion from nearby nodes)
+          const dist = Math.hypot(cand.x - n.x, cand.y - n.y);
+          if (dist < bbox.w) score += (bbox.w - dist) * 0.3;
+        }
+      }
+
+      // Already-placed label overlap penalty
+      for (const pl of placedLabels) {
+        if (rectRectOverlap(cand.x, cand.y, bbox.w + 6, bbox.h + 6, cand.angle,
+                            pl.cx, pl.cy, pl.w + 6, pl.h + 6, pl.angle)) {
+          score += 80;
+        }
+      }
+
+      // Distance from centroid (mild — prefer staying near cluster)
+      const distFromCenter = Math.hypot(cand.x - cx, cand.y - cy);
+      score += distFromCenter * 0.3;
+
+      // Outside own hull penalty
+      if (hull && !d3.polygonContains(expanded || hull, [cand.x, cand.y])) {
+        score += 15;
+      }
+
+      // Inside other cluster's hull penalty
+      for (const [otherCid, otherMembers] of clusterMemberCache) {
+        if (otherCid === d.cid || otherMembers.length < 3) continue;
+        const otherHull = d3.polygonHull(otherMembers.map(m => [m.x, m.y]));
+        if (otherHull && d3.polygonContains(otherHull, [cand.x, cand.y])) {
+          score += 200;
+        }
+      }
+
+      // Rotation penalty (slight preference for horizontal)
+      score += Math.abs(cand.angle) * 0.15;
+
+      if (score < bestScore) { bestScore = score; bestCand = cand; }
+    }
+
+    // Store placement as offset from centroid
+    clusterLabelPlacement.set(d.cid, {
+      dx: bestCand.x - cx,
+      dy: bestCand.y - cy,
+      angle: bestCand.angle,
+    });
+    placedLabels.push({ cx: bestCand.x, cy: bestCand.y, w: bbox.w, h: bbox.h, angle: bestCand.angle });
   }
+
+  // Apply placements
+  applyClusterLabelPlacements();
 }
 
 function applyClusterLabelPlacements() {
@@ -2165,19 +2281,18 @@ function applyClusterLabelPlacements() {
     for (const m of members) { cx += m.x; cy += m.y; }
     cx /= members.length; cy /= members.length;
 
-    const p = clusterLabelPlacement.get(d.cid);
-    if (p) {
-      const x = cx + p.dx, y = cy + p.dy;
+    const placement = clusterLabelPlacement.get(d.cid);
+    if (placement) {
+      const x = cx + placement.dx, y = cy + placement.dy;
       d3.select(this)
         .attr('x', null).attr('y', null)
-        .attr('transform', `translate(${x},${y}) rotate(${p.angle})`);
+        .attr('transform', `translate(${x},${y}) rotate(${placement.angle})`);
     } else {
-      // No placement yet — fallback above cluster
+      // Fallback: above cluster
       const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
-      const gap = Math.max(0.5, 12 / (currentK * currentK));
       d3.select(this)
         .attr('transform', null)
-        .attr('x', cx).attr('y', minY - gap);
+        .attr('x', cx).attr('y', minY - 12);
     }
   });
 }
@@ -3225,9 +3340,6 @@ document.getElementById('show-hulls').addEventListener('change', () => {
     gHulls.selectAll('path').remove();
   }
 });
-
-document.getElementById('show-cluster-labels').addEventListener('change', () => applySemanticZoom());
-document.getElementById('show-boundary-labels').addEventListener('change', () => applySemanticZoom());
 
 document.getElementById('lock-btn').addEventListener('click', () => {
   if (lockedNodes.size > 0 && selectedNodes.size === 0) {
