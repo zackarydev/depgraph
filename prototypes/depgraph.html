@@ -252,6 +252,80 @@ let spacePullHeld = false;
 let neighborGatherRAF = null;
 let neighborGatherHeld = false;
 
+// User-defined clusters (persist across resets)
+const USER_CLUSTERS_KEY = 'equinox-depgraph-user-clusters';
+let userClusters = []; // [{id, name, nodeIds: [...], color}]
+let nextUserClusterId = 1;
+
+function loadUserClusters() {
+  try {
+    const raw = localStorage.getItem(USER_CLUSTERS_KEY);
+    if (raw) {
+      userClusters = JSON.parse(raw);
+      nextUserClusterId = userClusters.reduce((max, c) => Math.max(max, c.id + 1), 1);
+    }
+  } catch (e) { console.warn('[user-clusters] Failed to load:', e); }
+}
+
+function saveUserClusters() {
+  try {
+    localStorage.setItem(USER_CLUSTERS_KEY, JSON.stringify(userClusters));
+  } catch (e) { console.warn('[user-clusters] Failed to save:', e); }
+}
+
+async function createUserCluster(nodeIds) {
+  // Gather context for Claude
+  const existingClusters = currentClusterNames ? [...currentClusterNames.values()] : [];
+  const existingUserNames = userClusters.map(c => c.name);
+  const allClusterNames = [...existingClusters, ...existingUserNames];
+
+  const nodeDetails = {};
+  for (const id of nodeIds) {
+    const node = currentGraph?.nodeMap?.get(id);
+    if (node && node.info) {
+      nodeDetails[id] = {
+        system: node.clusterName || 'unknown',
+        reads: [...(node.info.reads || [])].join(', ') || 'none',
+        writes: [...(node.info.writes || [])].join(', ') || 'none',
+        calls: [...(node.info.calls || [])].join(', ') || 'none',
+      };
+    }
+  }
+
+  // Pick a color (offset from system colors to avoid collisions)
+  const colorOffset = (currentClusterNames?.size || 0) + userClusters.length;
+  const color = CLUSTER_COLORS[colorOffset % CLUSTER_COLORS.length];
+
+  // Optimistic: create cluster immediately with a placeholder name
+  const clusterId = nextUserClusterId++;
+  const cluster = { id: clusterId, name: 'naming...', nodeIds, color };
+  userClusters.push(cluster);
+  renderUserClusters();
+  renderUserClusterLegend();
+
+  // Ask server to name it via Claude
+  try {
+    const resp = await fetch('/cluster', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeIds, existingClusters: allClusterNames, nodeDetails }),
+    });
+    const data = await resp.json();
+    if (data.name) {
+      cluster.name = data.name;
+    } else {
+      cluster.name = `cluster ${clusterId}`;
+    }
+  } catch (e) {
+    console.warn('[user-cluster] naming failed:', e);
+    cluster.name = `cluster ${clusterId}`;
+  }
+
+  saveUserClusters();
+  renderUserClusters();
+  renderUserClusterLegend();
+}
+
 // SVG layers
 let svg, gLinks, gNodes, gHulls, gLabels, gClusterLabels;
 let width, height;
@@ -1736,6 +1810,10 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
 
   applySemanticZoom();
 
+  // Render user-defined clusters
+  renderUserClusters();
+  renderUserClusterLegend();
+
   // Push initial arrangement
   pushArrangement('layout');
 }
@@ -1755,6 +1833,88 @@ function renderHulls() {
       .attr('d', `M${expanded.join('L')}Z`)
       .attr('fill', CLUSTER_COLORS[cid % CLUSTER_COLORS.length])
       .attr('stroke', CLUSTER_COLORS[cid % CLUSTER_COLORS.length]);
+  }
+  // Also render user clusters on top
+  renderUserClusters();
+}
+
+function renderUserClusters() {
+  if (!currentNodes) return;
+  const nodeMap = currentGraph?.nodeMap;
+  if (!nodeMap) return;
+
+  // Remove previous user cluster hulls
+  gHulls.selectAll('.user-hull').remove();
+  gClusterLabels.selectAll('.user-cluster-label').remove();
+
+  for (const uc of userClusters) {
+    const members = uc.nodeIds.map(id => nodeMap.get(id)).filter(n => n && n.x != null);
+    if (members.length < 3) {
+      // For 1-2 nodes, draw a circle around them
+      if (members.length > 0) {
+        const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
+        const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
+        const r = members.length === 1 ? 30 : Math.hypot(members[0].x - members[1].x, members[0].y - members[1].y) / 2 + 25;
+        gHulls.append('circle')
+          .attr('class', 'user-hull')
+          .attr('cx', cx).attr('cy', cy).attr('r', r)
+          .attr('fill', uc.color).attr('fill-opacity', 0.08)
+          .attr('stroke', uc.color).attr('stroke-opacity', 0.3)
+          .attr('stroke-width', 2).attr('stroke-dasharray', '6,3');
+        gClusterLabels.append('text')
+          .attr('class', 'user-cluster-label cluster-label')
+          .attr('x', cx).attr('y', cy - r - 8)
+          .attr('fill', uc.color)
+          .text(uc.name);
+      }
+      continue;
+    }
+    const points = members.map(d => [d.x, d.y]);
+    const hull = d3.polygonHull(points);
+    if (!hull) continue;
+    const expanded = expandHull(hull, 25);
+    gHulls.append('path')
+      .attr('class', 'user-hull')
+      .attr('d', `M${expanded.join('L')}Z`)
+      .attr('fill', uc.color).attr('fill-opacity', 0.08)
+      .attr('stroke', uc.color).attr('stroke-opacity', 0.3)
+      .attr('stroke-width', 2).attr('stroke-dasharray', '6,3');
+    // Label above hull
+    const centroid = d3.polygonCentroid(hull);
+    const topY = Math.min(...hull.map(p => p[1]));
+    gClusterLabels.append('text')
+      .attr('class', 'user-cluster-label cluster-label')
+      .attr('x', centroid[0]).attr('y', topY - 12)
+      .attr('fill', uc.color)
+      .text(uc.name);
+  }
+}
+
+function renderUserClusterLegend() {
+  // Add user clusters to the legend
+  let legendEl = document.getElementById('legend');
+  // Remove old user cluster legend entries
+  legendEl.querySelectorAll('.user-cluster-item').forEach(el => el.remove());
+  if (userClusters.length === 0) return;
+  const sep = document.createElement('div');
+  sep.className = 'user-cluster-item';
+  sep.style.cssText = 'border-top:1px solid #333;margin:6px 0 4px;padding-top:4px;color:#666;font-size:10px';
+  sep.textContent = 'User Clusters';
+  legendEl.appendChild(sep);
+  for (const uc of userClusters) {
+    const item = document.createElement('div');
+    item.className = 'item user-cluster-item';
+    item.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;cursor:pointer';
+    item.innerHTML = `<div class="dot" style="background:${uc.color};border:1px dashed #888"></div>${uc.name} (${uc.nodeIds.length})`;
+    item.addEventListener('click', () => {
+      // Highlight nodes in this user cluster
+      if (currentGraph?.nodeMap) {
+        selectedNodes.clear();
+        for (const id of uc.nodeIds) selectedNodes.add(id);
+        gNodes.selectAll('circle').classed('selected-glow', d => selectedNodes.has(d.id));
+      }
+    });
+    legendEl.appendChild(item);
   }
 }
 
@@ -2628,6 +2788,13 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
+  // Enter: create user cluster from selected nodes
+  if (e.code === 'Enter' && selectedNodes.size >= 2 && !e.target.closest('input, select')) {
+    e.preventDefault();
+    createUserCluster([...selectedNodes]);
+    return;
+  }
+
   // Escape: close info panel, exit comparison mode, or clear selection
   if (e.code === 'Escape') {
     if (comparisonMode) { exitComparisonMode(); return; }
@@ -2970,6 +3137,7 @@ async function loadAndAnalyze(force) {
 // INIT
 // ═══════════════════════════════════════════════════════
 loadSpatialMemory();
+loadUserClusters();
 initSVG();
 
 window.addEventListener('resize', () => {
