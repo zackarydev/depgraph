@@ -2154,6 +2154,9 @@ function computeClusterLabelPlacement() {
     p.angle += torque * nudgeStrength;
     p.angle = Math.max(-30, Math.min(30, p.angle));
   }
+
+  // Apply the nudged positions to the DOM
+  applyClusterLabelPlacements();
 }
 
 function applyClusterLabelPlacements() {
