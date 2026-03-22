@@ -1911,9 +1911,11 @@ function attractorLoop() {
   const distances = bfsDistances(attractorNode.id, adj, maxHop);
 
   // Only move nodes within the active BFS radius — everything else stays put
+  const attractorIsSelected = selectedNodes.has(attractorNode.id);
   const movedNodes = [];
   for (const n of currentNodes) {
     if (n.id === attractorNode.id) continue;
+    if (!attractorIsSelected && lockedNodes.has(n.id)) continue;
     const graphDist = distances.get(n.id);
     if (graphDist == null || graphDist > maxHop) continue;
 
