@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Equinox — Live Dependency Graph</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', monospace; overflow: hidden; }
+
+#toolbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+  background: #111118; border-bottom: 1px solid #2a2a35;
+  padding: 8px 16px; display: flex; align-items: center; gap: 16px;
+  font-size: 12px;
+}
+#toolbar select, #toolbar input { background: #1a1a25; color: #ccc; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 12px; }
+#toolbar label { color: #888; cursor: pointer; user-select: none; }
+#toolbar .sep { width: 1px; height: 20px; background: #333; }
+#status { color: #555; margin-left: auto; }
+#status.live { color: #4a4; }
+#zoom-level { color: #666; font-size: 11px; }
+
+#info-panel {
+  position: fixed; top: 44px; right: 0; width: 320px; bottom: 0; z-index: 5;
+  background: #111118ee; border-left: 1px solid #2a2a35;
+  padding: 16px; overflow-y: auto; font-size: 12px;
+  transform: translateX(100%); transition: transform 0.2s;
+}
+#info-panel.open { transform: translateX(0); }
+#info-panel h3 { color: #e8e8f0; margin-bottom: 8px; font-size: 14px; }
+#info-panel .section { margin-bottom: 12px; }
+#info-panel .section-title { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+#info-panel .tag { display: inline-block; background: #222; border-radius: 3px; padding: 2px 6px; margin: 2px; font-size: 11px; }
+#info-panel .tag.read { border-left: 2px solid #6af; }
+#info-panel .tag.write { border-left: 2px solid #f66; }
+#info-panel .tag.call { border-left: 2px solid #af6; }
+#info-panel .tag.rw { border-left: 2px solid #fa6; }
+
+#focus-panel {
+  position: fixed; top: 50px; left: 50%; transform: translateX(-50%); z-index: 15;
+  background: #111118ee; border: 1px solid #3a3a50; border-radius: 8px;
+  padding: 10px 18px; font-size: 12px; max-width: 600px;
+  opacity: 0; transition: opacity 0.4s; pointer-events: none;
+}
+#focus-panel.active { opacity: 1; pointer-events: auto; }
+#focus-panel .focus-desc { color: #aab; margin-bottom: 6px; }
+#focus-panel .focus-step { color: #7af; font-weight: 600; }
+#focus-panel .focus-targets { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+#focus-panel .focus-tag {
+  display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px;
+  background: #1a1a2a; border: 1px solid #333;
+}
+#focus-panel .focus-tag.high { border-color: #7af; color: #7af; }
+#focus-panel .focus-tag.med { border-color: #5a8; color: #5a8; }
+#focus-panel .focus-tag.low { border-color: #555; color: #888; }
+
+#stats {
+  position: fixed; bottom: 16px; right: 16px; z-index: 5;
+  background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
+  padding: 12px; font-size: 11px; text-align: right;
+}
+
+svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
+.system-box { cursor: pointer; }
+.system-label { fill: #fff; font-size: 13px; font-weight: 600; pointer-events: none; text-anchor: middle; dominant-baseline: central; }
+.func-box { cursor: pointer; transition: opacity 0.15s; }
+.func-label { fill: #ccc; font-size: 9px; pointer-events: none; }
+.edge { pointer-events: none; }
+.system-edge { pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <strong style="color:#e8e8f0">depgraph</strong>
+  <div class="sep"></div>
+  <label>Edges:
+    <select id="edge-mode">
+      <option value="both">Calls + Shared state</option>
+      <option value="calls">Function calls</option>
+      <option value="shared-state">Shared state</option>
+    </select>
+  </label>
+  <div class="sep"></div>
+  <label>Search: <input type="text" id="search" placeholder="function name..." style="width:140px"></label>
+  <div class="sep"></div>
+  <span id="zoom-level">zoom: 1.0x</span>
+  <span id="status">waiting...</span>
+</div>
+
+<div id="info-panel">
+  <h3 id="info-name">Select a function</h3>
+  <div id="info-body"></div>
+</div>
+
+<div id="focus-panel">
+  <div class="focus-step"></div>
+  <div class="focus-desc"></div>
+  <div class="focus-targets"></div>
+</div>
+<div id="stats"></div>
+
+<svg id="graph"></svg>
+
+<script src="https://cdn.jsdelivr.net/npm/acorn@8.14.1/dist/acorn.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/acorn-walk@8.3.4/dist/walk.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script>
+// ── Config ─────────────────────────────────────────
+const _base = location.pathname.substring(0, location.pathname.lastIndexOf('/'));
+const SRC = _base + '/../prototype/index.html';
+const CODEMAP_SRC = _base + '/project_codemap.md';
+const REFRESH_MS = 3000;
+let lastHash = null;
+let codemapSections = null;
+
+// ── State ──────────────────────────────────────────
+let analysisResult = null;
+let currentZoomK = 1;
+let selectedNode = null;
+
+// ── Utility ────────────────────────────────────────
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+// ── Codemap Parsing ────────────────────────────────
+function parseCodemap(md) {
+  const sections = new Map();
+  let currentSection = null;
+  for (const line of md.split('\n')) {
+    const secMatch = line.match(/^## (.+)/);
+    if (secMatch) {
+      currentSection = secMatch[1].trim();
+      if (currentSection === 'Controls' || currentSection === 'Constants') {
+        currentSection = null;
+        continue;
+      }
+      if (!sections.has(currentSection)) sections.set(currentSection, []);
+      continue;
+    }
+    if (!currentSection) continue;
+    const funcMatch = line.match(/^- `(\w+)`/);
+    if (funcMatch) {
+      sections.get(currentSection).push(funcMatch[1]);
+    }
+  }
+  return sections;
+}
+
+// ── AST Analysis ───────────────────────────────────
+function extractJS(html) {
+  const match = html.match(/<script\s+type="module">([\s\S]*)<\/script>/);
+  if (!match) return { code: '', lineOffset: 0 };
+  const tagStart = html.indexOf('<script type="module">');
+  const lineOffset = html.substring(0, tagStart).split('\n').length;
+  const code = match[1]
+    .replace(/^\s*import\s+.*$/gm, '/* import */')
+    .replace(/^\s*export\s+.*$/gm, '/* export */');
+  return { code, lineOffset };
+}
+
+function analyzeCode(code, lineOffset) {
+  let ast;
+  try {
+    ast = acorn.parse(code, {
+      ecmaVersion: 2022, sourceType: 'script',
+      locations: true, allowImportExportEverywhere: true,
+    });
+  } catch (e) {
+    console.error('Parse error:', e.message);
+    return null;
+  }
+
+  const globals = new Map();
+  const functions = new Map();
+
+  for (const node of ast.body) {
+    if (node.type === 'VariableDeclaration') {
+      for (const decl of node.declarations) {
+        collectDeclNames(decl.id).forEach(name => {
+          globals.set(name, { kind: node.kind, line: node.loc.start.line + lineOffset });
+        });
+      }
+    }
+    if (node.type === 'FunctionDeclaration' && node.id) {
+      globals.set(node.id.name, { kind: 'function', line: node.loc.start.line + lineOffset });
+    }
+  }
+
+  for (const node of ast.body) {
+    if (node.type === 'FunctionDeclaration' && node.id) {
+      const info = analyzeFunction(node, globals);
+      info.line = node.loc.start.line + lineOffset;
+      info.endLine = node.loc.end.line + lineOffset;
+      info.lines = info.endLine - info.line + 1;
+      functions.set(node.id.name, info);
+    }
+  }
+
+  return { globals, functions };
+}
+
+function collectDeclNames(pattern) {
+  const names = [];
+  if (pattern.type === 'Identifier') names.push(pattern.name);
+  else if (pattern.type === 'ObjectPattern') {
+    pattern.properties.forEach(p => names.push(...collectDeclNames(p.value || p.key)));
+  } else if (pattern.type === 'ArrayPattern') {
+    pattern.elements.forEach(e => e && names.push(...collectDeclNames(e)));
+  }
+  return names;
+}
+
+function analyzeFunction(funcNode, globals) {
+  const params = new Set();
+  funcNode.params.forEach(p => collectDeclNames(p).forEach(n => params.add(n)));
+  const locals = new Set(params);
+  const reads = new Set();
+  const writes = new Set();
+  const calls = new Set();
+
+  acorn.walk.simple(funcNode.body, {
+    VariableDeclaration(node) {
+      for (const decl of node.declarations) {
+        collectDeclNames(decl.id).forEach(n => locals.add(n));
+      }
+    },
+    FunctionDeclaration(node) { if (node.id) locals.add(node.id.name); },
+  });
+
+  acorn.walk.ancestor(funcNode.body, {
+    Identifier(node, ancestors) {
+      const name = node.name;
+      if (locals.has(name) || !globals.has(name)) return;
+      const parent = ancestors[ancestors.length - 2];
+      if (parent && parent.type === 'AssignmentExpression' && parent.left === node) writes.add(name);
+      else if (parent && parent.type === 'UpdateExpression') writes.add(name);
+      else reads.add(name);
+    },
+    CallExpression(node) {
+      if (node.callee.type === 'Identifier' && globals.has(node.callee.name)) calls.add(node.callee.name);
+      else if (node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier') {
+        const name = node.callee.object.name;
+        if (!locals.has(name) && globals.has(name)) reads.add(name);
+      }
+    },
+    MemberExpression(node, ancestors) {
+      if (node.object.type === 'Identifier') {
+        const name = node.object.name;
+        if (locals.has(name) || !globals.has(name)) return;
+        const parent = ancestors[ancestors.length - 2];
+        if (parent && parent.type === 'AssignmentExpression' && parent.left === node) writes.add(name);
+        else reads.add(name);
+      }
+    },
+  });
+
+  const rw = new Set();
+  for (const n of reads) { if (writes.has(n)) rw.add(n); }
+  for (const n of rw) { reads.delete(n); writes.delete(n); }
+  return { params, locals, reads, writes, rw, calls, line: 0, endLine: 0, lines: 0 };
+}
+
+// ── Clustering (from codemap) ──────────────────────
+function clusterFunctions(analysis) {
+  const { functions } = analysis;
+  const result = new Map();
+  if (codemapSections) {
+    let clusterId = 0;
+    for (const [, funcs] of codemapSections) {
+      for (const fname of funcs) {
+        if (functions.has(fname)) result.set(fname, clusterId);
+      }
+      clusterId++;
+    }
+    for (const fname of functions.keys()) {
+      if (!result.has(fname)) result.set(fname, clusterId);
+    }
+  } else {
+    let i = 0;
+    for (const fname of functions.keys()) result.set(fname, i++);
+  }
+  return result;
+}
+
+function nameClusters(analysis, clusters) {
+  const clusterNames = new Map();
+  if (codemapSections) {
+    let clusterId = 0;
+    for (const [section] of codemapSections) {
+      clusterNames.set(clusterId, section);
+      clusterId++;
+    }
+    const maxId = Math.max(...clusters.values());
+    if (!clusterNames.has(maxId)) clusterNames.set(maxId, 'Other');
+  } else {
+    for (const [, cid] of clusters) {
+      if (!clusterNames.has(cid)) clusterNames.set(cid, `cluster_${cid}`);
+    }
+  }
+  return clusterNames;
+}
+
+// ── Edge Building ──────────────────────────────────
+const CLUSTER_COLORS = [
+  '#4a9eff', '#ff6b6b', '#51cf66', '#ffd43b', '#cc5de8',
+  '#ff922b', '#22b8cf', '#ff6b9d', '#a9e34b', '#748ffc',
+  '#f06595', '#20c997', '#fd7e14', '#845ef7', '#12b886',
+  '#e64980', '#7950f2', '#15aabf', '#fab005', '#82c91e',
+];
+
+function buildEdges(analysis, clusters, opts) {
+  const { functions } = analysis;
+  const edges = [];
+  const names = [...functions.keys()];
+  const edgeMode = opts.edgeMode;
+
+  for (let i = 0; i < names.length; i++) {
+    for (let j = i + 1; j < names.length; j++) {
+      const a = functions.get(names[i]);
+      const b = functions.get(names[j]);
+      let weight = 0;
+      let type = 'shared';
+
+      if (edgeMode === 'shared-state' || edgeMode === 'both') {
+        const aState = new Set([...a.reads, ...a.writes, ...a.rw]);
+        const bState = new Set([...b.reads, ...b.writes, ...b.rw]);
+        for (const v of aState) { if (bState.has(v)) weight++; }
+      }
+      if (edgeMode === 'calls' || edgeMode === 'both') {
+        if (a.calls.has(names[j])) { weight += 3; type = 'call'; }
+        if (b.calls.has(names[i])) { weight += 3; type = 'call'; }
+      }
+      if (weight >= 2) {
+        edges.push({
+          source: names[i], target: names[j], type, weight,
+          srcCluster: clusters.get(names[i]),
+          tgtCluster: clusters.get(names[j]),
+        });
+      }
+    }
+  }
+  return edges;
+}
+
+// Aggregate edges between systems for the zoomed-out view
+function buildSystemEdges(edges, clusterNames) {
+  const sysEdges = new Map(); // "a-b" → { source, target, weight }
+  for (const e of edges) {
+    if (e.srcCluster === e.tgtCluster) continue;
+    const a = Math.min(e.srcCluster, e.tgtCluster);
+    const b = Math.max(e.srcCluster, e.tgtCluster);
+    const key = `${a}-${b}`;
+    if (!sysEdges.has(key)) sysEdges.set(key, { source: a, target: b, weight: 0 });
+    sysEdges.get(key).weight += e.weight;
+  }
+  return [...sysEdges.values()].filter(e => e.weight >= 3);
+}
+
+// ── Treemap Layout ─────────────────────────────────
+function computeLayout(analysis, clusters, clusterNames, w, h) {
+  const { functions } = analysis;
+
+  // Build hierarchy: root → systems → functions
+  const systemMap = new Map(); // clusterId → [{ name, lines }]
+  for (const [fname, info] of functions) {
+    const cid = clusters.get(fname);
+    if (cid === undefined) continue;
+    if (!systemMap.has(cid)) systemMap.set(cid, []);
+    systemMap.get(cid).push({ name: fname, lines: Math.max(info.lines, 8) });
+  }
+
+  const children = [];
+  for (const [cid, funcs] of systemMap) {
+    children.push({
+      name: clusterNames.get(cid) || `system_${cid}`,
+      clusterId: cid,
+      children: funcs.map(f => ({ name: f.name, value: f.lines, clusterId: cid })),
+    });
+  }
+
+  // Sort by total value descending for better treemap packing
+  children.sort((a, b) => {
+    const va = a.children.reduce((s, c) => s + c.value, 0);
+    const vb = b.children.reduce((s, c) => s + c.value, 0);
+    return vb - va;
+  });
+
+  const root = d3.hierarchy({ name: 'root', children })
+    .sum(d => d.value || 0)
+    .sort((a, b) => b.value - a.value);
+
+  d3.treemap()
+    .size([w, h])
+    .tile(d3.treemapSquarify.ratio(1.2))
+    .paddingOuter(6)
+    .paddingTop(24)
+    .paddingInner(3)
+    (root);
+
+  return root;
+}
+
+// ── Visualization ──────────────────────────────────
+let svg, gMain, gSysEdges, gSystems, gFuncs, gFuncLabels, gEdges;
+let width, height;
+let layoutRoot = null;
+let allEdges = [];
+let allSystemEdges = [];
+let currentClusters = null;
+let currentClusterNames = null;
+let zoomBehavior = null;
+
+function initSVG() {
+  svg = d3.select('#graph');
+  width = window.innerWidth;
+  height = window.innerHeight - 44;
+  svg.attr('width', width).attr('height', height);
+
+  gMain = svg.append('g');
+  gSysEdges = gMain.append('g').attr('class', 'sys-edges');
+  gSystems = gMain.append('g').attr('class', 'systems');
+  gEdges = gMain.append('g').attr('class', 'edges');
+  gFuncs = gMain.append('g').attr('class', 'funcs');
+  gFuncLabels = gMain.append('g').attr('class', 'func-labels');
+
+  zoomBehavior = d3.zoom()
+    .scaleExtent([0.3, 12])
+    .on('zoom', e => {
+      gMain.attr('transform', e.transform);
+      currentZoomK = e.transform.k;
+      updateSemanticZoom();
+      document.getElementById('zoom-level').textContent = `zoom: ${currentZoomK.toFixed(1)}x`;
+    });
+  svg.call(zoomBehavior);
+}
+
+function updateSemanticZoom() {
+  const k = currentZoomK;
+
+  // System labels: always visible, fade slightly when very zoomed in
+  gSystems.selectAll('.system-label')
+    .attr('opacity', k < 3 ? 1 : Math.max(0.3, 1 - (k - 3) * 0.1))
+    .attr('font-size', d => Math.max(8, Math.min(16, 13 / Math.max(k, 0.5))) + 'px');
+
+  // Function boxes: fade in as you zoom in
+  const funcOpacity = k < 0.6 ? 0 : k < 1.2 ? (k - 0.6) / 0.6 : 1;
+  gFuncs.selectAll('.func-box').attr('opacity', funcOpacity);
+
+  // Function labels: appear at higher zoom
+  const labelOpacity = k < 1.5 ? 0 : k < 2.5 ? (k - 1.5) : 1;
+  gFuncLabels.selectAll('.func-label').attr('opacity', labelOpacity);
+
+  // Function edges: fade in at medium zoom
+  const edgeOpacity = k < 1.0 ? 0 : k < 2.0 ? (k - 1.0) * 0.5 : 0.5;
+  gEdges.selectAll('.edge').attr('opacity', edgeOpacity);
+
+  // System edges: visible when zoomed out, fade when zoomed in
+  const sysEdgeOpacity = k < 1.5 ? 0.6 : k < 3 ? 0.6 - (k - 1.5) * 0.4 : 0;
+  gSysEdges.selectAll('.system-edge').attr('opacity', sysEdgeOpacity);
+}
+
+function renderTreemap(root, edges, systemEdges, analysis, clusters, clusterNames) {
+  gSystems.selectAll('*').remove();
+  gFuncs.selectAll('*').remove();
+  gFuncLabels.selectAll('*').remove();
+  gEdges.selectAll('*').remove();
+  gSysEdges.selectAll('*').remove();
+
+  const systems = root.children || [];
+  const funcNodes = root.leaves();
+
+  // Build lookup: funcName → leaf node (for edge drawing)
+  const funcPos = new Map();
+  for (const leaf of funcNodes) {
+    funcPos.set(leaf.data.name, {
+      x: (leaf.x0 + leaf.x1) / 2,
+      y: (leaf.y0 + leaf.y1) / 2,
+      x0: leaf.x0, y0: leaf.y0, x1: leaf.x1, y1: leaf.y1,
+    });
+  }
+
+  // System center positions for system-level edges
+  const sysCenters = new Map();
+  for (const sys of systems) {
+    sysCenters.set(sys.data.clusterId, {
+      x: (sys.x0 + sys.x1) / 2,
+      y: (sys.y0 + sys.y1) / 2,
+    });
+  }
+
+  // ── System-level edges (zoomed out) ──
+  gSysEdges.selectAll('path')
+    .data(systemEdges)
+    .join('path')
+    .attr('class', 'system-edge')
+    .attr('d', d => {
+      const s = sysCenters.get(d.source);
+      const t = sysCenters.get(d.target);
+      if (!s || !t) return '';
+      const mx = (s.x + t.x) / 2;
+      const my = (s.y + t.y) / 2;
+      const dx = t.x - s.x, dy = t.y - s.y;
+      const off = Math.min(30, Math.sqrt(dx*dx + dy*dy) * 0.15);
+      return `M${s.x},${s.y} Q${mx - dy*0.1},${my + dx*0.1} ${t.x},${t.y}`;
+    })
+    .attr('stroke', '#556')
+    .attr('stroke-width', d => Math.min(6, 1 + Math.sqrt(d.weight) * 0.5))
+    .attr('fill', 'none')
+    .attr('opacity', 0.6);
+
+  // ── System boxes ──
+  const sysGroup = gSystems.selectAll('g')
+    .data(systems)
+    .join('g')
+    .attr('class', 'system-box');
+
+  sysGroup.append('rect')
+    .attr('x', d => d.x0)
+    .attr('y', d => d.y0)
+    .attr('width', d => d.x1 - d.x0)
+    .attr('height', d => d.y1 - d.y0)
+    .attr('rx', 4)
+    .attr('fill', d => {
+      const c = d3.color(CLUSTER_COLORS[d.data.clusterId % CLUSTER_COLORS.length]);
+      c.opacity = 0.12;
+      return c + '';
+    })
+    .attr('stroke', d => CLUSTER_COLORS[d.data.clusterId % CLUSTER_COLORS.length])
+    .attr('stroke-opacity', 0.3)
+    .attr('stroke-width', 1.5);
+
+  // System labels at top of box
+  sysGroup.append('text')
+    .attr('class', 'system-label')
+    .attr('x', d => (d.x0 + d.x1) / 2)
+    .attr('y', d => d.y0 + 14)
+    .text(d => d.data.name)
+    .attr('fill', d => {
+      const c = d3.color(CLUSTER_COLORS[d.data.clusterId % CLUSTER_COLORS.length]);
+      return c.brighter(1.2) + '';
+    });
+
+  // ── Function boxes ──
+  gFuncs.selectAll('rect')
+    .data(funcNodes)
+    .join('rect')
+    .attr('class', 'func-box')
+    .attr('x', d => d.x0)
+    .attr('y', d => d.y0)
+    .attr('width', d => Math.max(0, d.x1 - d.x0))
+    .attr('height', d => Math.max(0, d.y1 - d.y0))
+    .attr('rx', 2)
+    .attr('fill', d => {
+      const c = d3.color(CLUSTER_COLORS[d.data.clusterId % CLUSTER_COLORS.length]);
+      return c.darker(0.3) + '';
+    })
+    .attr('stroke', d => CLUSTER_COLORS[d.data.clusterId % CLUSTER_COLORS.length])
+    .attr('stroke-opacity', 0.5)
+    .attr('stroke-width', 0.5)
+    .attr('opacity', 0)
+    .on('click', (e, d) => {
+      e.stopPropagation();
+      selectNode(d.data.name, analysis);
+    })
+    .on('mouseenter', (e, d) => highlightFunction(d.data.name, edges, funcPos))
+    .on('mouseleave', () => clearHighlight());
+
+  // ── Function labels ──
+  gFuncLabels.selectAll('text')
+    .data(funcNodes)
+    .join('text')
+    .attr('class', 'func-label')
+    .attr('x', d => d.x0 + 3)
+    .attr('y', d => d.y0 + 11)
+    .text(d => {
+      const w = d.x1 - d.x0;
+      const maxChars = Math.floor(w / 6);
+      return d.data.name.length > maxChars ? d.data.name.substring(0, maxChars - 1) + '…' : d.data.name;
+    })
+    .attr('opacity', 0)
+    .attr('clip-path', (d, i) => {
+      // Inline clip to box bounds
+      return null;
+    });
+
+  // ── Function edges ──
+  gEdges.selectAll('path')
+    .data(edges.filter(e => funcPos.has(e.source) && funcPos.has(e.target)))
+    .join('path')
+    .attr('class', 'edge')
+    .attr('d', d => {
+      const s = funcPos.get(d.source);
+      const t = funcPos.get(d.target);
+      const mx = (s.x + t.x) / 2;
+      const my = (s.y + t.y) / 2;
+      const dx = t.x - s.x, dy = t.y - s.y;
+      return `M${s.x},${s.y} Q${mx - dy * 0.08},${my + dx * 0.08} ${t.x},${t.y}`;
+    })
+    .attr('stroke', d => d.type === 'call' ? '#af6' : '#4a9eff')
+    .attr('stroke-width', d => Math.min(2, 0.3 + d.weight * 0.15))
+    .attr('stroke-opacity', d => Math.min(0.5, 0.1 + d.weight * 0.03))
+    .attr('fill', 'none')
+    .attr('opacity', 0);
+
+  // ── Stats ──
+  const clusterCount = new Set([...clusters.values()]).size;
+  document.getElementById('stats').innerHTML = `
+    <div>${funcNodes.length} functions</div>
+    <div>${edges.length} edges</div>
+    <div>${clusterCount} systems</div>
+  `;
+
+  // Apply semantic zoom immediately
+  updateSemanticZoom();
+}
+
+function highlightFunction(name, edges, funcPos) {
+  // Find connected functions
+  const connected = new Set();
+  connected.add(name);
+  for (const e of edges) {
+    if (e.source === name) connected.add(e.target);
+    if (e.target === name) connected.add(e.source);
+  }
+
+  gFuncs.selectAll('.func-box')
+    .attr('opacity', d => connected.has(d.data.name) ? 1 : 0.15)
+    .attr('stroke-width', d => d.data.name === name ? 2 : 0.5);
+
+  gFuncLabels.selectAll('.func-label')
+    .attr('opacity', d => connected.has(d.data.name) ? 1 : 0.05);
+
+  gEdges.selectAll('.edge')
+    .attr('opacity', d => (d.source === name || d.target === name) ? 0.7 : 0.02)
+    .attr('stroke-width', d => (d.source === name || d.target === name) ? Math.min(3, 1 + d.weight * 0.3) : 0.3);
+}
+
+function clearHighlight() {
+  updateSemanticZoom();
+  gFuncs.selectAll('.func-box').attr('stroke-width', 0.5);
+  gEdges.selectAll('.edge')
+    .attr('stroke-width', d => Math.min(2, 0.3 + d.weight * 0.15));
+}
+
+function selectNode(name, analysis) {
+  const info = analysis.functions.get(name);
+  if (!info) return;
+  selectedNode = name;
+  const panel = document.getElementById('info-panel');
+  panel.classList.add('open');
+  document.getElementById('info-name').textContent = name;
+
+  const reads = [...info.reads].sort();
+  const writes = [...info.writes].sort();
+  const rw = [...info.rw].sort();
+  const calls = [...info.calls].sort();
+
+  // Find system name
+  const cid = currentClusters ? currentClusters.get(name) : null;
+  const sysName = cid != null && currentClusterNames ? currentClusterNames.get(cid) : '?';
+
+  document.getElementById('info-body').innerHTML = `
+    <div class="section"><div class="section-title">Location</div>Line ${info.line} — ${info.endLine} (${info.lines} lines)</div>
+    <div class="section"><div class="section-title">System</div>${sysName}</div>
+    ${reads.length ? `<div class="section"><div class="section-title">Reads (${reads.length})</div>${reads.map(r => `<span class="tag read">${r}</span>`).join('')}</div>` : ''}
+    ${writes.length ? `<div class="section"><div class="section-title">Writes (${writes.length})</div>${writes.map(w => `<span class="tag write">${w}</span>`).join('')}</div>` : ''}
+    ${rw.length ? `<div class="section"><div class="section-title">Read+Write (${rw.length})</div>${rw.map(v => `<span class="tag rw">${v}</span>`).join('')}</div>` : ''}
+    ${calls.length ? `<div class="section"><div class="section-title">Calls (${calls.length})</div>${calls.map(c => `<span class="tag call">${c}</span>`).join('')}</div>` : ''}
+  `;
+}
+
+// ── Search ─────────────────────────────────────────
+document.getElementById('search').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase();
+  if (!q) { clearHighlight(); return; }
+  const matches = new Set();
+  gFuncs.selectAll('.func-box').each(d => {
+    if (d.data.name.toLowerCase().includes(q)) matches.add(d.data.name);
+  });
+  gFuncs.selectAll('.func-box')
+    .attr('opacity', d => matches.has(d.data.name) ? 1 : 0.08);
+  gFuncLabels.selectAll('.func-label')
+    .attr('opacity', d => matches.has(d.data.name) ? 1 : 0.03);
+  // Also highlight parent systems
+  const matchClusters = new Set();
+  if (currentClusters) {
+    for (const m of matches) {
+      const cid = currentClusters.get(m);
+      if (cid != null) matchClusters.add(cid);
+    }
+  }
+  gSystems.selectAll('.system-box rect')
+    .attr('opacity', (d) => matchClusters.has(d.data.clusterId) ? 1 : 0.3);
+});
+
+// ── Controls ───────────────────────────────────────
+function getOpts() {
+  return { edgeMode: document.getElementById('edge-mode').value };
+}
+
+function rebuild() {
+  if (!analysisResult) return;
+  const clusters = clusterFunctions(analysisResult);
+  const clusterNames = nameClusters(analysisResult, clusters);
+  currentClusters = clusters;
+  currentClusterNames = clusterNames;
+
+  const root = computeLayout(analysisResult, clusters, clusterNames, width, height);
+  layoutRoot = root;
+
+  const edges = buildEdges(analysisResult, clusters, getOpts());
+  allEdges = edges;
+  const systemEdges = buildSystemEdges(edges, clusterNames);
+  allSystemEdges = systemEdges;
+
+  renderTreemap(root, edges, systemEdges, analysisResult, clusters, clusterNames);
+}
+
+document.getElementById('edge-mode').addEventListener('change', rebuild);
+document.getElementById('graph').addEventListener('click', e => {
+  if (e.target.tagName === 'svg') {
+    document.getElementById('info-panel').classList.remove('open');
+    selectedNode = null;
+  }
+});
+
+// ── Claude Focus (SSE) ─────────────────────────────
+let currentFocus = null;
+
+function connectFocusSSE() {
+  const sseUrl = location.origin + '/focus-events';
+  const source = new EventSource(sseUrl);
+
+  source.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.timestamp && Date.now() - data.timestamp > 30000) {
+        applyFocus(null);
+      } else {
+        applyFocus(data);
+      }
+    } catch {
+      applyFocus(null);
+    }
+  };
+
+  source.onerror = () => {
+    document.getElementById('focus-panel').classList.remove('active');
+  };
+}
+
+function applyFocus(data) {
+  const panel = document.getElementById('focus-panel');
+  currentFocus = data;
+
+  if (!data || !data.focus || data.focus.length === 0) {
+    panel.classList.remove('active');
+    clearHighlight();
+    return;
+  }
+
+  panel.classList.add('active');
+  panel.querySelector('.focus-step').textContent = data.step || '';
+  panel.querySelector('.focus-desc').textContent = data.description || '';
+
+  const tagsHtml = data.focus.map(f => {
+    const level = f.relevance >= 0.7 ? 'high' : f.relevance >= 0.4 ? 'med' : 'low';
+    return `<span class="focus-tag ${level}">${f.name} ${(f.relevance * 100)|0}%</span>`;
+  }).join('');
+  panel.querySelector('.focus-targets').innerHTML = tagsHtml;
+
+  // Build relevance map
+  const relevanceMap = new Map();
+  for (const f of data.focus) relevanceMap.set(f.name, f.relevance);
+
+  // BFS spread via edges
+  const adj = new Map();
+  for (const e of allEdges) {
+    if (!adj.has(e.source)) adj.set(e.source, new Set());
+    if (!adj.has(e.target)) adj.set(e.target, new Set());
+    adj.get(e.source).add(e.target);
+    adj.get(e.target).add(e.source);
+  }
+  const queue = [...data.focus.map(f => ({ id: f.name, rel: f.relevance, depth: 0 }))];
+  const visited = new Set(data.focus.map(f => f.name));
+  while (queue.length) {
+    const { id, rel, depth } = queue.shift();
+    if (depth >= 3) continue;
+    for (const nb of (adj.get(id) || [])) {
+      if (!visited.has(nb)) {
+        visited.add(nb);
+        const spreadRel = rel * 0.4;
+        if (spreadRel > (relevanceMap.get(nb) || 0)) relevanceMap.set(nb, spreadRel);
+        queue.push({ id: nb, rel: spreadRel, depth: depth + 1 });
+      }
+    }
+  }
+
+  // Apply to function boxes
+  gFuncs.selectAll('.func-box')
+    .attr('opacity', d => {
+      const r = relevanceMap.get(d.data.name);
+      return r != null ? 0.3 + r * 0.7 : 0.05;
+    })
+    .attr('stroke-width', d => (relevanceMap.get(d.data.name) || 0) >= 0.7 ? 2 : 0.5);
+
+  gFuncLabels.selectAll('.func-label')
+    .attr('opacity', d => {
+      const r = relevanceMap.get(d.data.name) || 0;
+      return r >= 0.5 ? 1 : r >= 0.2 ? 0.4 : 0.04;
+    });
+
+  gEdges.selectAll('.edge')
+    .attr('opacity', d => {
+      const sr = relevanceMap.get(d.source) || 0;
+      const tr = relevanceMap.get(d.target) || 0;
+      const minR = Math.min(sr, tr);
+      return minR >= 0.5 ? 0.7 : minR >= 0.2 ? 0.2 : 0.01;
+    });
+
+  // Highlight relevant system boxes
+  const sysFocused = new Map(); // clusterId → max relevance
+  for (const [name, rel] of relevanceMap) {
+    const cid = currentClusters ? currentClusters.get(name) : null;
+    if (cid != null) {
+      sysFocused.set(cid, Math.max(sysFocused.get(cid) || 0, rel));
+    }
+  }
+  gSystems.selectAll('.system-box rect')
+    .attr('stroke-opacity', d => {
+      const r = sysFocused.get(d.data.clusterId) || 0;
+      return r >= 0.5 ? 0.8 : r >= 0.2 ? 0.4 : 0.15;
+    })
+    .attr('stroke-width', d => (sysFocused.get(d.data.clusterId) || 0) >= 0.5 ? 2.5 : 1.5);
+}
+
+// ── Main Loop ──────────────────────────────────────
+async function loadAndAnalyze() {
+  const statusEl = document.getElementById('status');
+  try {
+    const [html, codemapMd] = await Promise.all([
+      fetch(SRC).then(r => r.text()),
+      fetch(CODEMAP_SRC).then(r => r.ok ? r.text() : null).catch(() => null),
+    ]);
+    const h = hashStr(html + (codemapMd || ''));
+    if (h === lastHash) return;
+    lastHash = h;
+
+    statusEl.textContent = 'parsing...';
+    if (codemapMd) codemapSections = parseCodemap(codemapMd);
+
+    const { code, lineOffset } = extractJS(html);
+    const result = analyzeCode(code, lineOffset);
+    if (!result) { statusEl.textContent = 'parse error'; return; }
+
+    analysisResult = result;
+    const nSections = codemapSections ? codemapSections.size : 0;
+    statusEl.textContent = `live — ${result.functions.size} funcs, ${nSections} systems`;
+    statusEl.className = 'live';
+
+    rebuild();
+  } catch (e) {
+    statusEl.textContent = 'fetch error: ' + e.message;
+    console.error(e);
+  }
+}
+
+// ── Init ───────────────────────────────────────────
+initSVG();
+window.addEventListener('resize', () => {
+  width = window.innerWidth;
+  height = window.innerHeight - 44;
+  svg.attr('width', width).attr('height', height);
+  rebuild();
+});
+
+loadAndAnalyze();
+setInterval(loadAndAnalyze, REFRESH_MS);
+connectFocusSSE();
+</script>
+</body>
+</html>

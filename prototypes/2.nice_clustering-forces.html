@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Equinox — Live Dependency Graph</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', monospace; overflow: hidden; }
+
+#toolbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+  background: #111118; border-bottom: 1px solid #2a2a35;
+  padding: 8px 16px; display: flex; align-items: center; gap: 16px;
+  font-size: 12px;
+}
+#toolbar select, #toolbar input { background: #1a1a25; color: #ccc; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 12px; }
+#toolbar label { color: #888; cursor: pointer; user-select: none; }
+#toolbar .sep { width: 1px; height: 20px; background: #333; }
+#status { color: #555; margin-left: auto; }
+#status.live { color: #4a4; }
+
+#info-panel {
+  position: fixed; top: 44px; right: 0; width: 320px; bottom: 0; z-index: 5;
+  background: #111118ee; border-left: 1px solid #2a2a35;
+  padding: 16px; overflow-y: auto; font-size: 12px;
+  transform: translateX(100%); transition: transform 0.2s;
+}
+#info-panel.open { transform: translateX(0); }
+#info-panel h3 { color: #e8e8f0; margin-bottom: 8px; font-size: 14px; }
+#info-panel .section { margin-bottom: 12px; }
+#info-panel .section-title { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+#info-panel .tag { display: inline-block; background: #222; border-radius: 3px; padding: 2px 6px; margin: 2px; font-size: 11px; }
+#info-panel .tag.read { border-left: 2px solid #6af; }
+#info-panel .tag.write { border-left: 2px solid #f66; }
+#info-panel .tag.call { border-left: 2px solid #af6; }
+#info-panel .tag.rw { border-left: 2px solid #fa6; }
+
+#legend {
+  position: fixed; bottom: 16px; left: 16px; z-index: 5;
+  background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
+  padding: 12px; font-size: 11px;
+}
+#legend .item { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+#legend .dot { width: 10px; height: 10px; border-radius: 50%; }
+
+#stats {
+  position: fixed; bottom: 16px; right: 16px; z-index: 5;
+  background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
+  padding: 12px; font-size: 11px; text-align: right;
+}
+
+#focus-panel {
+  position: fixed; top: 50px; left: 50%; transform: translateX(-50%); z-index: 15;
+  background: #111118ee; border: 1px solid #3a3a50; border-radius: 8px;
+  padding: 10px 18px; font-size: 12px; max-width: 600px;
+  opacity: 0; transition: opacity 0.4s; pointer-events: none;
+}
+#focus-panel.active { opacity: 1; pointer-events: auto; }
+#focus-panel .focus-desc { color: #aab; margin-bottom: 6px; }
+#focus-panel .focus-step { color: #7af; font-weight: 600; }
+#focus-panel .focus-targets { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+#focus-panel .focus-tag {
+  display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px;
+  background: #1a1a2a; border: 1px solid #333;
+}
+#focus-panel .focus-tag.high { border-color: #7af; color: #7af; }
+#focus-panel .focus-tag.med { border-color: #5a8; color: #5a8; }
+#focus-panel .focus-tag.low { border-color: #555; color: #888; }
+.node circle.focus-glow { filter: drop-shadow(0 0 6px currentColor); }
+
+svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
+.link { transition: stroke-opacity 0.2s, stroke-width 0.2s; }
+.link:hover { stroke-opacity: 0.8 !important; }
+.node circle { cursor: pointer; stroke-width: 1.5; transition: opacity 0.2s; }
+.node text { fill: #999; font-size: 10px; pointer-events: none; }
+.node.highlighted circle { stroke-width: 3; }
+.hull { fill-opacity: 0.04; stroke-opacity: 0.15; stroke-width: 1.5; }
+.cluster-label { font-size: 11px; font-weight: 600; fill-opacity: 0.6; pointer-events: none; text-anchor: middle; dominant-baseline: central; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <strong style="color:#e8e8f0">depgraph</strong>
+  <div class="sep"></div>
+  <label>View:
+    <select id="view-mode">
+      <option value="systems">Systems (clustered)</option>
+      <option value="functions">All functions</option>
+      <option value="hypergraph">Hypergraph (funcs + globals)</option>
+    </select>
+  </label>
+  <div class="sep"></div>
+  <label>Edge:
+    <select id="edge-mode">
+      <option value="shared-state">Shared state</option>
+      <option value="calls">Function calls</option>
+      <option value="both">Both</option>
+    </select>
+  </label>
+  <div class="sep"></div>
+  <label><input type="checkbox" id="show-labels" checked> Labels</label>
+  <label><input type="checkbox" id="show-hulls" checked> Clusters</label>
+  <label><input type="range" id="min-shared" min="1" max="15" value="3" style="width:80px"> Min shared: <span id="min-shared-val">3</span></label>
+  <div class="sep"></div>
+  <label>Search: <input type="text" id="search" placeholder="function name..." style="width:140px"></label>
+  <span id="status">waiting...</span>
+</div>
+
+<div id="info-panel">
+  <h3 id="info-name">Select a function</h3>
+  <div id="info-body"></div>
+</div>
+
+<div id="focus-panel">
+  <div class="focus-step"></div>
+  <div class="focus-desc"></div>
+  <div class="focus-targets"></div>
+</div>
+<div id="legend"></div>
+<div id="stats"></div>
+
+<svg id="graph"></svg>
+
+<script src="https://cdn.jsdelivr.net/npm/acorn@8.14.1/dist/acorn.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/acorn-walk@8.3.4/dist/walk.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script>
+// ── Config ─────────────────────────────────────────
+// Resolve source path relative to this HTML file's location
+const _base = location.pathname.substring(0, location.pathname.lastIndexOf('/'));
+const SRC = _base + '/../prototype/index.html';
+const CODEMAP_SRC = '/tools/project_codemap.md';
+const REFRESH_MS = 3000;
+let lastHash = null;
+let codemapSections = null;
+
+// ── State ──────────────────────────────────────────
+let analysisResult = null;
+let simulation = null;
+let selectedNode = null;
+let currentK = 0.8; // current zoom scale
+
+// ── Utility ────────────────────────────────────────
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+// ── Codemap Parsing ────────────────────────────────
+function parseCodemap(md) {
+  const sections = new Map();
+  let currentSection = null;
+  for (const line of md.split('\n')) {
+    const secMatch = line.match(/^## (.+)/);
+    if (secMatch) {
+      currentSection = secMatch[1].trim();
+      if (currentSection === 'Controls' || currentSection === 'Constants') { currentSection = null; continue; }
+      if (!sections.has(currentSection)) sections.set(currentSection, []);
+      continue;
+    }
+    if (!currentSection) continue;
+    const funcMatch = line.match(/^- `(\w+)`/);
+    if (funcMatch) sections.get(currentSection).push(funcMatch[1]);
+  }
+  return sections;
+}
+
+// ── AST Analysis ───────────────────────────────────
+function extractJS(html) {
+  // Find the module script (second <script> block, type="module")
+  // Use greedy match — the module script is the last/largest script block
+  const match = html.match(/<script\s+type="module">([\s\S]*)<\/script>/);
+  if (!match) return { code: '', lineOffset: 0 };
+  // Find the start position of the matched script tag
+  const tagStart = html.indexOf('<script type="module">');
+  const lineOffset = html.substring(0, tagStart).split('\n').length;
+  // Strip import/export lines so acorn parses as plain script
+  const code = match[1]
+    .replace(/^\s*import\s+.*$/gm, '/* import */')
+    .replace(/^\s*export\s+.*$/gm, '/* export */');
+  return { code, lineOffset };
+}
+
+function analyzeCode(code, lineOffset) {
+  let ast;
+  try {
+    ast = acorn.parse(code, {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      locations: true,
+      allowImportExportEverywhere: true,
+    });
+  } catch (e) {
+    console.error('Parse error:', e.message);
+    return null;
+  }
+
+  const globals = new Map();   // name → { kind, line }
+  const functions = new Map(); // name → { line, endLine, params, locals, reads, writes, calls, lines }
+
+  // Pass 1: collect top-level declarations
+  for (const node of ast.body) {
+    if (node.type === 'VariableDeclaration') {
+      for (const decl of node.declarations) {
+        collectDeclNames(decl.id).forEach(name => {
+          globals.set(name, { kind: node.kind, line: node.loc.start.line + lineOffset });
+        });
+      }
+    }
+    if (node.type === 'FunctionDeclaration' && node.id) {
+      globals.set(node.id.name, { kind: 'function', line: node.loc.start.line + lineOffset });
+    }
+  }
+
+  // Pass 2: analyze each function
+  for (const node of ast.body) {
+    if (node.type === 'FunctionDeclaration' && node.id) {
+      const info = analyzeFunction(node, globals);
+      info.line = node.loc.start.line + lineOffset;
+      info.endLine = node.loc.end.line + lineOffset;
+      info.lines = info.endLine - info.line + 1;
+      functions.set(node.id.name, info);
+    }
+  }
+
+  return { globals, functions };
+}
+
+function collectDeclNames(pattern) {
+  const names = [];
+  if (pattern.type === 'Identifier') names.push(pattern.name);
+  else if (pattern.type === 'ObjectPattern') {
+    pattern.properties.forEach(p => names.push(...collectDeclNames(p.value || p.key)));
+  } else if (pattern.type === 'ArrayPattern') {
+    pattern.elements.forEach(e => e && names.push(...collectDeclNames(e)));
+  }
+  return names;
+}
+
+function analyzeFunction(funcNode, globals) {
+  const params = new Set();
+  funcNode.params.forEach(p => collectDeclNames(p).forEach(n => params.add(n)));
+
+  const locals = new Set(params);
+  const reads = new Set();
+  const writes = new Set();
+  const calls = new Set();
+
+  // Collect local declarations inside the function
+  acorn.walk.simple(funcNode.body, {
+    VariableDeclaration(node) {
+      for (const decl of node.declarations) {
+        collectDeclNames(decl.id).forEach(n => locals.add(n));
+      }
+    },
+    FunctionDeclaration(node) {
+      if (node.id) locals.add(node.id.name);
+    },
+  });
+
+  // Now walk for reads, writes, calls
+  acorn.walk.ancestor(funcNode.body, {
+    Identifier(node, ancestors) {
+      const name = node.name;
+      if (locals.has(name) || !globals.has(name)) return;
+      // Check if this is a write (assignment target)
+      const parent = ancestors[ancestors.length - 2];
+      if (parent && parent.type === 'AssignmentExpression' && parent.left === node) {
+        writes.add(name);
+      } else if (parent && parent.type === 'UpdateExpression') {
+        writes.add(name);
+      } else {
+        reads.add(name);
+      }
+    },
+    CallExpression(node) {
+      if (node.callee.type === 'Identifier' && globals.has(node.callee.name)) {
+        calls.add(node.callee.name);
+      } else if (node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier') {
+        // Track obj.method() — the object is a read
+        const name = node.callee.object.name;
+        if (!locals.has(name) && globals.has(name)) reads.add(name);
+      }
+    },
+    MemberExpression(node, ancestors) {
+      if (node.object.type === 'Identifier') {
+        const name = node.object.name;
+        if (locals.has(name) || !globals.has(name)) return;
+        const parent = ancestors[ancestors.length - 2];
+        if (parent && parent.type === 'AssignmentExpression' && parent.left === node) {
+          writes.add(name);
+        } else {
+          reads.add(name);
+        }
+      }
+    },
+  });
+
+  // reads that are also writes → rw, remove from reads
+  const rw = new Set();
+  for (const n of reads) { if (writes.has(n)) { rw.add(n); } }
+  for (const n of rw) { reads.delete(n); writes.delete(n); }
+
+  return { params, locals, reads, writes, rw, calls, line: 0, endLine: 0, lines: 0 };
+}
+
+// ── Clustering ─────────────────────────────────────
+// Systems are defined by the codemap sections (project_codemap.md).
+// Each section (e.g. "NPCs", "Wind & Smoke") is a system/cluster.
+// Functions not in the codemap go into "Other".
+// Fallback: shared-state affinity clustering when codemap unavailable.
+
+function clusterFunctions(analysis) {
+  const { functions } = analysis;
+  const result = new Map();
+
+  if (codemapSections && codemapSections.size > 0) {
+    console.log(`[depgraph] Using codemap: ${codemapSections.size} systems`);
+    let clusterId = 0;
+    for (const [, funcs] of codemapSections) {
+      for (const fname of funcs) {
+        if (functions.has(fname)) result.set(fname, clusterId);
+      }
+      clusterId++;
+    }
+    // Uncategorized functions → "Other"
+    for (const fname of functions.keys()) {
+      if (!result.has(fname)) result.set(fname, clusterId);
+    }
+    return result;
+  }
+
+  // Fallback: shared-state affinity clustering
+  console.warn('[depgraph] Codemap not loaded, using shared-state clustering');
+  const names = [...functions.keys()];
+  const n = names.length;
+  if (n === 0) return result;
+
+  function stateSet(info) {
+    const s = new Set();
+    info.reads.forEach(v => s.add(v));
+    info.writes.forEach(v => s.add(v));
+    info.rw.forEach(v => s.add(v));
+    return s;
+  }
+  const states = names.map(name => stateSet(functions.get(name)));
+  const cluster = new Array(n);
+  for (let i = 0; i < n; i++) cluster[i] = i;
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      let shared = 0;
+      for (const v of states[i]) { if (states[j].has(v)) shared++; }
+      const fi = functions.get(names[i]), fj = functions.get(names[j]);
+      if (fi.calls.has(names[j])) shared += 2;
+      if (fj.calls.has(names[i])) shared += 2;
+      if (shared >= 3) {
+        const ci = cluster[i], cj = cluster[j];
+        if (ci !== cj) { for (let k = 0; k < n; k++) { if (cluster[k] === cj) cluster[k] = ci; } }
+      }
+    }
+  }
+  const clusterMap = new Map();
+  let nextId = 0;
+  for (let i = 0; i < n; i++) {
+    if (!clusterMap.has(cluster[i])) clusterMap.set(cluster[i], nextId++);
+    result.set(names[i], clusterMap.get(cluster[i]));
+  }
+  return result;
+}
+
+function nameClusters(analysis, clusters) {
+  const clusterNames = new Map();
+
+  if (codemapSections && codemapSections.size > 0) {
+    let clusterId = 0;
+    for (const [section] of codemapSections) {
+      clusterNames.set(clusterId, section);
+      clusterId++;
+    }
+    const maxId = Math.max(...clusters.values());
+    if (!clusterNames.has(maxId)) clusterNames.set(maxId, 'Other');
+    return clusterNames;
+  }
+
+  // Fallback: name by most common shared globals + keyword hints
+  const { functions } = analysis;
+  const systemHints = [
+    [/npc|villager|corn|farm/i, 'NPCs'],
+    [/squirrel|plant|acorn/i, 'Squirrels'],
+    [/wraith|ghost|night|combat|ashen|contam/i, 'Night/Combat'],
+    [/terrain|height|noise|fbm/i, 'Terrain'],
+    [/tree|rock|building|settlement|wall/i, 'World Gen'],
+    [/camera|hud|project|axis/i, 'Camera/HUD'],
+    [/wind|smoke|chimney/i, 'Wind/Smoke'],
+    [/light|moon|sun|shadow|deferred/i, 'Lighting'],
+    [/path|tramp|trail/i, 'Paths'],
+    [/turret|zap|stone/i, 'Turrets'],
+    [/player/i, 'Player'],
+    [/animate|clock|dt/i, 'Main Loop'],
+  ];
+  for (const [cid] of new Set(clusters.values())) {
+    const members = [...clusters.entries()].filter(([, c]) => c === cid).map(([f]) => f);
+    const allText = members.join(' ');
+    let name = null;
+    for (const [re, label] of systemHints) {
+      if (re.test(allText)) { name = label; break; }
+    }
+    clusterNames.set(cid, name || `system_${cid}`);
+  }
+  return clusterNames;
+}
+
+// ── Graph Building ─────────────────────────────────
+const CLUSTER_COLORS = [
+  '#4a9eff', '#ff6b6b', '#51cf66', '#ffd43b', '#cc5de8',
+  '#ff922b', '#22b8cf', '#ff6b9d', '#a9e34b', '#748ffc',
+  '#f06595', '#20c997', '#fd7e14', '#845ef7', '#12b886',
+  '#e64980', '#7950f2', '#15aabf', '#fab005', '#82c91e',
+];
+
+function buildGraph(analysis, clusters, clusterNames, opts) {
+  const { functions } = analysis;
+  const nodes = [];
+  const links = [];
+  const nodeMap = new Map();
+
+  const viewMode = opts.viewMode;
+  const edgeMode = opts.edgeMode;
+  const minShared = opts.minShared;
+
+  // Function nodes
+  for (const [name, info] of functions) {
+    const clusterId = clusters.get(name) ?? 0;
+    const node = {
+      id: name,
+      type: 'function',
+      cluster: clusterId,
+      clusterName: clusterNames.get(clusterId) || 'misc',
+      info,
+      radius: Math.max(4, Math.sqrt(info.lines) * 1.2),
+      color: CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length],
+    };
+    nodes.push(node);
+    nodeMap.set(name, node);
+  }
+
+  // Hypergraph: add global variable nodes
+  if (viewMode === 'hypergraph') {
+    const globalUsage = new Map(); // global → [func names that use it]
+    for (const [fname, info] of functions) {
+      for (const s of [info.reads, info.writes, info.rw]) {
+        for (const g of s) {
+          if (!globalUsage.has(g)) globalUsage.set(g, new Set());
+          globalUsage.get(g).add(fname);
+        }
+      }
+    }
+    // Only show globals used by 2+ functions
+    for (const [gname, users] of globalUsage) {
+      if (users.size < 2) continue;
+      const node = {
+        id: gname,
+        type: 'global',
+        cluster: -1,
+        clusterName: 'globals',
+        radius: Math.max(3, Math.sqrt(users.size) * 2),
+        color: '#555',
+      };
+      nodes.push(node);
+      nodeMap.set(gname, node);
+      for (const fname of users) {
+        links.push({ source: fname, target: gname, type: 'uses', weight: 1 });
+      }
+    }
+  } else {
+    // Function-to-function edges
+    const names = [...functions.keys()];
+    for (let i = 0; i < names.length; i++) {
+      for (let j = i + 1; j < names.length; j++) {
+        const a = functions.get(names[i]);
+        const b = functions.get(names[j]);
+        let weight = 0;
+        let type = 'shared';
+
+        if (edgeMode === 'shared-state' || edgeMode === 'both') {
+          // Count shared globals
+          const aState = new Set([...a.reads, ...a.writes, ...a.rw]);
+          const bState = new Set([...b.reads, ...b.writes, ...b.rw]);
+          for (const v of aState) { if (bState.has(v)) weight++; }
+        }
+
+        if (edgeMode === 'calls' || edgeMode === 'both') {
+          if (a.calls.has(names[j])) { weight += 3; type = 'call'; }
+          if (b.calls.has(names[i])) { weight += 3; type = 'call'; }
+        }
+
+        if (weight >= minShared) {
+          links.push({ source: names[i], target: names[j], type, weight });
+        }
+      }
+    }
+  }
+
+  return { nodes, links, nodeMap };
+}
+
+// ── Visualization ──────────────────────────────────
+let svg, gLinks, gNodes, gHulls, gLabels, gClusterLabels;
+let width, height;
+
+function initSVG() {
+  svg = d3.select('#graph');
+  width = window.innerWidth;
+  height = window.innerHeight - 44;
+  svg.attr('width', width).attr('height', height);
+
+  // Layers
+  gHulls = svg.append('g').attr('class', 'hulls');
+  gLinks = svg.append('g').attr('class', 'links');
+  gNodes = svg.append('g').attr('class', 'nodes');
+  gLabels = svg.append('g').attr('class', 'labels');
+  gClusterLabels = svg.append('g').attr('class', 'cluster-labels');
+
+  // Zoom
+  const zoom = d3.zoom()
+    .scaleExtent([0.1, 12])
+    .on('zoom', e => {
+      gHulls.attr('transform', e.transform);
+      gLinks.attr('transform', e.transform);
+      gNodes.attr('transform', e.transform);
+      gLabels.attr('transform', e.transform);
+      gClusterLabels.attr('transform', e.transform);
+      currentK = e.transform.k;
+      applySemanticZoom();
+    });
+  svg.call(zoom);
+  svg.call(zoom.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
+}
+
+// ── Semantic Zoom ──────────────────────────────────
+// Controls what's visible/sized based on zoom scale k.
+// Low k (zoomed out): cluster labels large, function labels hidden, edges faint
+// High k (zoomed in): cluster labels fade to background, function labels appear, edges visible
+function applySemanticZoom() {
+  const k = currentK;
+
+  // Function labels: only show when node is big enough on screen.
+  // If the circle is large enough to contain the text, place label inside (centered).
+  // Otherwise place it below the circle.
+  gLabels.selectAll('text').each(function(d) {
+    const el = d3.select(this);
+    const r = d.radius || 4;
+    const screenRadius = r * k;
+    if (screenRadius < 6) {
+      el.attr('opacity', 0);
+      return;
+    }
+    const opacity = Math.min(1, (screenRadius - 6) / 8);
+    const fontSize = Math.max(6, Math.min(11, 10 / k));
+    // Approximate text width: ~0.6 * fontSize * charCount (in world coords)
+    const textWidth = d.id.length * fontSize * 0.6;
+    const fitsInside = textWidth < r * 1.6 && fontSize < r * 1.2;
+    el.attr('opacity', opacity)
+      .attr('font-size', fontSize)
+      .attr('dominant-baseline', fitsInside ? 'central' : 'auto')
+      .attr('dy', fitsInside ? 0 : r + fontSize * 1.2)
+      .attr('fill', fitsInside ? '#fff' : (d.type === 'global' ? '#666' : '#999'));
+  });
+
+  // Cluster labels: always readable — scale inversely with zoom
+  gClusterLabels.selectAll('text').each(function() {
+    const fontSize = Math.max(8, Math.min(18, 13 / k));
+    const opacity = k < 0.3 ? 0.4 : k < 2 ? 0.7 : Math.max(0.2, 0.7 - (k - 2) * 0.1);
+    d3.select(this)
+      .attr('font-size', fontSize)
+      .attr('opacity', opacity);
+  });
+
+  // Edges: fade at very low zoom to reduce clutter
+  const edgeOpacity = k < 0.3 ? 0.02 : k < 0.6 ? 0.1 : 1;
+  gLinks.attr('opacity', edgeOpacity);
+
+  // Hulls: more visible when zoomed out
+  const hullOpacity = k < 0.5 ? 0.15 : k < 1.5 ? 0.08 : 0.04;
+  gHulls.selectAll('.hull').attr('fill-opacity', hullOpacity);
+}
+
+function renderGraph(graph, analysis, clusters, clusterNames) {
+  const { nodes, links } = graph;
+  const showLabels = document.getElementById('show-labels').checked;
+  const showHulls = document.getElementById('show-hulls').checked;
+
+  // Clear
+  gLinks.selectAll('*').remove();
+  gNodes.selectAll('*').remove();
+  gClusterLabels.selectAll('*').remove();
+  gHulls.selectAll('*').remove();
+  gLabels.selectAll('*').remove();
+
+  // Pre-position nodes by cluster so layout starts sensible
+  const clusterIds = [...new Set(nodes.filter(n => n.type === 'function').map(n => n.cluster))];
+  const numClusters = clusterIds.length;
+  const clusterMembers = new Map();
+  for (const cid of clusterIds) clusterMembers.set(cid, nodes.filter(n => n.cluster === cid));
+  // Place clusters in a tight circle
+  const baseRadius = Math.min(width, height) * 0.08 * Math.sqrt(Math.max(1, numClusters));
+  clusterIds.forEach((cid, i) => {
+    const angle = (2 * Math.PI * i) / numClusters - Math.PI / 2;
+    const cx = Math.cos(angle) * baseRadius;
+    const cy = Math.sin(angle) * baseRadius;
+    const members = clusterMembers.get(cid);
+    const memberRadius = Math.sqrt(members.length) * 8;
+    members.forEach((n, j) => {
+      const a2 = (2 * Math.PI * j) / members.length;
+      const r2 = memberRadius * (0.3 + 0.7 * Math.random());
+      n.x = cx + Math.cos(a2) * r2;
+      n.y = cy + Math.sin(a2) * r2;
+    });
+  });
+  // Place globals near center
+  nodes.filter(n => n.type === 'global').forEach((n, i) => {
+    const a = (2 * Math.PI * i) / Math.max(1, nodes.filter(m => m.type === 'global').length);
+    n.x = Math.cos(a) * 15;
+    n.y = Math.sin(a) * 15;
+  });
+
+  // Simulation — tight layout, strong clustering
+  if (simulation) simulation.stop();
+  simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(d => 12 / (d.weight || 1)).strength(d => Math.min(0.8, (d.weight || 1) * 0.15)))
+    .force('charge', d3.forceManyBody().strength(-8).distanceMax(1))
+    .force('center', d3.forceCenter(0, 0).strength(0.0))
+    .force('collision', d3.forceCollide(d => d.radius + 2).strength(0.3).iterations(2))
+    .force('cluster', clusterForce(nodes, clusters, clusterNames, 5))
+    .force('clusterSep', clusterSeparationForce(nodes, clusters, baseRadius * 2))
+    .alpha(0.2)
+    .alphaDecay(0.4);
+    /**
+     * Alpha = 0 creates spherical layout
+     */
+
+  // Compute node degree for density-adaptive rendering
+  const nodeDegree = new Map();
+  for (const n of nodes) nodeDegree.set(n.id, 0);
+  for (const l of links) {
+    const sid = typeof l.source === 'object' ? l.source.id : l.source;
+    const tid = typeof l.target === 'object' ? l.target.id : l.target;
+    nodeDegree.set(sid, (nodeDegree.get(sid) || 0) + 1);
+    nodeDegree.set(tid, (nodeDegree.get(tid) || 0) + 1);
+  }
+  // Build adjacency list for BFS
+  const adjacency = new Map();
+  for (const n of nodes) adjacency.set(n.id, new Set());
+  for (const l of links) {
+    const sid = typeof l.source === 'object' ? l.source.id : l.source;
+    const tid = typeof l.target === 'object' ? l.target.id : l.target;
+    adjacency.get(sid).add(tid);
+    adjacency.get(tid).add(sid);
+  }
+  // Store on graph for highlight use
+  graph.nodeDegree = nodeDegree;
+  graph.adjacency = adjacency;
+
+  // Density-adaptive base opacity: edges between high-degree nodes fade
+  function baseEdgeOpacity(l) {
+    const sid = typeof l.source === 'object' ? l.source.id : l.source;
+    const tid = typeof l.target === 'object' ? l.target.id : l.target;
+    const maxDeg = Math.max(nodeDegree.get(sid) || 1, nodeDegree.get(tid) || 1);
+    // High connectivity → lower opacity (range: 0.08 for very dense, 0.4 for sparse)
+    return Math.max(0.08, 0.4 / Math.sqrt(maxDeg));
+  }
+  function baseEdgeWidth(l) {
+    const sid = typeof l.source === 'object' ? l.source.id : l.source;
+    const tid = typeof l.target === 'object' ? l.target.id : l.target;
+    const maxDeg = Math.max(nodeDegree.get(sid) || 1, nodeDegree.get(tid) || 1);
+    const w = 0.5 + (l.weight || 1) * 0.3;
+    // Thin out edges in dense hubs
+    return Math.min(3, w / Math.max(1, Math.sqrt(maxDeg) * 0.4));
+  }
+
+  // Links
+  const link = gLinks.selectAll('line')
+    .data(links)
+    .join('line')
+    .attr('class', 'link')
+    .attr('stroke', d => d.type === 'call' ? '#af6' : '#4a9eff')
+    .attr('stroke-width', d => baseEdgeWidth(d))
+    .attr('stroke-opacity', d => baseEdgeOpacity(d))
+    .attr('stroke-dasharray', d => d.type === 'uses' ? '3,3' : null);
+
+  // Nodes
+  const node = gNodes.selectAll('g')
+    .data(nodes)
+    .join('g')
+    .attr('class', 'node')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.1).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    );
+
+  node.append('circle')
+    .attr('r', d => d.radius)
+    .attr('fill', d => d.type === 'global' ? '#333' : d.color)
+    .attr('stroke', d => d.type === 'global' ? '#666' : d3.color(d.color).brighter(0.8))
+    .on('click', (e, d) => selectNode(d, analysis))
+    .on('mouseenter', (e, d) => highlightNeighbors(d, graph))
+    .on('mouseleave', () => clearHighlight());
+
+  // Labels — visibility controlled by semantic zoom
+  gLabels.selectAll('text')
+    .data(nodes)
+    .join('text')
+    .attr('class', 'label')
+    .attr('fill', d => d.type === 'global' ? '#666' : '#999')
+    .attr('font-size', 10)
+    .attr('text-anchor', 'middle')
+    .attr('dy', d => d.radius + 12)
+    .attr('opacity', 0) // start hidden, semantic zoom reveals
+    .text(d => d.id);
+
+  // Cluster hulls
+  if (showHulls && document.getElementById('view-mode').value !== 'hypergraph') {
+    const hullClusterIds = [...new Set(nodes.filter(n => n.type === 'function').map(n => n.cluster))];
+    simulation.on('tick.hulls', () => {
+      gHulls.selectAll('path').remove();
+      for (const cid of hullClusterIds) {
+        const members = nodes.filter(n => n.cluster === cid && n.type === 'function');
+        if (members.length < 3) continue;
+        const points = members.map(d => [d.x, d.y]);
+        const hull = d3.polygonHull(points);
+        if (!hull) continue;
+        // Expand hull
+        const expanded = expandHull(hull, 20);
+        gHulls.append('path')
+          .attr('class', 'hull')
+          .attr('d', `M${expanded.join('L')}Z`)
+          .attr('fill', CLUSTER_COLORS[cid % CLUSTER_COLORS.length])
+          .attr('stroke', CLUSTER_COLORS[cid % CLUSTER_COLORS.length]);
+      }
+    });
+  }
+
+  // Cluster name labels — one per cluster
+  const allClusterIds = [...new Set(nodes.filter(n => n.type === 'function').map(n => n.cluster))];
+  const clusterLabelData = allClusterIds.map(cid => ({
+    cid,
+    name: clusterNames.get(cid) || `cluster_${cid}`,
+    color: CLUSTER_COLORS[cid % CLUSTER_COLORS.length],
+  }));
+  const clusterLabel = gClusterLabels.selectAll('text')
+    .data(clusterLabelData)
+    .join('text')
+    .attr('class', 'cluster-label')
+    .attr('fill', d => d.color)
+    .text(d => d.name);
+
+  // Tick
+  simulation.on('tick', () => {
+    link
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    node.attr('transform', d => `translate(${d.x},${d.y})`);
+    gLabels.selectAll('text')
+      .attr('x', (d, i) => nodes[i].x)
+      .attr('y', (d, i) => nodes[i].y);
+    // Position cluster labels above each cluster
+    clusterLabel.each(function(d) {
+      const members = nodes.filter(n => n.cluster === d.cid && n.type === 'function');
+      if (!members.length) return;
+      let cx = 0, cy = 0;
+      for (const m of members) { cx += m.x; cy += m.y; }
+      cx /= members.length; cy /= members.length;
+      const minY = Math.min(...members.map(m => m.y - m.radius));
+      d3.select(this).attr('x', cx).attr('y', minY - 10);
+    });
+  });
+
+  // Update stats
+  const clusterCount = new Set([...clusters.values()]).size;
+  document.getElementById('stats').innerHTML = `
+    <div>${nodes.filter(n => n.type === 'function').length} functions</div>
+    <div>${nodes.filter(n => n.type === 'global').length > 0 ? nodes.filter(n => n.type === 'global').length + ' globals' : ''}</div>
+    <div>${links.length} edges</div>
+    <div>${clusterCount} systems</div>
+  `;
+
+  // Update legend
+  const legendItems = [...clusterNames.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([id, name]) => `<div class="item"><div class="dot" style="background:${CLUSTER_COLORS[id % CLUSTER_COLORS.length]}"></div>${name} (${[...clusters.entries()].filter(([, c]) => c === id).length})</div>`)
+    .join('');
+  document.getElementById('legend').innerHTML = legendItems;
+
+  // Apply semantic zoom to set initial visibility
+  applySemanticZoom();
+}
+
+function expandHull(hull, pad) {
+  // Compute centroid
+  let cx = 0, cy = 0;
+  for (const [x, y] of hull) { cx += x; cy += y; }
+  cx /= hull.length; cy /= hull.length;
+  return hull.map(([x, y]) => {
+    const dx = x - cx, dy = y - cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    return [x + (dx / dist) * pad, y + (dy / dist) * pad];
+  });
+}
+
+function clusterForce(nodes, clusters, clusterNames, strength) {
+  // Push nodes toward their cluster centroid
+  const centroids = new Map();
+  return (alpha) => {
+    centroids.clear();
+    const counts = new Map();
+    for (const n of nodes) {
+      if (n.type !== 'function') continue;
+      const c = n.cluster;
+      if (!centroids.has(c)) { centroids.set(c, { x: 0, y: 0 }); counts.set(c, 0); }
+      centroids.get(c).x += n.x;
+      centroids.get(c).y += n.y;
+      counts.set(c, counts.get(c) + 1);
+    }
+    for (const [c, cen] of centroids) {
+      cen.x /= counts.get(c);
+      cen.y /= counts.get(c);
+    }
+    for (const n of nodes) {
+      if (n.type !== 'function') continue;
+      const cen = centroids.get(n.cluster);
+      if (!cen) continue;
+      n.vx += (cen.x - n.x) * strength * alpha;
+      n.vy += (cen.y - n.y) * strength * alpha;
+    }
+  };
+}
+
+function clusterSeparationForce(nodes, clusters, minDist) {
+  // Push cluster centroids apart so they don't overlap
+  return (alpha) => {
+    const centroids = new Map();
+    const members = new Map();
+    for (const n of nodes) {
+      if (n.type !== 'function') continue;
+      const c = n.cluster;
+      if (!centroids.has(c)) { centroids.set(c, { x: 0, y: 0 }); members.set(c, []); }
+      centroids.get(c).x += n.x;
+      centroids.get(c).y += n.y;
+      members.get(c).push(n);
+    }
+    for (const [c, cen] of centroids) {
+      const m = members.get(c);
+      cen.x /= m.length;
+      cen.y /= m.length;
+    }
+    const cids = [...centroids.keys()];
+    for (let i = 0; i < cids.length; i++) {
+      for (let j = i + 1; j < cids.length; j++) {
+        const a = centroids.get(cids[i]);
+        const b = centroids.get(cids[j]);
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.05 * alpha;
+          const nx = (dx / dist) * push;
+          const ny = (dy / dist) * push;
+          for (const n of members.get(cids[i])) { n.vx -= nx; n.vy -= ny; }
+          for (const n of members.get(cids[j])) { n.vx += nx; n.vy += ny; }
+        }
+      }
+    }
+  };
+}
+
+// BFS from a node, returns Map<nodeId, distance>
+function bfsDistances(startId, adjacency, maxDepth) {
+  const dist = new Map();
+  dist.set(startId, 0);
+  const queue = [startId];
+  while (queue.length) {
+    const cur = queue.shift();
+    const d = dist.get(cur);
+    if (d >= maxDepth) continue;
+    for (const nb of (adjacency.get(cur) || [])) {
+      if (!dist.has(nb)) {
+        dist.set(nb, d + 1);
+        queue.push(nb);
+      }
+    }
+  }
+  return dist;
+}
+
+function highlightNeighbors(d, graph) {
+  const adj = graph.adjacency;
+  if (!adj) return;
+  const distances = bfsDistances(d.id, adj, 3);
+
+  // Nodes: opacity by distance (0=full, 1=strong, 2=medium, 3+=faint, unreachable=very faint)
+  const nodeOpacity = dist => {
+    if (dist === 0) return 1;
+    if (dist === 1) return 1;
+    if (dist === 2) return 0.35;
+    if (dist === 3) return 0.12;
+    return 0.06;
+  };
+
+  gNodes.selectAll('.node')
+    .style('opacity', n => nodeOpacity(distances.has(n.id) ? distances.get(n.id) : 99));
+
+  // Edges: visible if both endpoints are within range, opacity by max distance of endpoints
+  gLinks.selectAll('.link')
+    .attr('stroke-opacity', l => {
+      const sid = typeof l.source === 'object' ? l.source.id : l.source;
+      const tid = typeof l.target === 'object' ? l.target.id : l.target;
+      const sd = distances.has(sid) ? distances.get(sid) : 99;
+      const td = distances.has(tid) ? distances.get(tid) : 99;
+      const maxD = Math.max(sd, td);
+      if (maxD === 0) return 0.8;
+      if (maxD === 1) return 0.6;
+      if (maxD === 2) return 0.15;
+      return 0.02;
+    })
+    .attr('stroke-width', l => {
+      const sid = typeof l.source === 'object' ? l.source.id : l.source;
+      const tid = typeof l.target === 'object' ? l.target.id : l.target;
+      const sd = distances.has(sid) ? distances.get(sid) : 99;
+      const td = distances.has(tid) ? distances.get(tid) : 99;
+      const maxD = Math.max(sd, td);
+      if (maxD <= 1) return Math.min(3, 1 + (l.weight || 1) * 0.4);
+      return Math.min(2, 0.3 + (l.weight || 1) * 0.15);
+    });
+
+  gLabels.selectAll('text').attr('opacity', (_, i) => {
+    const allNodes = gNodes.selectAll('.node').data();
+    const nid = allNodes[i]?.id;
+    const dist = distances.has(nid) ? distances.get(nid) : 99;
+    return dist <= 1 ? 1 : dist <= 2 ? 0.3 : 0.05;
+  });
+}
+
+function clearHighlight() {
+  gNodes.selectAll('.node').style('opacity', 1);
+  // Restore density-adaptive base opacity
+  gLinks.selectAll('.link').each(function(d) {
+    const el = d3.select(this);
+    const sid = typeof d.source === 'object' ? d.source.id : d.source;
+    const tid = typeof d.target === 'object' ? d.target.id : d.target;
+    const graph = el.datum();
+    // Recalc from degree — stored on the line's parent graph context
+    el.attr('stroke-opacity', null).attr('stroke-width', null);
+  });
+  // Simpler: just rebuild opacity from stored data
+  const allLinks = gLinks.selectAll('.link');
+  const allNodes = gNodes.selectAll('.node').data();
+  const degMap = new Map();
+  allNodes.forEach(n => degMap.set(n.id, 0));
+  allLinks.each(l => {
+    const sid = typeof l.source === 'object' ? l.source.id : l.source;
+    const tid = typeof l.target === 'object' ? l.target.id : l.target;
+    degMap.set(sid, (degMap.get(sid) || 0) + 1);
+    degMap.set(tid, (degMap.get(tid) || 0) + 1);
+  });
+  allLinks
+    .attr('stroke-opacity', l => {
+      const sid = typeof l.source === 'object' ? l.source.id : l.source;
+      const tid = typeof l.target === 'object' ? l.target.id : l.target;
+      const maxDeg = Math.max(degMap.get(sid) || 1, degMap.get(tid) || 1);
+      return Math.max(0.08, 0.4 / Math.sqrt(maxDeg));
+    })
+    .attr('stroke-width', l => {
+      const sid = typeof l.source === 'object' ? l.source.id : l.source;
+      const tid = typeof l.target === 'object' ? l.target.id : l.target;
+      const maxDeg = Math.max(degMap.get(sid) || 1, degMap.get(tid) || 1);
+      const w = 0.5 + (l.weight || 1) * 0.3;
+      return Math.min(3, w / Math.max(1, Math.sqrt(maxDeg) * 0.4));
+    });
+  gLabels.selectAll('text').attr('opacity', 1);
+}
+
+function selectNode(d, analysis) {
+  selectedNode = d;
+  const panel = document.getElementById('info-panel');
+  panel.classList.add('open');
+  document.getElementById('info-name').textContent = d.id;
+
+  if (d.type === 'global') {
+    // Show which functions use this global
+    const users = [];
+    for (const [fname, info] of analysis.functions) {
+      const access = [];
+      if (info.reads.has(d.id)) access.push('read');
+      if (info.writes.has(d.id)) access.push('write');
+      if (info.rw.has(d.id)) access.push('r/w');
+      if (access.length) users.push({ fname, access: access.join(', ') });
+    }
+    document.getElementById('info-body').innerHTML = `
+      <div class="section"><div class="section-title">Type</div>global variable</div>
+      <div class="section"><div class="section-title">Used by ${users.length} functions</div>
+        ${users.map(u => `<span class="tag">${u.fname} (${u.access})</span>`).join('')}
+      </div>`;
+    return;
+  }
+
+  const info = d.info;
+  if (!info) return;
+
+  const reads = [...info.reads].sort();
+  const writes = [...info.writes].sort();
+  const rw = [...info.rw].sort();
+  const calls = [...info.calls].sort();
+
+  document.getElementById('info-body').innerHTML = `
+    <div class="section"><div class="section-title">Location</div>Line ${info.line} — ${info.endLine} (${info.lines} lines)</div>
+    <div class="section"><div class="section-title">System</div>${d.clusterName}</div>
+    ${reads.length ? `<div class="section"><div class="section-title">Reads (${reads.length})</div>${reads.map(r => `<span class="tag read">${r}</span>`).join('')}</div>` : ''}
+    ${writes.length ? `<div class="section"><div class="section-title">Writes (${writes.length})</div>${writes.map(w => `<span class="tag write">${w}</span>`).join('')}</div>` : ''}
+    ${rw.length ? `<div class="section"><div class="section-title">Read+Write (${rw.length})</div>${rw.map(v => `<span class="tag rw">${v}</span>`).join('')}</div>` : ''}
+    ${calls.length ? `<div class="section"><div class="section-title">Calls (${calls.length})</div>${calls.map(c => `<span class="tag call">${c}</span>`).join('')}</div>` : ''}
+  `;
+}
+
+// ── Search ─────────────────────────────────────────
+document.getElementById('search').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase();
+  if (!q) { clearHighlight(); return; }
+  const matches = new Set();
+  gNodes.selectAll('.node').each(d => {
+    if (d.id.toLowerCase().includes(q)) matches.add(d.id);
+  });
+  gNodes.selectAll('.node').classed('dimmed', d => !matches.has(d.id));
+  gLabels.selectAll('text').attr('opacity', (_, i) => {
+    const nodes = gNodes.selectAll('.node').data();
+    return matches.has(nodes[i]?.id) ? 1 : 0.1;
+  });
+});
+
+// ── Controls ───────────────────────────────────────
+function getOpts() {
+  return {
+    viewMode: document.getElementById('view-mode').value,
+    edgeMode: document.getElementById('edge-mode').value,
+    minShared: parseInt(document.getElementById('min-shared').value),
+  };
+}
+
+function rebuild() {
+  if (!analysisResult) return;
+  const clusters = clusterFunctions(analysisResult);
+  const clusterNames = nameClusters(analysisResult, clusters);
+  const graph = buildGraph(analysisResult, clusters, clusterNames, getOpts());
+  renderGraph(graph, analysisResult, clusters, clusterNames);
+}
+
+document.getElementById('view-mode').addEventListener('change', rebuild);
+document.getElementById('edge-mode').addEventListener('change', rebuild);
+document.getElementById('min-shared').addEventListener('input', e => {
+  document.getElementById('min-shared-val').textContent = e.target.value;
+  rebuild();
+});
+document.getElementById('show-labels').addEventListener('change', rebuild);
+document.getElementById('show-hulls').addEventListener('change', rebuild);
+// Close info panel on click outside
+document.getElementById('graph').addEventListener('click', e => {
+  if (e.target.tagName === 'svg') {
+    document.getElementById('info-panel').classList.remove('open');
+    selectedNode = null;
+  }
+});
+
+// ── Claude Focus (SSE) ─────────────────────────────
+let currentFocus = null;
+
+function connectFocusSSE() {
+  const sseUrl = location.origin + '/focus-events';
+  const source = new EventSource(sseUrl);
+
+  source.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.timestamp && Date.now() - data.timestamp > 30000) {
+        applyFocus(null);
+      } else {
+        applyFocus(data);
+      }
+    } catch {
+      applyFocus(null);
+    }
+  };
+
+  source.onerror = () => {
+    // Server not running — silent degrade, retry is automatic with EventSource
+    document.getElementById('focus-panel').classList.remove('active');
+  };
+}
+
+function applyFocus(data) {
+  const panel = document.getElementById('focus-panel');
+  currentFocus = data;
+
+  if (!data || !data.focus || data.focus.length === 0) {
+    panel.classList.remove('active');
+    // Restore default view
+    if (gNodes) {
+      gNodes.selectAll('.node').style('opacity', 1);
+      gNodes.selectAll('circle').classed('focus-glow', false);
+      clearHighlight();
+    }
+    return;
+  }
+
+  // Update panel
+  panel.classList.add('active');
+  panel.querySelector('.focus-step').textContent = data.step || '';
+  panel.querySelector('.focus-desc').textContent = data.description || '';
+
+  const tagsHtml = data.focus.map(f => {
+    const level = f.relevance >= 0.7 ? 'high' : f.relevance >= 0.4 ? 'med' : 'low';
+    return `<span class="focus-tag ${level}">${f.name} ${(f.relevance * 100)|0}%</span>`;
+  }).join('');
+  panel.querySelector('.focus-targets').innerHTML = tagsHtml;
+
+  // Build relevance map: named targets + BFS expansion
+  if (!gNodes || !gLinks) return;
+  const relevanceMap = new Map(); // nodeId → relevance [0-1]
+  for (const f of data.focus) {
+    relevanceMap.set(f.name, f.relevance);
+  }
+
+  // Expand via adjacency: neighbors of focused nodes get diminished relevance
+  const allNodes = gNodes.selectAll('.node').data();
+  const adj = new Map();
+  allNodes.forEach(n => adj.set(n.id, new Set()));
+  if (gLinks) {
+    gLinks.selectAll('.link').each(l => {
+      const sid = typeof l.source === 'object' ? l.source.id : l.source;
+      const tid = typeof l.target === 'object' ? l.target.id : l.target;
+      if (adj.has(sid)) adj.get(sid).add(tid);
+      if (adj.has(tid)) adj.get(tid).add(sid);
+    });
+  }
+
+  // BFS spread: each hop reduces relevance by 0.4x
+  const queue = [...data.focus.map(f => ({ id: f.name, rel: f.relevance, depth: 0 }))];
+  const visited = new Set(data.focus.map(f => f.name));
+  while (queue.length) {
+    const { id, rel, depth } = queue.shift();
+    if (depth >= 3) continue;
+    for (const nb of (adj.get(id) || [])) {
+      if (!visited.has(nb)) {
+        visited.add(nb);
+        const spreadRel = rel * 0.4;
+        if (spreadRel > (relevanceMap.get(nb) || 0)) {
+          relevanceMap.set(nb, spreadRel);
+        }
+        queue.push({ id: nb, rel: spreadRel, depth: depth + 1 });
+      }
+    }
+  }
+
+  // Apply to nodes
+  gNodes.selectAll('.node')
+    .style('opacity', d => {
+      const r = relevanceMap.get(d.id);
+      return r != null ? 0.3 + r * 0.7 : 0.06;
+    });
+  gNodes.selectAll('circle')
+    .classed('focus-glow', d => (relevanceMap.get(d.id) || 0) >= 0.7);
+
+  // Apply to edges
+  gLinks.selectAll('.link')
+    .attr('stroke-opacity', l => {
+      const sid = typeof l.source === 'object' ? l.source.id : l.source;
+      const tid = typeof l.target === 'object' ? l.target.id : l.target;
+      const sr = relevanceMap.get(sid) || 0;
+      const tr = relevanceMap.get(tid) || 0;
+      const minR = Math.min(sr, tr);
+      if (minR >= 0.5) return 0.7;
+      if (minR >= 0.2) return 0.25;
+      if (minR > 0) return 0.08;
+      return 0.015;
+    })
+    .attr('stroke-width', l => {
+      const sid = typeof l.source === 'object' ? l.source.id : l.source;
+      const tid = typeof l.target === 'object' ? l.target.id : l.target;
+      const sr = relevanceMap.get(sid) || 0;
+      const tr = relevanceMap.get(tid) || 0;
+      const minR = Math.min(sr, tr);
+      if (minR >= 0.5) return Math.min(4, 1.5 + (l.weight || 1) * 0.5);
+      return Math.min(2, 0.3 + (l.weight || 1) * 0.15);
+    });
+
+  // Labels
+  gLabels.selectAll('text').attr('opacity', (_, i) => {
+    const n = allNodes[i];
+    const r = n ? (relevanceMap.get(n.id) || 0) : 0;
+    return r >= 0.5 ? 1 : r >= 0.2 ? 0.4 : 0.04;
+  });
+}
+
+// ── Main Loop ──────────────────────────────────────
+async function loadAndAnalyze() {
+  const statusEl = document.getElementById('status');
+  try {
+    const [html, codemapMd] = await Promise.all([
+      fetch(SRC).then(r => r.text()),
+      fetch(CODEMAP_SRC).then(r => r.ok ? r.text() : null).catch(() => null),
+    ]);
+    const h = hashStr(html + (codemapMd || ''));
+    if (h === lastHash) return; // No changes
+    lastHash = h;
+
+    statusEl.textContent = 'parsing...';
+    console.log('[depgraph] codemap fetch:', codemapMd ? `${codemapMd.length} chars` : 'FAILED');
+    if (codemapMd) codemapSections = parseCodemap(codemapMd);
+
+    const { code, lineOffset } = extractJS(html);
+    const result = analyzeCode(code, lineOffset);
+    if (!result) { statusEl.textContent = 'parse error'; return; }
+
+    analysisResult = result;
+    const nSys = codemapSections ? codemapSections.size : 0;
+    statusEl.textContent = `live — ${result.functions.size} funcs, ${nSys} systems`;
+    statusEl.className = 'live';
+
+    rebuild();
+  } catch (e) {
+    statusEl.textContent = 'fetch error: ' + e.message;
+    console.error(e);
+  }
+}
+
+// ── Init ───────────────────────────────────────────
+initSVG();
+window.addEventListener('resize', () => {
+  width = window.innerWidth;
+  height = window.innerHeight - 44;
+  svg.attr('width', width).attr('height', height);
+});
+
+loadAndAnalyze();
+setInterval(loadAndAnalyze, REFRESH_MS);
+connectFocusSSE();
+</script>
+</body>
+</html>
