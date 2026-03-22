@@ -1513,6 +1513,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
       })
       .on('drag', (e, d) => {
         if (xKeyRAF) return; // X step animation controls position
+        if (e.sourceEvent && e.sourceEvent.shiftKey) return; // shift-drag = selection, don't move
         if (spacePullHeld && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
           // Move all selected nodes toward cursor, maintaining relative positions
           const dx = e.x - d.x, dy = e.y - d.y;
@@ -1774,22 +1775,8 @@ function bfsDistances(startId, adjacency, maxDepth) {
   return dist;
 }
 
-function highlightNeighbors(d, graph) {
-  const distances = bfsDistances(d.id, graph.adjacency, 3);
-  const nodeOpacity = dist => dist === 0 ? 1 : dist === 1 ? 1 : dist === 2 ? 0.35 : dist === 3 ? 0.12 : 0.06;
-
-  gNodes.selectAll('.node').style('opacity', n => nodeOpacity(distances.has(n.id) ? distances.get(n.id) : 99));
-
-  gLabels.selectAll('text').attr('opacity', d => {
-    const dist = distances.has(d.id) ? distances.get(d.id) : 99;
-    return dist <= 1 ? 1 : dist <= 2 ? 0.3 : 0.05;
-  });
-}
-
-function clearHighlight() {
-  gNodes.selectAll('.node').style('opacity', 1);
-  applySemanticZoom();
-}
+function highlightNeighbors(d, graph) {}
+function clearHighlight() {}
 
 function affinityBarsHTML(d, clusterNames) {
   if (!d.affinities || d.affinities.size === 0) return '';
