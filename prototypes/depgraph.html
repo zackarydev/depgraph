@@ -2748,12 +2748,13 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') {
     e.preventDefault();
     if (!e.repeat) {
-      if (forcePressDragNode && e.shiftKey && selectedNodes.size >= 2) {
+      const anchorNode = forcePressDragNode || selectedNode;
+      if (anchorNode && e.shiftKey && selectedNodes.size >= 2) {
         // Click node + Shift+Space: pull selected nodes toward clicked node
-        startSpacePull(forcePressDragNode);
-      } else if (forcePressDragNode) {
+        startSpacePull(anchorNode);
+      } else if (anchorNode && !selectedNodes.has(anchorNode.id)) {
         // Click node + Space: pull neighbors (except selected) toward clicked node
-        startNeighborGather(forcePressDragNode);
+        startNeighborGather(anchorNode);
       } else if (selectedNodes.size >= 2) {
         startSpacePull(null);
       } else if (lockedNodes.size > 0) {
@@ -2806,7 +2807,9 @@ document.addEventListener('keydown', (e) => {
     if (comparisonMode) { exitComparisonMode(); return; }
     if (selectedNodes.size > 0) {
       selectedNodes.clear();
+      lockedNodes.clear();
       gNodes.selectAll('circle').classed('selected-glow', false);
+      updateLockUI();
       return;
     }
     document.getElementById('info-panel').classList.remove('open');
