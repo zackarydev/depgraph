@@ -83,6 +83,13 @@ body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', mo
 #arr-nav button:disabled { opacity: 0.3; cursor: default; }
 #arr-nav .arr-label { color: #666; }
 
+#lock-btn {
+  background: #1a1a25; color: #888; border: 1px solid #333; border-radius: 4px;
+  padding: 2px 8px; font-family: inherit; font-size: 11px; cursor: pointer;
+}
+#lock-btn:hover { color: #ccc; border-color: #555; }
+#lock-btn.active { color: #ff0; border-color: #ff0; }
+
 #comparison-badge {
   position: fixed; top: 50px; right: 16px; z-index: 15;
   background: #2a1a3a; border: 1px solid #7a4af0; border-radius: 6px;
@@ -128,6 +135,8 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
   <label><input type="checkbox" id="show-labels" checked> Labels</label>
   <label><input type="checkbox" id="show-hulls" checked> Clusters</label>
   <label><input type="checkbox" id="show-edges"> Edges</label>
+  <button id="lock-btn" title="Lock selected nodes (Space to unlock)">Lock</button>
+  <span id="lock-indicator" style="display:none; color:#ff0; font-size:11px">Locked</span>
   <label><input type="checkbox" id="live-reload" checked> Live</label>
   <label><input type="range" id="min-shared" min="1" max="15" value="3" style="width:80px"> Min shared: <span id="min-shared-val">3</span></label>
   <div class="sep"></div>
@@ -187,6 +196,7 @@ let codemapImportance = new Map();
 let analysisResult = null;
 let savedPositions = new Map();
 let stickyNodes = new Set();
+let lockedNodes = new Set(); // explicitly locked nodes (pinned in place)
 let selectedNode = null;
 let currentK = 0.8;
 let currentGraph = null;
@@ -201,7 +211,6 @@ let attractorNode = null;
 let attractorStartTime = 0;
 let attractorRAF = null;
 let attractorHoldStrength = 0;
-let attractorLocked = false;
 let lastAttractorDuration = 0;
 let forcePressDragNode = null; // node being dragged when force press activates
 let hasForceTouch = false; // webkit force events detected (Safari)
@@ -1477,7 +1486,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
           if (shiftAttractorTimer) clearTimeout(shiftAttractorTimer);
           shiftAttractorTimer = setTimeout(() => {
             shiftAttractorTimer = null;
-            if (d._isDragging && !attractorNode && !attractorLocked) {
+            if (d._isDragging && !attractorNode) {
               startAttractor(d);
             }
           }, 550);
@@ -1511,25 +1520,30 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
       e.stopPropagation();
       const dragDuration = d._dragStartTime ? Date.now() - d._dragStartTime : 0;
       d._dragStartTime = null;
-      if (dragDuration < 300 && !attractorLocked) {
+      if (dragDuration < 300) {
         if (e.shiftKey) {
           // Shift-click: toggle multi-select
           if (selectedNodes.has(d.id)) {
             selectedNodes.delete(d.id);
+            lockedNodes.delete(d.id);
             d3.select(e.target).classed('selected-glow', false);
           } else {
             selectedNodes.add(d.id);
+            lockedNodes.add(d.id);
+            stickyNodes.add(d.id);
+            savedPositions.set(d.id, { x: d.x, y: d.y });
             d3.select(e.target).classed('selected-glow', true);
           }
+          updateLockUI();
           return;
         }
         selectNode(d, analysis);
         trackClickCoOccurrence(d.id);
-        clickPull(d);
+        // clickPull(d); — disabled: single click should not pull neighbors
       }
     })
-    .on('mouseenter', (e, d) => { if (!attractorNode && !attractorLocked) highlightNeighbors(d, graph); })
-    .on('mouseleave', () => { if (!attractorNode && !attractorLocked) clearHighlight(); })
+    .on('mouseenter', (e, d) => { if (!attractorNode) highlightNeighbors(d, graph); })
+    .on('mouseleave', () => { if (!attractorNode) clearHighlight(); })
     .each(function(d) {
       // Force Touch events for attractor (Safari)
       this.addEventListener('webkitmouseforcewillbegin', (e) => {
@@ -1537,7 +1551,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
         hasForceTouch = true;
       });
       this.addEventListener('webkitmouseforcedown', (e) => {
-        if (!attractorNode && !attractorLocked) startAttractor(d);
+        if (!attractorNode) startAttractor(d);
       });
       this.addEventListener('webkitmouseforceup', (e) => {
         if (attractorNode) lockAttractor();
@@ -1552,7 +1566,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
         if (!hasPressure) return;
         if (e.pressure >= PRESSURE_THRESHOLD && !pressureActive) {
           pressureActive = true;
-          if (!attractorNode && !attractorLocked) startAttractor(d);
+          if (!attractorNode) startAttractor(d);
         } else if (e.pressure < PRESSURE_THRESHOLD && pressureActive) {
           pressureActive = false;
           if (attractorNode) lockAttractor();
@@ -2014,25 +2028,19 @@ function clickPull(d) {
 }
 
 function lockAttractor() {
-  lastAttractorDuration = Date.now() - attractorStartTime;
   if (attractorRAF) { cancelAnimationFrame(attractorRAF); attractorRAF = null; }
 
-  if (lastAttractorDuration < 300) {
-    releaseAttractor();
-    return;
-  }
-
-  attractorLocked = true;
   // Save positions for all moved nodes
   if (currentNodes) {
     for (const n of currentNodes) {
       savedPositions.set(n.id, { x: n.x, y: n.y });
     }
   }
-  pushArrangement('attractor', attractorNode ? [attractorNode.id] : []);
+  const id = attractorNode ? attractorNode.id : null;
   gNodes.selectAll('circle').classed('attractor-glow', false);
   attractorNode = null;
   attractorHoldStrength = 0;
+  if (id) pushArrangement('attractor', [id]);
 }
 
 function releaseAttractor() {
@@ -2040,7 +2048,41 @@ function releaseAttractor() {
   gNodes.selectAll('circle').classed('attractor-glow', false);
   attractorNode = null;
   attractorHoldStrength = 0;
-  attractorLocked = false;
+}
+
+// ═══════════════════════════════════════════════════════
+// NODE LOCKING
+// ═══════════════════════════════════════════════════════
+function lockSelectedNodes() {
+  if (selectedNodes.size === 0) return;
+  for (const id of selectedNodes) {
+    lockedNodes.add(id);
+    stickyNodes.add(id);
+    const n = currentGraph?.nodeMap.get(id);
+    if (n) savedPositions.set(id, { x: n.x, y: n.y });
+  }
+  updateLockUI();
+}
+
+function unlockNodes() {
+  lockedNodes.clear();
+  updateLockUI();
+}
+
+function updateLockUI() {
+  const btn = document.getElementById('lock-btn');
+  const indicator = document.getElementById('lock-indicator');
+  if (lockedNodes.size > 0) {
+    btn.classList.add('active');
+    indicator.style.display = '';
+    indicator.textContent = `Locked (${lockedNodes.size})`;
+    // Show locked glow on locked nodes
+    gNodes.selectAll('.node circle').classed('selected-glow', d => lockedNodes.has(d.id) || selectedNodes.has(d.id));
+  } else {
+    btn.classList.remove('active');
+    indicator.style.display = 'none';
+    gNodes.selectAll('.node circle').classed('selected-glow', d => selectedNodes.has(d.id));
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -2055,13 +2097,12 @@ function startXForces() {
   xKeyHeld = true;
   const xStartTime = performance.now();
 
-  const targetIds = selectedNodes.size > 0 ? selectedNodes : null;
-
-  // Snapshot current positions (start) and saved/layout positions (T0)
+  // Snapshot current positions (start) and layout positions (T0)
+  // Locked nodes are excluded — they stay pinned
   xStartPositions = new Map();
   xT0Positions = new Map();
   for (const n of currentNodes) {
-    if (targetIds && !targetIds.has(n.id)) continue;
+    if (lockedNodes.has(n.id)) continue;
     xStartPositions.set(n.id, { x: n.x, y: n.y });
     const t0 = initialLayoutPositions.get(n.id);
     xT0Positions.set(n.id, t0 ? { x: t0.x, y: t0.y } : { x: n.x, y: n.y });
@@ -2075,7 +2116,7 @@ function startXForces() {
     // Ramp relaxation from 0 to 1 over 3 seconds
     xRelaxFactor = Math.min(1, elapsed / 3000);
 
-    // Lerp nodes from start positions back toward T0
+    // Lerp unlocked nodes from start positions back toward T0
     for (const n of currentNodes) {
       const start = xStartPositions.get(n.id);
       const t0 = xT0Positions.get(n.id);
@@ -2083,14 +2124,6 @@ function startXForces() {
       n.x = start.x + (t0.x - start.x) * xRelaxFactor;
       n.y = start.y + (t0.y - start.y) * xRelaxFactor;
     }
-
-    // Fade edges visually as they relax
-    gLinks.selectAll('.link')
-      .attr('stroke-opacity', d => {
-        if (targetIds && !targetIds.has(d.source) && !targetIds.has(d.target)) return null;
-        const w = d.weight || 1;
-        return Math.max(0.02, (1 - xRelaxFactor * 0.8) * w * 0.3);
-      });
 
     renderPositions();
     xKeyRAF = requestAnimationFrame(xLoop);
@@ -2124,15 +2157,15 @@ function stopXForces() {
 // KEYBOARD
 // ═══════════════════════════════════════════════════════
 document.addEventListener('keydown', (e) => {
-  // SPACEBAR: release attractor lock
-  if (e.code === 'Space' && attractorLocked) {
+  // SPACEBAR: unlock all locked nodes
+  if (e.code === 'Space' && lockedNodes.size > 0) {
     e.preventDefault();
-    releaseAttractor();
+    unlockNodes();
     return;
   }
 
-  // X: hold to apply spread + cohesion forces (on selected nodes, or all if none selected)
-  if (e.code === 'KeyX' && !e.repeat && !attractorLocked && !attractorNode && currentNodes) {
+  // X: hold to relax edges (locked nodes stay, unlocked move toward T0)
+  if (e.code === 'KeyX' && !e.repeat && !attractorNode && currentNodes) {
     e.preventDefault();
     startXForces();
     return;
@@ -2178,12 +2211,12 @@ document.addEventListener('webkitmouseforcewillbegin', (e) => {
   hasForceTouch = true;
 });
 document.addEventListener('webkitmouseforcedown', (e) => {
-  if (forcePressDragNode && !attractorNode && !attractorLocked) {
+  if (forcePressDragNode && !attractorNode) {
     startAttractor(forcePressDragNode);
   }
 });
 document.addEventListener('webkitmouseforceup', (e) => {
-  if (attractorNode && !attractorLocked) lockAttractor();
+  if (attractorNode) lockAttractor();
 });
 // Pointer Events pressure fallback (Chrome/Firefox) — for drag+force-press
 document.addEventListener('pointermove', (e) => {
@@ -2192,20 +2225,20 @@ document.addEventListener('pointermove', (e) => {
   if (!hasPressure) return;
   if (e.pressure >= PRESSURE_THRESHOLD && !pressureActive) {
     pressureActive = true;
-    if (!attractorNode && !attractorLocked) startAttractor(forcePressDragNode);
+    if (!attractorNode) startAttractor(forcePressDragNode);
   } else if (e.pressure < PRESSURE_THRESHOLD && pressureActive) {
     pressureActive = false;
-    if (attractorNode && !attractorLocked) lockAttractor();
+    if (attractorNode) lockAttractor();
   }
 });
 // Full release cleanup
 document.addEventListener('mouseup', () => {
   pressureActive = false;
-  if (attractorNode && !attractorLocked) lockAttractor();
+  if (attractorNode) lockAttractor();
 });
 document.addEventListener('pointerup', () => {
   pressureActive = false;
-  if (attractorNode && !attractorLocked) lockAttractor();
+  if (attractorNode) lockAttractor();
 });
 
 // ═══════════════════════════════════════════════════════
@@ -2306,6 +2339,14 @@ document.getElementById('show-hulls').addEventListener('change', () => {
   } else {
     currentHullClusterIds = null;
     gHulls.selectAll('path').remove();
+  }
+});
+
+document.getElementById('lock-btn').addEventListener('click', () => {
+  if (lockedNodes.size > 0 && selectedNodes.size === 0) {
+    unlockNodes();
+  } else {
+    lockSelectedNodes();
   }
 });
 
