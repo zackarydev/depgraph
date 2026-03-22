@@ -1513,15 +1513,16 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
       })
       .on('drag', (e, d) => {
         if (xKeyRAF) return; // X step animation controls position
-        if (e.sourceEvent && e.sourceEvent.shiftKey) return; // shift-drag = selection, don't move
-        if (spacePullHeld && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
-          // Move all selected nodes toward cursor, maintaining relative positions
+        if (e.sourceEvent && e.sourceEvent.shiftKey && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
+          // Shift+drag selected node: move all selected nodes together
           const dx = e.x - d.x, dy = e.y - d.y;
           for (const n of currentNodes) {
             if (!selectedNodes.has(n.id)) continue;
             n.x += dx;
             n.y += dy;
           }
+        } else if (e.sourceEvent && e.sourceEvent.shiftKey) {
+          return; // shift-drag on unselected node, don't move
         } else {
           d.x = e.x; d.y = e.y;
         }
@@ -1535,8 +1536,8 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
         const dx = d.x - d._dragStart.x, dy = d.y - d._dragStart.y;
         const moved = Math.sqrt(dx * dx + dy * dy) > 5;
         if (moved) {
-          // If space+drag moved all selected nodes, save all their positions
-          if (spacePullHeld && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
+          // If shift+drag moved all selected nodes, save all their positions
+          if (e.sourceEvent && e.sourceEvent.shiftKey && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
             for (const n of currentNodes) {
               if (!selectedNodes.has(n.id)) continue;
               stickyNodes.add(n.id);
@@ -1562,8 +1563,12 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
       const dragDuration = d._dragStartTime ? Date.now() - d._dragStartTime : 0;
       d._dragStartTime = null;
       if (dragDuration < 300) {
-        // Shift+X+click: dismiss node to T0
-        if (e.shiftKey && xKeyDown) {
+        // Shift+X+click or Ctrl+click: dismiss node to T0
+        if ((e.shiftKey && xKeyDown) || (e.ctrlKey || e.metaKey)) {
+          selectedNodes.delete(d.id);
+          lockedNodes.delete(d.id);
+          d3.select(e.target).classed('selected-glow', false);
+          updateLockUI();
           dismissNodeToT0(d);
           return;
         }
@@ -1587,6 +1592,16 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
         trackClickCoOccurrence(d.id);
         // clickPull(d); — disabled: single click should not pull neighbors
       }
+    })
+    .on('contextmenu', (e, d) => {
+      e.preventDefault();
+      // Ctrl+click on Mac fires contextmenu, not click — handle dismiss here
+      selectedNodes.delete(d.id);
+      lockedNodes.delete(d.id);
+      gNodes.selectAll('.node').filter(n => n.id === d.id)
+        .select('circle').classed('selected-glow', false);
+      updateLockUI();
+      dismissNodeToT0(d);
     })
     .on('mouseenter', (e, d) => { if (!attractorNode) highlightNeighbors(d, graph); })
     .on('mouseleave', () => { if (!attractorNode) clearHighlight(); })
@@ -2197,6 +2212,55 @@ function stopXForces() {
   xT0Positions = null;
 }
 
+// Repulse nearby nodes toward T0 from a point in SVG space
+function repulseFromPoint(svgX, svgY) {
+  if (!currentNodes || !currentGraph) return;
+  const radius = 150; // affect nodes within this distance
+  const stepFactor = 0.25; // equivalent to ~0.75s of X rewind (3s ramp)
+  const duration = 300;
+
+  // Find nearby unlocked nodes
+  const targets = [];
+  for (const n of currentNodes) {
+    if (lockedNodes.has(n.id)) continue;
+    const dx = n.x - svgX, dy = n.y - svgY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > radius) continue;
+    const t0 = initialLayoutPositions.get(n.id);
+    if (!t0) continue;
+    const proximity = 1 - dist / radius; // 1 at center, 0 at edge
+    const factor = stepFactor * proximity;
+    targets.push({
+      node: n,
+      startX: n.x, startY: n.y,
+      targetX: n.x + (t0.x - n.x) * factor,
+      targetY: n.y + (t0.y - n.y) * factor,
+    });
+  }
+  if (!targets.length) return;
+
+  const startTime = performance.now();
+  function step() {
+    const t = Math.min(1, (performance.now() - startTime) / duration);
+    const ease = 1 - (1 - t) * (1 - t);
+    for (const { node, startX, startY, targetX, targetY } of targets) {
+      node.x = startX + (targetX - startX) * ease;
+      node.y = startY + (targetY - startY) * ease;
+    }
+    renderPositions();
+    if (t < 1) {
+      requestAnimationFrame(step);
+    } else {
+      for (const { node } of targets) {
+        stickyNodes.add(node.id);
+        savedPositions.set(node.id, { x: node.x, y: node.y });
+      }
+      pushArrangement('repulse', []);
+    }
+  }
+  requestAnimationFrame(step);
+}
+
 // Dismiss a single node to T0 (independent animation, multiple can run at once)
 function dismissNodeToT0(d) {
   const t0 = initialLayoutPositions.get(d.id);
@@ -2513,6 +2577,17 @@ document.getElementById('graph').addEventListener('click', e => {
     document.getElementById('info-panel').classList.remove('open');
     selectedNode = null;
     if (comparisonMode) exitComparisonMode();
+  }
+});
+
+// Ctrl+click on background: repulse nearby nodes toward T0
+document.getElementById('graph').addEventListener('contextmenu', e => {
+  if (e.target.tagName === 'svg' || e.target.classList.contains('hull')) {
+    e.preventDefault();
+    // Convert screen coords to SVG coords using current zoom transform
+    const transform = d3.zoomTransform(svg.node());
+    const [svgX, svgY] = transform.invert([e.offsetX, e.offsetY]);
+    repulseFromPoint(svgX, svgY);
   }
 });
 

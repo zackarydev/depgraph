@@ -10,7 +10,8 @@
 
 - **Click+Drag** — *Move*: move a node freely (no pull-in effect)
 - Dragged nodes become "sticky" and keep their position
-- **Shift+Drag** on a locked node: ignored (won't displace it)
+- **Shift+Drag** a selected node — *Group Move*: drag all selected nodes together
+- **Shift+Drag** an unselected node: ignored (won't displace it)
 
 ## Gravity Well
 
@@ -27,13 +28,14 @@
 - **Hold X** — *Rewind*: all unlocked nodes smoothly return to their original layout (T0). Saves a time step on release.
 - **Click+Hold a node, then X** — *Snap Back*: only that held node returns to T0 (fast)
 - **Shift+X held, then click nodes** — *Dismiss*: each clicked node snaps back to T0 individually
+- **Control+Click node** - *Dismiss*: the clicked node snaps back to T0
 - Release X or mouse at any time to stop — nodes stay where they are
 - Locked nodes are not affected by rewind
 
 ## Gather
 
 - **Hold Space** (with 2+ selected nodes) — *Gather*: pull selected nodes toward their centroid
-- **Space + Drag** — *Group Move*: drag all selected nodes together as a group
+- **Shift+Drag** — *Group Move*: drag all selected nodes together (see Drag section)
 - Locked nodes are not affected by gather/group move
 
 ## Lock / Unlock
@@ -54,6 +56,7 @@
 |-----|--------|
 | **Click** | Select |
 | **Shift+Click** | Pin (multi-select + lock) |
+| **Shift+Drag** | Group move selected nodes |
 | **Hold X** | Rewind to T0 |
 | **Shift+X + Click** | Dismiss node to T0 |
 | **Hold Space** | Gather selected nodes |
