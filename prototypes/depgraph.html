@@ -105,7 +105,8 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 .label { pointer-events: none; user-select: none; }
 .node.highlighted circle { stroke-width: 3; }
 .hull { fill-opacity: 0.04; stroke-opacity: 0.15; stroke-width: 1.5; }
-.cluster-label { font-size: 11px; font-weight: 600; fill-opacity: 0.6; pointer-events: none; text-anchor: middle; dominant-baseline: central; }
+.cluster-label { font-size: 11px; font-weight: 600; fill-opacity: 0.6; text-anchor: middle; dominant-baseline: central; cursor: grab; }
+.cluster-label:active { cursor: grabbing; }
 .node circle.focus-glow { filter: drop-shadow(0 0 6px currentColor); }
 .node circle.attractor-glow { filter: drop-shadow(0 0 8px #fff) drop-shadow(0 0 20px currentColor); stroke-width: 3; }
 .node circle.selected-glow { filter: drop-shadow(0 0 6px #ff0) drop-shadow(0 0 12px #ff0); stroke: #ff0 !important; stroke-width: 2.5; }
@@ -1788,7 +1789,8 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .join('text')
     .attr('class', 'cluster-label')
     .attr('fill', d => d.color)
-    .text(d => d.name);
+    .text(d => d.name)
+    .call(clusterLabelDrag(d => currentNodes.filter(n => n.cluster === d.cid)));
   renderClusterLabels();
 
   // Stats
@@ -1840,9 +1842,9 @@ function renderUserClusters() {
   const nodeMap = currentGraph?.nodeMap;
   if (!nodeMap) return;
 
-  // Remove previous user cluster hulls
+  // Remove previous user cluster hulls (but not labels during drag — they'd be destroyed mid-drag)
   gHulls.selectAll('.user-hull').remove();
-  gClusterLabels.selectAll('.user-cluster-label').remove();
+  if (!clusterDragActive) gClusterLabels.selectAll('.user-cluster-label').remove();
 
   for (let i = 0; i < userClusterSections.length; i++) {
     const uc = userClusterSections[i];
@@ -1861,11 +1863,19 @@ function renderUserClusters() {
           .attr('fill', color).attr('fill-opacity', 0.08)
           .attr('stroke', color).attr('stroke-opacity', 0.3)
           .attr('stroke-width', 2).attr('stroke-dasharray', '6,3');
-        gClusterLabels.append('text')
-          .attr('class', 'user-cluster-label cluster-label')
-          .attr('x', cx).attr('y', cy - r - 8)
-          .attr('fill', color)
-          .text(uc.name);
+        if (!clusterDragActive) {
+          gClusterLabels.append('text')
+            .datum({ ucIndex: i })
+            .attr('class', 'user-cluster-label cluster-label')
+            .attr('x', cx).attr('y', cy - r - 8)
+            .attr('fill', color)
+            .text(uc.name)
+            .call(clusterLabelDrag(d => {
+              const sec = userClusterSections[d.ucIndex];
+              if (!sec || !currentGraph?.nodeMap) return [];
+              return sec.nodeIds.map(id => currentGraph.nodeMap.get(id)).filter(n => n && n.x != null);
+            }));
+        }
       }
       continue;
     }
@@ -1879,13 +1889,21 @@ function renderUserClusters() {
       .attr('fill', color).attr('fill-opacity', 0.08)
       .attr('stroke', color).attr('stroke-opacity', 0.3)
       .attr('stroke-width', 2).attr('stroke-dasharray', '6,3');
-    const centroid = d3.polygonCentroid(hull);
-    const topY = Math.min(...hull.map(p => p[1]));
-    gClusterLabels.append('text')
-      .attr('class', 'user-cluster-label cluster-label')
-      .attr('x', centroid[0]).attr('y', topY - 12)
-      .attr('fill', color)
-      .text(uc.name);
+    if (!clusterDragActive) {
+      const centroid = d3.polygonCentroid(hull);
+      const topY = Math.min(...hull.map(p => p[1]));
+      gClusterLabels.append('text')
+        .datum({ ucIndex: i })
+        .attr('class', 'user-cluster-label cluster-label')
+        .attr('x', centroid[0]).attr('y', topY - 12)
+        .attr('fill', color)
+        .text(uc.name)
+        .call(clusterLabelDrag(d => {
+          const sec = userClusterSections[d.ucIndex];
+          if (!sec || !currentGraph?.nodeMap) return [];
+          return sec.nodeIds.map(id => currentGraph.nodeMap.get(id)).filter(n => n && n.x != null);
+        }));
+    }
   }
 }
 
@@ -1921,6 +1939,37 @@ function renderUserClusterLegend() {
     item.appendChild(delBtn);
     legendEl.appendChild(item);
   }
+}
+
+let clusterDragActive = false;
+function clusterLabelDrag(getMembersFn) {
+  return d3.drag()
+    .on('start', function(e, d) {
+      d._clusterMembers = getMembersFn(d);
+      clusterDragActive = true;
+      d3.select(this).style('cursor', 'grabbing');
+    })
+    .on('drag', function(e, d) {
+      if (!d._clusterMembers || !d._clusterMembers.length) return;
+      for (const n of d._clusterMembers) {
+        n.x += e.dx;
+        n.y += e.dy;
+      }
+      renderPositions();
+    })
+    .on('end', function(e, d) {
+      clusterDragActive = false;
+      d3.select(this).style('cursor', null);
+      if (d._clusterMembers) {
+        for (const n of d._clusterMembers) {
+          stickyNodes.add(n.id);
+          savedPositions.set(n.id, { x: n.x, y: n.y });
+        }
+        pushArrangement('cluster-drag', d._clusterMembers.slice(0, 5).map(n => n.id));
+        d._clusterMembers = null;
+      }
+      renderPositions();
+    });
 }
 
 function renderClusterLabels() {
