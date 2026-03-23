@@ -1,0 +1,5 @@
+{
+  "name": "depgraph",
+  "src": "./prototypes/index.html",
+  "codemap": "./runtime/depgraph.md"
+}

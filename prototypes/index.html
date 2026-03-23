@@ -188,9 +188,8 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 // ═══════════════════════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════════════════════
-const _base = location.pathname.substring(0, location.pathname.lastIndexOf('/'));
-const SRC = _base + '/../../../Equinox/prototype/index.html';
-const CODEMAP_SRC = '/runtime/project_codemap.md';
+let SRC = '/target/src';
+let CODEMAP_SRC = '';
 const REFRESH_MS = 3000;
 const CLUSTER_GAP = 40;
 const LAYOUT_ITERS = 180;
@@ -336,7 +335,7 @@ let width, height;
 // ═══════════════════════════════════════════════════════
 // SPATIAL MEMORY
 // ═══════════════════════════════════════════════════════
-const SPATIAL_KEY = 'equinox-depgraph-spatial';
+let SPATIAL_KEY = 'depgraph-spatial';
 
 let spatialMemory = {
   arrangements: [],
@@ -616,9 +615,9 @@ function parseCodemap(md) {
 // AST ANALYSIS
 // ═══════════════════════════════════════════════════════
 function extractJS(html) {
-  const match = html.match(/<script\s+type="module">([\s\S]*)<\/script>/);
+  const match = html.match(/<script(?:\s+type="module")?>([\s\S]*)<\/script>/);
   if (!match) return { code: '', lineOffset: 0 };
-  const tagStart = html.indexOf('<script type="module">');
+  const tagStart = html.indexOf(match[0]);
   const lineOffset = html.substring(0, tagStart).split('\n').length;
   const code = match[1]
     .replace(/^\s*import\s+.*$/gm, '/* import */')
@@ -1732,6 +1731,11 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
       const dragDuration = d._dragStartTime ? Date.now() - d._dragStartTime : 0;
       d._dragStartTime = null;
       if (dragDuration < 300) {
+        // Clear cluster focus so node-based gathers take priority
+        if (focusedClusterId != null) {
+          focusedClusterId = null;
+          applyMetaLinkFocus();
+        }
         // Shift+X+click or Ctrl+click: dismiss node to T0
         if ((e.shiftKey && xKeyDown) || (e.ctrlKey || e.metaKey)) {
           selectedNodes.delete(d.id);
@@ -2072,6 +2076,7 @@ function clusterLabelDrag(getMembersFn) {
     .on('start', function(e, d) {
       d._clusterMembers = getMembersFn(d);
       d._clusterGathering = false;
+      d._clusterDragged = false;
       clusterDragActive = true;
       focusedClusterId = d.cid ?? null;
       applyMetaLinkFocus();
@@ -2083,6 +2088,7 @@ function clusterLabelDrag(getMembersFn) {
       d3.select(this).style('cursor', 'grabbing');
     })
     .on('drag', function(e, d) {
+      d._clusterDragged = true;
       if (!d._clusterMembers || !d._clusterMembers.length) return;
       for (const n of d._clusterMembers) {
         n.x += e.dx;
@@ -2098,8 +2104,12 @@ function clusterLabelDrag(getMembersFn) {
     })
     .on('end', function(e, d) {
       clusterDragActive = false;
-      focusedClusterId = null;
-      applyMetaLinkFocus();
+      // Only clear focusedClusterId if user actually dragged (not a click)
+      // so that "click cluster label + Space" can trigger cluster gather
+      if (d._clusterDragged) {
+        focusedClusterId = null;
+        applyMetaLinkFocus();
+      }
       d3.select(this).style('cursor', null);
       if (d._clusterMembers) {
         for (const n of d._clusterMembers) {
@@ -3364,13 +3374,16 @@ function stopSpacePull() {
 // KEYBOARD
 // ═══════════════════════════════════════════════════════
 document.addEventListener('keydown', (e) => {
+  // Skip keyboard shortcuts when typing in an input or select
+  if (e.target.closest('input, select, textarea')) return;
+
   // SPACEBAR: gather neighbors, pull selected, cluster-gather, or unlock
   if (e.code === 'Space') {
     e.preventDefault();
     spaceKeyDown = true;
     if (!e.repeat) {
-      // If a cluster label is being dragged, start cluster gather instead
-      if (clusterDragActive && focusedClusterId != null) {
+      // Cluster gather: active drag or previously clicked cluster label
+      if (focusedClusterId != null) {
         startClusterGather(focusedClusterId);
         return;
       }
@@ -3430,6 +3443,7 @@ document.addEventListener('keydown', (e) => {
 
   // Escape: close info panel, exit comparison mode, or clear selection
   if (e.code === 'Escape') {
+    if (focusedClusterId != null) { focusedClusterId = null; applyMetaLinkFocus(); }
     if (comparisonMode) { exitComparisonMode(); return; }
     if (selectedNodes.size > 0) {
       selectedNodes.clear();
@@ -3614,6 +3628,7 @@ document.getElementById('graph').addEventListener('click', e => {
   if (e.target.tagName === 'svg') {
     document.getElementById('info-panel').classList.remove('open');
     selectedNode = null;
+    if (focusedClusterId != null) { focusedClusterId = null; applyMetaLinkFocus(); }
     if (comparisonMode) exitComparisonMode();
   }
 });
@@ -3783,8 +3798,19 @@ window.addEventListener('resize', () => {
   svg.attr('width', width).attr('height', height);
 });
 
-loadAndAnalyze(true);
-setInterval(() => loadAndAnalyze(false), REFRESH_MS);
+// Load inspect.json, then start
+fetch('/inspect.json').then(r => r.json()).then(config => {
+  CODEMAP_SRC = '/' + config.codemap.replace(/^\.\//, '');
+  SPATIAL_KEY = `depgraph-spatial-${config.name || 'default'}`;
+  document.querySelector('#toolbar strong').textContent = config.name || 'depgraph';
+  loadSpatialMemory(); // reload with project-specific key
+  loadAndAnalyze(true);
+  setInterval(() => loadAndAnalyze(false), REFRESH_MS);
+}).catch(e => {
+  console.error('Failed to load inspect.json:', e);
+  loadAndAnalyze(true);
+  setInterval(() => loadAndAnalyze(false), REFRESH_MS);
+});
 
 document.getElementById('live-reload').addEventListener('change', (e) => {
   const statusEl = document.getElementById('status');

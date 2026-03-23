@@ -10,3 +10,9 @@ Run claude when the AST is done, and ask him to group them with respect to impor
 Pressing on X should apply slight forces on the currently selected nodes. Selected nodes occur when Shift-Clicking. Upon pressing and holding X forces are applied. After releasing all nodes become fixed in place. Note that the forces applied to nodes during X should be to spread them out, and to restore cohesion between modules based on the edge weights.
 
 Edge weights should change dynamically based on the current context the user is navigating. Please change the Time Arrows to be a bit more advanced. Goto T0, goto Last, 
+
+Controls do not work.
+
+Claude got lost in controls, looking at input area preventDefaults... The issue is in the D3 code, why spend token.
+
+New prompt asks Claude to look at our memory `./runtime/depgraph.md` for AST functions that may be of interest before writing code. He keeps using a bunch of different tools too to read files before working... is it cheaper? Without restricting Claude either in its navigation of the source code.

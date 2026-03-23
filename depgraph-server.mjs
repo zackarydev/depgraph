@@ -3,15 +3,22 @@
 // Usage: node tools/depgraph-server.mjs [port]
 
 import { createServer } from 'node:http';
-import { readFile, writeFile, watch } from 'node:fs';
+import { readFile, readFileSync, writeFile, watch } from 'node:fs';
 import { join, extname, resolve } from 'node:path';
 import { exec } from 'node:child_process';
 
 const PORT = parseInt(process.argv[2] || '3800', 10);
-const EQUINOX = resolve(import.meta.dirname, '../Equinox');
 const ROOT = resolve(import.meta.dirname, '.');
-const FOCUS_FILE = join(import.meta.dirname, '/runtime/depgraph-focus.json');
-const CODEMAP_FILE = join(import.meta.dirname, '/runtime/project_codemap.md');
+const INSPECT_FILE = join(ROOT, 'inspect.json');
+const FOCUS_FILE = join(ROOT, 'runtime/depgraph-focus.json');
+
+// ── Load inspect.json ─────────────────────────────
+const inspect = JSON.parse(readFileSync(INSPECT_FILE, 'utf8'));
+const TARGET_SRC = resolve(ROOT, inspect.src);
+const CODEMAP_FILE = resolve(ROOT, inspect.codemap);
+console.log(`\x1b[33minspect\x1b[0m  ${inspect.name}`);
+console.log(`  src    → ${TARGET_SRC}`);
+console.log(`  map    → ${CODEMAP_FILE}`);
 
 const MIME = {
   '.html': 'text/html',
@@ -202,18 +209,30 @@ const server = createServer((req, res) => {
     return;
   }
 
-  // Static files (project root)
-  const rootOrEquinox = url.pathname.includes('Equinox') ? EQUINOX : ROOT;
-  const isEquinox = rootOrEquinox === EQUINOX;
-  let filePath = join(ROOT, '/prototypes/depgraph.html');
-  if(url.pathname !== '/') {
-    filePath = isEquinox ? join(EQUINOX, url.pathname.replace('/Equinox', '')) : join(ROOT, url.pathname);
-  }
-  console.log(filePath);
-  if (!rootOrEquinox) {
-    res.writeHead(403);
-    res.end('forbidden');
+  // Serve inspect.json so the frontend can read it
+  if (url.pathname === '/inspect.json') {
+    readFile(INSPECT_FILE, (err, data) => {
+      if (err) { res.writeHead(500); res.end('error'); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff' });
+      res.end(data);
+    });
     return;
+  }
+
+  // Serve the target source file at /target/src
+  if (url.pathname === '/target/src') {
+    readFile(TARGET_SRC, (err, data) => {
+      if (err) { res.writeHead(404); res.end('target src not found'); return; }
+      res.writeHead(200, { 'Content-Type': MIME[extname(TARGET_SRC)] || 'text/plain', 'X-Content-Type-Options': 'nosniff' });
+      res.end(data);
+    });
+    return;
+  }
+
+  // Static files (project root)
+  let filePath = join(ROOT, '/prototypes/index.html');
+  if (url.pathname !== '/') {
+    filePath = join(ROOT, url.pathname);
   }
 
   readFile(filePath, (err, data) => {
@@ -233,5 +252,6 @@ const server = createServer((req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`\x1b[36mdepgraph\x1b[0m → http://127.0.0.1:${PORT}`);
   console.log(`  SSE    → /focus-events`);
+  console.log(`  target → /target/src`);
   console.log(`  watch  → ${FOCUS_FILE}`);
 });

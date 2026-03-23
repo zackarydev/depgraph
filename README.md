@@ -62,3 +62,9 @@ How a game works. That was the primary purpose. To explore the code a different 
 ## Codemap cluster boundaries
 
 ![Hypercodemap](<./screenshots/Screenshot 2026-03-21 at 3.08.07 PM.png>)
+
+## Experiment record #1 -- Inspecting depgraph for the first time
+
+The AI has really outdone itself again. Although, I'm glad to be a human because the importance it gives to somethings is off. At least from the perspective of what i'm looking for right now.
+
+But, NLP allows for FAST and easy edits to what the AI thinks is important. It's markdown... Or could be done in the hypergraph directly.
