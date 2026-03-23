@@ -1667,6 +1667,15 @@ function applySemanticZoom() {
   gHulls.selectAll('.hull').attr('fill-opacity', hullOpacity);
 }
 
+// Distance-based mid-edge opacity: solid when close, fading when far
+function edgeMidOpacity(dist) {
+  const CLOSE = 60, FAR = 250;
+  if (dist <= CLOSE) return 1.0;
+  if (dist >= FAR) return 0.08;
+  const t = (dist - CLOSE) / (FAR - CLOSE);
+  return 1.0 - t * 0.92; // lerp from 1.0 to 0.08
+}
+
 function renderGraph(graph, analysis, clusters, clusterNames) {
   const { nodes, links, nodeDegree } = graph;
   const showHulls = document.getElementById('show-hulls').checked;
@@ -1732,11 +1741,47 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
 
   // Render links (using source/target as IDs since we don't use d3-force)
   const nodeMap = graph.nodeMap;
+
+  // Proximity-based gradient: solid when close, fades in the middle when far
+  svgDefs.selectAll('.edge-grad').remove();
+  links.forEach((d, i) => {
+    const gradId = `edge-grad-${i}`;
+    d._gradId = gradId;
+    const sn = nodeMap.get(d.source);
+    const tn = nodeMap.get(d.target);
+    const sx = sn?.x || 0, sy = sn?.y || 0;
+    const tx = tn?.x || 0, ty = tn?.y || 0;
+    const layer = EDGE_LAYERS.find(l => l.id === d.type);
+    const color = layer ? layer.color : '#4a9eff';
+    d._edgeColor = color;
+
+    const dist = Math.hypot(tx - sx, ty - sy);
+    const midOp = edgeMidOpacity(dist);
+
+    const grad = svgDefs.append('linearGradient')
+      .attr('class', 'edge-grad')
+      .attr('id', gradId)
+      .attr('gradientUnits', 'userSpaceOnUse')
+      .attr('x1', sx).attr('y1', sy)
+      .attr('x2', tx).attr('y2', ty);
+
+    grad.append('stop').attr('offset', '0%')
+      .attr('stop-color', color).attr('stop-opacity', 1);
+    grad.append('stop').attr('offset', '25%')
+      .attr('stop-color', color).attr('stop-opacity', midOp);
+    grad.append('stop').attr('offset', '50%')
+      .attr('stop-color', color).attr('stop-opacity', midOp * 0.7);
+    grad.append('stop').attr('offset', '75%')
+      .attr('stop-color', color).attr('stop-opacity', midOp);
+    grad.append('stop').attr('offset', '100%')
+      .attr('stop-color', color).attr('stop-opacity', 1);
+  });
+
   gLinks.selectAll('line')
     .data(links)
     .join('line')
     .attr('class', 'link')
-    .attr('stroke', d => { const l = EDGE_LAYERS.find(l => l.id === d.type); return l ? l.color : d.type === 'uses' ? '#4a9eff' : '#4a9eff'; })
+    .attr('stroke', d => `url(#${d._gradId})`)
     .attr('stroke-width', d => baseEdgeWidth(d))
     .attr('stroke-opacity', d => baseEdgeOpacity(d))
     .attr('stroke-dasharray', d => { const l = EDGE_LAYERS.find(l => l.id === d.type); return l ? (l.dash || null) : d.type === 'uses' ? '3,3' : null; })
@@ -2499,11 +2544,27 @@ function renderPositions() {
   if (!currentNodes || !currentGraph) return;
   const nodeMap = currentGraph.nodeMap;
 
-  gLinks.selectAll('.link')
-    .attr('x1', d => nodeMap.get(d.source)?.x || 0)
-    .attr('y1', d => nodeMap.get(d.source)?.y || 0)
-    .attr('x2', d => nodeMap.get(d.target)?.x || 0)
-    .attr('y2', d => nodeMap.get(d.target)?.y || 0);
+  gLinks.selectAll('.link').each(function(d) {
+    const sn = nodeMap.get(d.source);
+    const tn = nodeMap.get(d.target);
+    const sx = sn?.x || 0, sy = sn?.y || 0;
+    const tx = tn?.x || 0, ty = tn?.y || 0;
+    d3.select(this)
+      .attr('x1', sx).attr('y1', sy)
+      .attr('x2', tx).attr('y2', ty);
+
+    // Update gradient endpoints and mid-opacity based on current distance
+    if (d._gradId) {
+      const dist = Math.hypot(tx - sx, ty - sy);
+      const midOp = edgeMidOpacity(dist);
+      const grad = svgDefs.select(`#${d._gradId}`);
+      grad.attr('x1', sx).attr('y1', sy).attr('x2', tx).attr('y2', ty);
+      const stops = grad.selectAll('stop').nodes();
+      d3.select(stops[1]).attr('stop-opacity', midOp);
+      d3.select(stops[2]).attr('stop-opacity', midOp * 0.7);
+      d3.select(stops[3]).attr('stop-opacity', midOp);
+    }
+  });
 
   gNodes.selectAll('.node')
     .attr('transform', d => `translate(${d.x},${d.y})`);
