@@ -33,6 +33,7 @@ body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', mo
 #info-panel .tag.read { border-left: 2px solid #6af; }
 #info-panel .tag.write { border-left: 2px solid #f66; }
 #info-panel .tag.call { border-left: 2px solid #af6; }
+#info-panel .tag.called-by { border-left: 2px solid #f6a; }
 #info-panel .tag.rw { border-left: 2px solid #fa6; }
 
 #legend {
@@ -129,19 +130,12 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
     </select>
   </label>
   <div class="sep"></div>
-  <label>Edge:
-    <select id="edge-mode">
-      <option value="shared-state">Shared state</option>
-      <option value="calls">Function calls</option>
-      <option value="both">Both</option>
-    </select>
-  </label>
+  <span id="edge-layers-ui"></span>
   <div class="sep"></div>
   <label><input type="checkbox" id="show-labels" checked> Labels</label>
   <button id="lock-btn" title="Lock selected nodes (Space to unlock)">Lock</button>
   <span id="lock-indicator" style="display:none; color:#ff0; font-size:11px">Locked</span>
   <label><input type="checkbox" id="live-reload" checked> Live</label>
-  <label><input type="range" id="min-shared" min="1" max="15" value="3" style="width:80px"> Min shared: <span id="min-shared-val">3</span></label>
   <div class="sep"></div>
   <label>Search: <input type="text" id="search" placeholder="function name..." style="width:140px"></label>
   <span id="status">waiting...</span>
@@ -703,6 +697,12 @@ function analyzeFunction(funcNode, globals) {
       const name = node.name;
       if (locals.has(name) || !globals.has(name)) return;
       const parent = ancestors[ancestors.length - 2];
+      // Property key (non-computed): { foo: val } — skip the key (but not shorthand { foo })
+      if (parent && parent.type === 'Property' && parent.key === node && !parent.computed && !parent.shorthand) return;
+      // Member property (non-computed): obj.foo — foo is not a global reference
+      if (parent && parent.type === 'MemberExpression' && parent.property === node && !parent.computed) return;
+      // Label identifiers
+      if (parent && (parent.type === 'LabeledStatement' || parent.type === 'BreakStatement' || parent.type === 'ContinueStatement')) return;
       if (parent && parent.type === 'AssignmentExpression' && parent.left === node) {
         writes.add(name);
       } else if (parent && parent.type === 'UpdateExpression') {
@@ -945,6 +945,115 @@ function computeAffinities(analysis, clusters, clusterNames) {
 }
 
 // ═══════════════════════════════════════════════════════
+// EDGE LAYERS
+// ═══════════════════════════════════════════════════════
+
+// Each layer: { id, label, color, dash, defaultOn, defaultThreshold, maxThreshold,
+//   compute(a, b, nameA, nameB) → edge[] where edge = { source, target, weight } }
+// Returning an array lets directed layers emit edges in specific directions.
+const EDGE_LAYERS = [
+  {
+    id: 'calls',
+    label: 'Calls',
+    color: '#af6',
+    dash: null,
+    defaultOn: true,
+    defaultThreshold: 1,
+    maxThreshold: 10,
+    compute(a, b, nameA, nameB) {
+      const edges = [];
+      if (a.calls.has(nameB)) edges.push({ source: nameA, target: nameB, weight: 3 });
+      if (b.calls.has(nameA)) edges.push({ source: nameB, target: nameA, weight: 3 });
+      return edges;
+    },
+  },
+  {
+    id: 'calledBy',
+    label: 'Called by',
+    color: '#f6a',
+    dash: '4,2',
+    defaultOn: true,
+    defaultThreshold: 1,
+    maxThreshold: 10,
+    compute(a, b, nameA, nameB) {
+      // Reverse of calls: if A calls B, emit edge from B←A (B is called by A)
+      const edges = [];
+      if (a.calls.has(nameB)) edges.push({ source: nameB, target: nameA, weight: 3 });
+      if (b.calls.has(nameA)) edges.push({ source: nameA, target: nameB, weight: 3 });
+      return edges;
+    },
+  },
+  {
+    id: 'shared',
+    label: 'Shared state',
+    color: '#4a9eff',
+    dash: null,
+    defaultOn: true,
+    defaultThreshold: 3,
+    maxThreshold: 15,
+    compute(a, b, nameA, nameB) {
+      const aState = new Set([...a.reads, ...a.writes, ...a.rw]);
+      const bState = new Set([...b.reads, ...b.writes, ...b.rw]);
+      let w = 0;
+      for (const v of aState) { if (bState.has(v)) w++; }
+      return w > 0 ? [{ source: nameA, target: nameB, weight: w }] : [];
+    },
+  },
+];
+
+// Runtime state for layer toggles/thresholds (populated by initEdgeLayerUI)
+const edgeLayerState = new Map();
+
+function initEdgeLayerUI() {
+  const container = document.getElementById('edge-layers-ui');
+  container.innerHTML = '';
+  for (const layer of EDGE_LAYERS) {
+    const state = { enabled: layer.defaultOn, threshold: layer.defaultThreshold };
+    edgeLayerState.set(layer.id, state);
+
+    const wrap = document.createElement('span');
+    wrap.style.cssText = 'margin-right:10px;white-space:nowrap;';
+
+    const lbl = document.createElement('label');
+    lbl.style.cssText = 'cursor:pointer;';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = state.enabled;
+    cb.addEventListener('change', () => { state.enabled = cb.checked; rebuild(); });
+    const swatch = document.createElement('span');
+    swatch.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;background:${layer.color};margin:0 3px;vertical-align:middle;`;
+    lbl.appendChild(cb);
+    lbl.appendChild(swatch);
+    lbl.appendChild(document.createTextNode(layer.label));
+    wrap.appendChild(lbl);
+
+    if (layer.maxThreshold > 1) {
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = 1;
+      slider.max = layer.maxThreshold;
+      slider.value = state.threshold;
+      slider.style.cssText = 'width:50px;vertical-align:middle;margin-left:4px;';
+      const valSpan = document.createElement('span');
+      valSpan.style.cssText = 'font-size:10px;margin-left:2px;color:#888;';
+      valSpan.textContent = state.threshold;
+      slider.addEventListener('input', () => {
+        state.threshold = parseInt(slider.value);
+        valSpan.textContent = state.threshold;
+        rebuild();
+      });
+      wrap.appendChild(slider);
+      wrap.appendChild(valSpan);
+    }
+    container.appendChild(wrap);
+  }
+}
+
+function getEnabledEdgeLayers() {
+  return EDGE_LAYERS.filter(l => edgeLayerState.get(l.id)?.enabled);
+}
+
+// ═══════════════════════════════════════════════════════
 // GRAPH BUILDING
 // ═══════════════════════════════════════════════════════
 function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
@@ -952,7 +1061,8 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
   const nodes = [];
   const links = [];
   const nodeMap = new Map();
-  const { viewMode, edgeMode, minShared } = opts;
+  const { viewMode } = opts;
+  const enabledLayers = getEnabledEdgeLayers();
   const sectionToId = new Map();
   for (const [cid, name] of clusterNames) sectionToId.set(name, cid);
 
@@ -1021,31 +1131,23 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
         links.push({ source: fname, target: gname, type: 'uses', weight: 1 });
       }
     }
-  } else {
-    // Function-to-function edges
+  }
+
+  // Function-to-function edges — one pass per enabled layer (all view modes)
+  {
     const names = [...functions.keys()];
-    for (let i = 0; i < names.length; i++) {
-      for (let j = i + 1; j < names.length; j++) {
-        const a = functions.get(names[i]);
-        const b = functions.get(names[j]);
-        let sharedWeight = 0, callWeight = 0;
-
-        const aState = new Set([...a.reads, ...a.writes, ...a.rw]);
-        const bState = new Set([...b.reads, ...b.writes, ...b.rw]);
-        for (const v of aState) { if (bState.has(v)) sharedWeight++; }
-        if (a.calls.has(names[j])) callWeight += 3;
-        if (b.calls.has(names[i])) callWeight += 3;
-
-        let weight = 0, type = 'shared';
-        if (edgeMode === 'shared-state') { weight = sharedWeight; type = 'shared'; }
-        else if (edgeMode === 'calls') {
-          if (callWeight === 0) continue;
-          weight = callWeight; type = 'call';
-        } else { weight = sharedWeight + callWeight; type = callWeight > 0 ? 'call' : 'shared'; }
-
-        const threshold = edgeMode === 'calls' ? 1 : minShared;
-        if (weight >= threshold) {
-          links.push({ source: names[i], target: names[j], type, weight });
+    for (const layer of enabledLayers) {
+      const threshold = edgeLayerState.get(layer.id)?.threshold ?? 1;
+      for (let i = 0; i < names.length; i++) {
+        for (let j = i + 1; j < names.length; j++) {
+          const a = functions.get(names[i]);
+          const b = functions.get(names[j]);
+          const edges = layer.compute(a, b, names[i], names[j]);
+          for (const e of edges) {
+            if (e.weight >= threshold) {
+              links.push({ source: e.source, target: e.target, type: layer.id, weight: e.weight });
+            }
+          }
         }
       }
     }
@@ -1634,10 +1736,10 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .data(links)
     .join('line')
     .attr('class', 'link')
-    .attr('stroke', d => d.type === 'call' ? '#af6' : d.type === 'uses' ? '#4a9eff' : '#4a9eff')
+    .attr('stroke', d => { const l = EDGE_LAYERS.find(l => l.id === d.type); return l ? l.color : d.type === 'uses' ? '#4a9eff' : '#4a9eff'; })
     .attr('stroke-width', d => baseEdgeWidth(d))
     .attr('stroke-opacity', d => baseEdgeOpacity(d))
-    .attr('stroke-dasharray', d => d.type === 'uses' ? '3,3' : null)
+    .attr('stroke-dasharray', d => { const l = EDGE_LAYERS.find(l => l.id === d.type); return l ? (l.dash || null) : d.type === 'uses' ? '3,3' : null; })
     .style('display', document.getElementById('show-edges').checked ? null : 'none')
     .attr('x1', d => nodeMap.get(d.source)?.x || 0)
     .attr('y1', d => nodeMap.get(d.source)?.y || 0)
@@ -2515,6 +2617,11 @@ function selectNode(d, analysis) {
   const writes = [...info.writes].sort();
   const rw = [...info.rw].sort();
   const calls = [...info.calls].sort();
+  const calledBy = [];
+  for (const [fname, finfo] of analysis.functions) {
+    if (finfo.calls.has(d.id)) calledBy.push(fname);
+  }
+  calledBy.sort();
 
   document.getElementById('info-body').innerHTML = `
     <div class="section"><div class="section-title">Location</div>Line ${info.line} — ${info.endLine} (${info.lines} lines)</div>
@@ -2524,6 +2631,7 @@ function selectNode(d, analysis) {
     ${writes.length ? `<div class="section"><div class="section-title">Writes (${writes.length})</div>${writes.map(w => `<span class="tag write">${w}</span>`).join('')}</div>` : ''}
     ${rw.length ? `<div class="section"><div class="section-title">Read+Write (${rw.length})</div>${rw.map(v => `<span class="tag rw">${v}</span>`).join('')}</div>` : ''}
     ${calls.length ? `<div class="section"><div class="section-title">Calls (${calls.length})</div>${calls.map(c => `<span class="tag call">${c}</span>`).join('')}</div>` : ''}
+    ${calledBy.length ? `<div class="section"><div class="section-title">Called by (${calledBy.length})</div>${calledBy.map(c => `<span class="tag called-by">${c}</span>`).join('')}</div>` : ''}
   `;
 }
 
@@ -3577,8 +3685,6 @@ document.getElementById('search').addEventListener('input', e => {
 function getOpts() {
   return {
     viewMode: document.getElementById('view-mode').value,
-    edgeMode: document.getElementById('edge-mode').value,
-    minShared: parseInt(document.getElementById('min-shared').value),
   };
 }
 
@@ -3593,11 +3699,6 @@ function rebuild() {
 }
 
 document.getElementById('view-mode').addEventListener('change', () => { stickyNodes.clear(); savedPositions.clear(); rebuild(); });
-document.getElementById('edge-mode').addEventListener('change', rebuild);
-document.getElementById('min-shared').addEventListener('input', e => {
-  document.getElementById('min-shared-val').textContent = e.target.value;
-  rebuild();
-});
 document.getElementById('show-labels').addEventListener('change', () => applySemanticZoom());
 document.getElementById('show-edges').addEventListener('change', () => applySemanticZoom());
 document.getElementById('show-hulls').addEventListener('change', () => {
@@ -3797,6 +3898,8 @@ window.addEventListener('resize', () => {
   height = window.innerHeight - 44;
   svg.attr('width', width).attr('height', height);
 });
+
+initEdgeLayerUI();
 
 // Load inspect.json, then start
 fetch('/inspect.json').then(r => r.json()).then(config => {

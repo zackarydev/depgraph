@@ -68,3 +68,17 @@ How a game works. That was the primary purpose. To explore the code a different 
 The AI has really outdone itself again. Although, I'm glad to be a human because the importance it gives to somethings is off. At least from the perspective of what i'm looking for right now.
 
 But, NLP allows for FAST and easy edits to what the AI thinks is important. It's markdown... Or could be done in the hypergraph directly.
+
+The controls didn't work properly... I asked Claude, via a vague prompt to take a look. But he got lost in the controls code, looking at input area preventDefaults... The issue was in locked/unlocked node within the Gather/Pull functions...
+
+New prompt asks Claude to look at our memory `./runtime/depgraph.md` for AST functions that may be of interest before writing code. He keeps using a bunch of different tools too to read files before working... is it cheaper? Without restricting Claude either in its navigation of the source code.
+
+I navigated the hypergraph to try to find the issue. It's a bit clunky, there are some unclear controls. But ultimately I found (easily) Gather/Pull -> "startSpacePull".
+
+I also quite like the "control-click" to dismiss things that are clearly not related (like all the rendering stuff...)
+
+Using the side-panel of nodes to see who called the function. Or who it calls. Seems like "PULL" control doesn't take into account for the caller edges. Seems like the hypergraph is missing those dependencies.
+
+New edge types reveals the inner structure of this repo.
+
+![edges for Callee Caller Shared State](./screenshots/callee_caller_state_edges.png)
