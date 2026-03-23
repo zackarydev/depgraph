@@ -45,7 +45,7 @@ Z is the temporal opposite of X: X rewinds node positions toward the original la
 ## Gather
 
 - **Hold Space** (with 2+ selected nodes) — *Quick Gather*: pull selected nodes toward their centroid
-- **Click node + Hold space** - *Stranger Gather*: pull neighbors (except selected nodes) towards clicked node
+- **Click node + Hold space** - *Stranger Gather*: pull unselected neighbors towards clicked node (works whether the clicked node is selected or not)
 - **Click node + Shift + Hold Space** (with 2+ selected nodes) - *Group Gather*: pull selected nodes towards clicked node
 - **Click cluster label + Hold Space** — *Cluster Gather*: pull all clusters connected (via meta-edges) toward the clicked cluster. Uninvolved clusters are gently repulsed outward. Release Space to stop.
 - **Shift+Drag** — *Group Move*: drag all selected nodes together (see Drag section)
@@ -78,7 +78,7 @@ Z is the temporal opposite of X: X rewinds node positions toward the original la
 | **Shift+X + Click** | Dismiss node to T0 |
 | **Hold Z** | Time-travel backwards through history |
 | **Hold Space** | Gather selected nodes (to centroid) |
-| **Click node + Space** | Gather neighbors (not selected) toward node |
+| **Click node + Space** | Gather unselected neighbors toward node |
 | **Click cluster label + Space** | Gather connected clusters toward label |
 | **Click node + Shift+Space** | Gather selected nodes toward node |
 | **Space** (nothing selected) | Unlock all |

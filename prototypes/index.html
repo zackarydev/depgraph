@@ -107,8 +107,18 @@ body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', mo
 }
 #pull-layers .pull-title { color: #666; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
 #pull-layers .layer-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
-#pull-layers .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-#pull-layers .layer-name { color: #888; font-size: 11px; min-width: 70px; }
+#pull-layers .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; cursor: pointer; }
+#pull-layers .layer-name { color: #888; font-size: 11px; min-width: 70px; cursor: pointer; user-select: none; }
+#pull-layers .layer-row.disabled .swatch { opacity: 0.3; }
+#pull-layers .layer-row.disabled .layer-name { color: #444; text-decoration: line-through; }
+#pull-layers .layer-info { color: #555; font-size: 10px; cursor: help; flex-shrink: 0; position: relative; }
+#pull-layers .layer-info:hover::after {
+  content: attr(data-tip);
+  position: absolute; left: 18px; top: -4px; z-index: 99;
+  background: #1a1a24; border: 1px solid #3a3a45; border-radius: 4px;
+  padding: 4px 8px; color: #aaa; font-size: 10px; white-space: nowrap;
+  pointer-events: none;
+}
 #pull-layers .pull-slider { width: 50px; height: 3px; accent-color: #666; cursor: pointer; }
 #pull-layers .pull-val { color: #555; font-size: 10px; min-width: 22px; text-align: right; }
 
@@ -141,8 +151,6 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: non
       <option value="hypergraph" selected>Hypergraph (funcs + globals)</option>
     </select>
   </label>
-  <div class="sep"></div>
-  <span id="edge-layers-ui"></span>
   <div class="sep"></div>
   <label><input type="checkbox" id="show-labels" checked> Labels</label>
   <button id="lock-btn" title="Lock selected nodes (Space to unlock)">Lock</button>
@@ -715,6 +723,16 @@ function analyzeFunction(funcNode, globals) {
   });
 
   acorn.walk.ancestor(funcNode.body, {
+    // Detect writes via assignment — acorn-walk routes AssignmentExpression.left
+    // through Pattern → VariablePattern (= ignore), so the Identifier visitor
+    // never fires for bare identifier assignment targets like `x = val`.
+    // We must handle them here directly.
+    AssignmentExpression(node) {
+      if (node.left.type === 'Identifier') {
+        const name = node.left.name;
+        if (!locals.has(name) && globals.has(name)) writes.add(name);
+      }
+    },
     Identifier(node, ancestors) {
       const name = node.name;
       if (locals.has(name) || !globals.has(name)) return;
@@ -725,9 +743,7 @@ function analyzeFunction(funcNode, globals) {
       if (parent && parent.type === 'MemberExpression' && parent.property === node && !parent.computed) return;
       // Label identifiers
       if (parent && (parent.type === 'LabeledStatement' || parent.type === 'BreakStatement' || parent.type === 'ContinueStatement')) return;
-      if (parent && parent.type === 'AssignmentExpression' && parent.left === node) {
-        writes.add(name);
-      } else if (parent && parent.type === 'UpdateExpression') {
+      if (parent && parent.type === 'UpdateExpression') {
         writes.add(name);
       } else {
         reads.add(name);
@@ -977,6 +993,8 @@ const EDGE_LAYERS = [
   {
     id: 'calls',
     label: 'Calls',
+    desc: 'A --> B: function A calls function B',
+    directed: true,
     color: '#af6',
     dash: null,
     defaultOn: true,
@@ -992,6 +1010,8 @@ const EDGE_LAYERS = [
   {
     id: 'calledBy',
     label: 'Called by',
+    desc: 'A <-- B: function A is called by function B',
+    directed: true,
     color: '#f6a',
     dash: '4,2',
     defaultOn: true,
@@ -1008,6 +1028,8 @@ const EDGE_LAYERS = [
   {
     id: 'shared',
     label: 'Shared state',
+    desc: 'A <-> B: both functions read or write the same globals',
+    directed: false,
     color: '#4a9eff',
     dash: null,
     defaultOn: true,
@@ -1022,8 +1044,10 @@ const EDGE_LAYERS = [
     },
   },
   {
-    id: 'writtenBy',
-    label: 'Written by',
+    id: 'sharedWrites',
+    label: 'Shared writes',
+    desc: 'A <-> B: both functions write to the same globals (mutation contention)',
+    directed: false,
     color: '#cc5de8',
     dash: '6,3',
     defaultOn: true,
@@ -1040,6 +1064,8 @@ const EDGE_LAYERS = [
   {
     id: 'importance',
     label: 'Importance',
+    desc: 'Both functions are high-importance (>=7) and share a structural link',
+    directed: false,
     color: '#ffd43b',
     dash: '2,4',
     defaultOn: true,
@@ -1060,69 +1086,39 @@ const EDGE_LAYERS = [
       return [{ source: nameA, target: nameB, weight: w }];
     },
   },
+  {
+    id: 'uses',
+    label: 'Reads global',
+    desc: 'fn --> var: function reads this global variable (hypergraph only)',
+    directed: true,
+    color: '#888',
+    dash: '3,3',
+    defaultOn: true,
+    defaultThreshold: 1,
+    maxThreshold: 1,
+    compute() { return []; }, // edges created directly in buildGraph for hypergraph mode
+  },
+  {
+    id: 'writesTo',
+    label: 'Writes to global',
+    desc: 'fn --> var: function writes to this global variable (hypergraph only)',
+    directed: true,
+    color: '#cc5de8',
+    dash: null,
+    defaultOn: true,
+    defaultThreshold: 1,
+    maxThreshold: 1,
+    compute() { return []; }, // edges created directly in buildGraph for hypergraph mode
+  },
 ];
 
-// Runtime state for layer toggles/thresholds (populated by initEdgeLayerUI)
-const edgeLayerState = new Map();
-
-function initEdgeLayerUI() {
-  const container = document.getElementById('edge-layers-ui');
-  container.innerHTML = '';
-  for (const layer of EDGE_LAYERS) {
-    const state = { enabled: layer.defaultOn, threshold: layer.defaultThreshold };
-    edgeLayerState.set(layer.id, state);
-
-    const wrap = document.createElement('span');
-    wrap.style.cssText = 'margin-right:10px;white-space:nowrap;';
-
-    const lbl = document.createElement('label');
-    lbl.style.cssText = 'cursor:pointer;';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = state.enabled;
-    cb.dataset.layer = layer.id;
-    cb.addEventListener('change', () => {
-      state.enabled = cb.checked;
-      // Sync pull-panel eye button
-      const eyeBtn = document.querySelector(`#pull-layers .eye-btn[data-layer="${layer.id}"]`);
-      if (eyeBtn) eyeBtn.classList.toggle('hidden', !cb.checked);
-      rebuild();
-    });
-    const swatch = document.createElement('span');
-    swatch.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;background:${layer.color};margin:0 3px;vertical-align:middle;`;
-    lbl.appendChild(cb);
-    lbl.appendChild(swatch);
-    lbl.appendChild(document.createTextNode(layer.label));
-    wrap.appendChild(lbl);
-
-    if (layer.maxThreshold > 1) {
-      const slider = document.createElement('input');
-      slider.type = 'range';
-      slider.min = 1;
-      slider.max = layer.maxThreshold;
-      slider.value = state.threshold;
-      slider.style.cssText = 'width:50px;vertical-align:middle;margin-left:4px;';
-      const valSpan = document.createElement('span');
-      valSpan.style.cssText = 'font-size:10px;margin-left:2px;color:#888;';
-      valSpan.textContent = state.threshold;
-      slider.addEventListener('input', () => {
-        state.threshold = parseInt(slider.value);
-        valSpan.textContent = state.threshold;
-        rebuild();
-      });
-      wrap.appendChild(slider);
-      wrap.appendChild(valSpan);
-    }
-    container.appendChild(wrap);
-  }
-}
-
 function getEnabledEdgeLayers() {
-  return EDGE_LAYERS.filter(l => edgeLayerState.get(l.id)?.enabled);
+  return EDGE_LAYERS.filter(l => (pullLayerState.get(l.id) || 0) > 0);
 }
 
 // Pull-layer state: per-layer opacity (0–1) controlling edge visibility and pull participation
 const pullLayerState = new Map();
+const pullLayerPrevOpacity = new Map(); // stored opacity before toggling off
 let proximityBoost = 0.5; // 0–1, how much screen proximity at high zoom boosts edge opacity
 
 function initPullLayerUI() {
@@ -1145,6 +1141,15 @@ function initPullLayerUI() {
     row.appendChild(swatch);
     row.appendChild(nameSpan);
 
+    // Info tooltip
+    if (layer.desc) {
+      const info = document.createElement('span');
+      info.className = 'layer-info';
+      info.textContent = '(i)';
+      info.setAttribute('data-tip', layer.desc);
+      row.appendChild(info);
+    }
+
     // Opacity slider
     const slider = document.createElement('input');
     slider.type = 'range';
@@ -1157,24 +1162,44 @@ function initPullLayerUI() {
     valSpan.textContent = defaultOpacity > 0 ? Math.round(defaultOpacity * 100) : 'off';
     slider.addEventListener('input', () => {
       const v = parseInt(slider.value) / 100;
+      const oldV = pullLayerState.get(layer.id) || 0;
       pullLayerState.set(layer.id, v);
       valSpan.textContent = v > 0 ? Math.round(v * 100) : 'off';
-      // Sync toolbar visibility: enable if opacity > 0
-      const s = edgeLayerState.get(layer.id);
-      if (s) {
-        const shouldEnable = v > 0;
-        if (s.enabled !== shouldEnable) {
-          s.enabled = shouldEnable;
-          const tbCb = document.querySelector(`#edge-layers-ui input[data-layer="${layer.id}"]`);
-          if (tbCb) tbCb.checked = shouldEnable;
-          rebuild();
-          return;
-        }
+      // Sync disabled state with slider
+      row.classList.toggle('disabled', v <= 0);
+      // Rebuild if layer toggled on/off, otherwise just update opacities
+      if ((oldV > 0) !== (v > 0)) {
+        rebuild();
+      } else {
+        updateEdgeOpacities();
       }
-      updateEdgeOpacities();
     });
     row.appendChild(slider);
     row.appendChild(valSpan);
+
+    // Toggle on/off by clicking swatch or name
+    if (!defaultOpacity) row.classList.add('disabled');
+    const toggleLayer = () => {
+      const current = pullLayerState.get(layer.id) || 0;
+      if (current > 0) {
+        // Turn off: save current opacity, set to 0
+        pullLayerPrevOpacity.set(layer.id, current);
+        pullLayerState.set(layer.id, 0);
+        slider.value = 0;
+        valSpan.textContent = 'off';
+        row.classList.add('disabled');
+      } else {
+        // Turn on: restore previous opacity (default to 1)
+        const restore = pullLayerPrevOpacity.get(layer.id) || 1;
+        pullLayerState.set(layer.id, restore);
+        slider.value = Math.round(restore * 100);
+        valSpan.textContent = Math.round(restore * 100);
+        row.classList.remove('disabled');
+      }
+      rebuild();
+    };
+    swatch.addEventListener('click', toggleLayer);
+    nameSpan.addEventListener('click', toggleLayer);
 
     container.appendChild(row);
   }
@@ -1253,6 +1278,9 @@ function updateEdgeOpacities() {
   gLinks.selectAll('.link')
     .transition().duration(200)
     .attr('stroke-opacity', l => edgeOpacity(l, nodeDegree));
+  gLinks.selectAll('.arrow')
+    .transition().duration(200)
+    .attr('fill-opacity', l => edgeOpacity(l, nodeDegree));
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1287,13 +1315,19 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
 
   if (viewMode === 'hypergraph') {
     // Add global variable nodes
-    const globalUsage = new Map();
+    const globalUsage = new Map();   // gname -> Set of fnames
+    const globalWriters = new Map(); // gname -> Set of fnames that write to it
     for (const [fname, info] of functions) {
+      const writerSet = new Set([...info.writes, ...info.rw]);
       for (const s of [info.reads, info.writes, info.rw]) {
         for (const g of s) {
           if (!globalUsage.has(g)) globalUsage.set(g, new Set());
           globalUsage.get(g).add(fname);
         }
+      }
+      for (const g of writerSet) {
+        if (!globalWriters.has(g)) globalWriters.set(g, new Set());
+        globalWriters.get(g).add(fname);
       }
     }
     for (const [gname, users] of globalUsage) {
@@ -1329,8 +1363,10 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
       };
       nodes.push(node);
       nodeMap.set(gname, node);
+      const writers = globalWriters.get(gname) || new Set();
       for (const fname of users) {
-        links.push({ source: fname, target: gname, type: 'uses', weight: 1 });
+        const edgeType = writers.has(fname) ? 'writesTo' : 'uses';
+        links.push({ source: fname, target: gname, type: edgeType, weight: 1 });
       }
     }
   }
@@ -1339,7 +1375,7 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
   {
     const names = [...functions.keys()];
     for (const layer of enabledLayers) {
-      const threshold = edgeLayerState.get(layer.id)?.threshold ?? 1;
+      const threshold = layer.defaultThreshold;
       for (let i = 0; i < names.length; i++) {
         for (let j = i + 1; j < names.length; j++) {
           const a = functions.get(names[i]);
@@ -1744,6 +1780,7 @@ function initSVG() {
   svg.attr('width', width).attr('height', height);
 
   svgDefs = svg.append('defs');
+
   gHulls = svg.append('g').attr('class', 'hulls');
   gMetaLinks = svg.append('g').attr('class', 'meta-links');
   gLinks = svg.append('g').attr('class', 'links');
@@ -1843,14 +1880,17 @@ function applySemanticZoom() {
   // Individual edges: only show when Edges checkbox is on
   if (showEdges) {
     gLinks.selectAll('.link').style('display', null);
+    gLinks.selectAll('.arrow').style('display', null);
     gLinks.attr('opacity', 1);
     // Recompute per-edge opacity (proximity depends on zoom)
     if (currentGraph) {
       const nd = currentGraph.nodeDegree;
       gLinks.selectAll('.link').attr('stroke-opacity', l => edgeOpacity(l, nd));
+      gLinks.selectAll('.arrow').attr('fill-opacity', l => edgeOpacity(l, nd));
     }
   } else {
     gLinks.selectAll('.link').style('display', 'none');
+    gLinks.selectAll('.arrow').style('display', 'none');
   }
 
   const hullOpacity = k < 0.5 ? 0.15 : k < 1.5 ? 0.08 : 0.04;
@@ -1973,11 +2013,39 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .attr('stroke', d => `url(#${d._gradId})`)
     .attr('stroke-width', d => baseEdgeWidth(d))
     .attr('stroke-opacity', d => baseEdgeOpacity(d))
-    .attr('stroke-dasharray', d => { const l = EDGE_LAYERS.find(l => l.id === d.type); return l ? (l.dash || null) : d.type === 'uses' ? '3,3' : null; })
+    .attr('stroke-dasharray', d => { const l = EDGE_LAYERS.find(l => l.id === d.type); return l ? (l.dash || null) : null; })
     .attr('x1', d => nodeMap.get(d.source)?.x || 0)
     .attr('y1', d => nodeMap.get(d.source)?.y || 0)
     .attr('x2', d => nodeMap.get(d.target)?.x || 0)
     .attr('y2', d => nodeMap.get(d.target)?.y || 0);
+
+  // Inline arrowheads for directed edges (inherit stroke-opacity from edge)
+  const directedLinks = links.filter(d => {
+    const l = EDGE_LAYERS.find(l => l.id === d.type);
+    return l?.directed;
+  });
+  gLinks.selectAll('.arrow')
+    .data(directedLinks)
+    .join('path')
+    .attr('class', 'arrow')
+    .attr('d', d => {
+      const sn = nodeMap.get(d.source), tn = nodeMap.get(d.target);
+      if (!sn || !tn) return '';
+      const dx = tn.x - sn.x, dy = tn.y - sn.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1) return '';
+      const ux = dx / len, uy = dy / len;
+      // Place tip at target node edge
+      const tr = tn.radius || 4;
+      const tipX = tn.x - ux * tr, tipY = tn.y - uy * tr;
+      const sz = 2; // arrowhead size
+      const bx = tipX - ux * sz, by = tipY - uy * sz;
+      const px = -uy * sz * 0.5, py = ux * sz * 0.5;
+      return `M${tipX},${tipY} L${bx + px},${by + py} L${bx - px},${by - py}Z`;
+    })
+    .attr('fill', d => d._edgeColor)
+    .attr('fill-opacity', d => baseEdgeOpacity(d))
+    .attr('stroke', 'none');
 
   // Render nodes
   const node = gNodes.selectAll('g')
@@ -2943,6 +3011,22 @@ function renderPositions() {
     }
   });
 
+  // Update arrowhead positions
+  gLinks.selectAll('.arrow').each(function(d) {
+    const sn = nodeMap.get(d.source), tn = nodeMap.get(d.target);
+    if (!sn || !tn) return;
+    const dx = tn.x - sn.x, dy = tn.y - sn.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return;
+    const ux = dx / len, uy = dy / len;
+    const tr = tn.radius || 4;
+    const tipX = tn.x - ux * tr, tipY = tn.y - uy * tr;
+    const sz = 3;
+    const bx = tipX - ux * sz, by = tipY - uy * sz;
+    const px = -uy * sz * 0.5, py = ux * sz * 0.5;
+    d3.select(this).attr('d', `M${tipX},${tipY} L${bx + px},${by + py} L${bx - px},${by - py}Z`);
+  });
+
   gNodes.selectAll('.node')
     .attr('transform', d => `translate(${d.x},${d.y})`);
 
@@ -3001,31 +3085,37 @@ function applyContextualEdgeWeights(focusId) {
 
   gLinks.selectAll('.link')
     .transition().duration(300)
-    .attr('stroke-opacity', l => {
-      const layerOp = pullLayerState.get(l.type) || 0;
-      if (layerOp <= 0) return 0.02;
-      const sd = distances.get(l.source) ?? 99;
-      const td = distances.get(l.target) ?? 99;
-      const minD = Math.min(sd, td);
-      const maxD = Math.max(sd, td);
-      let base;
-      if (maxD <= 1) base = 0.8;
-      else if (maxD <= 2) base = 0.35;
-      else if (minD <= 2) base = 0.12;
-      else base = 0.03;
-      return base * layerOp;
-    })
-    .attr('stroke-width', l => {
-      const layerOp = pullLayerState.get(l.type) || 0;
-      if (layerOp <= 0) return 0.3;
-      const sd = distances.get(l.source) ?? 99;
-      const td = distances.get(l.target) ?? 99;
-      const maxD = Math.max(sd, td);
-      const w = (l.weight || 1);
-      if (maxD <= 1) return Math.min(4, 1.5 + w * 0.5) * layerOp;
-      if (maxD <= 2) return Math.min(3, 0.8 + w * 0.3) * layerOp;
-      return Math.min(2, 0.3 + w * 0.15);
-    });
+    .attr('stroke-opacity', contextEdgeOp);
+  const contextEdgeWidthFn = l => {
+    const layerOp = pullLayerState.get(l.type) || 0;
+    if (layerOp <= 0) return 0.3;
+    const sd = distances.get(l.source) ?? 99;
+    const td = distances.get(l.target) ?? 99;
+    const maxD = Math.max(sd, td);
+    const w = (l.weight || 1);
+    if (maxD <= 1) return Math.min(4, 1.5 + w * 0.5) * layerOp;
+    if (maxD <= 2) return Math.min(3, 0.8 + w * 0.3) * layerOp;
+    return Math.min(2, 0.3 + w * 0.15);
+  };
+  gLinks.selectAll('.link').transition().duration(300).attr('stroke-width', contextEdgeWidthFn);
+  gLinks.selectAll('.arrow')
+    .transition().duration(300)
+    .attr('fill-opacity', contextEdgeOp);
+
+  function contextEdgeOp(l) {
+    const layerOp = pullLayerState.get(l.type) || 0;
+    if (layerOp <= 0) return 0.02;
+    const sd = distances.get(l.source) ?? 99;
+    const td = distances.get(l.target) ?? 99;
+    const minD = Math.min(sd, td);
+    const maxD = Math.max(sd, td);
+    let base;
+    if (maxD <= 1) base = 0.8;
+    else if (maxD <= 2) base = 0.35;
+    else if (minD <= 2) base = 0.12;
+    else base = 0.03;
+    return base * layerOp;
+  }
 }
 
 function selectNode(d, analysis) {
@@ -3945,7 +4035,7 @@ document.addEventListener('keydown', (e) => {
       if (anchorNode && e.shiftKey && selectedNodes.size >= 2) {
         // Click node + Shift+Space: pull selected nodes toward clicked node
         startSpacePull(anchorNode);
-      } else if (anchorNode && !selectedNodes.has(anchorNode.id)) {
+      } else if (anchorNode) {
         // Click node + Space: pull neighbors (except selected) toward clicked node
         startNeighborGather(anchorNode);
       } else if (selectedNodes.size >= 2) {
@@ -4124,6 +4214,10 @@ document.getElementById('search').addEventListener('input', e => {
     if (matches.has(l.source) || matches.has(l.target)) return 0.4;
     return 0.01;
   });
+  gLinks.selectAll('.arrow').attr('fill-opacity', l => {
+    if (matches.has(l.source) || matches.has(l.target)) return 0.4;
+    return 0.01;
+  });
 });
 
 // ═══════════════════════════════════════════════════════
@@ -4285,17 +4379,19 @@ function applyFocus(data) {
   });
   gNodes.selectAll('circle').classed('focus-glow', d => (relevanceMap.get(d.id) || 0) >= 0.7);
 
-  gLinks.selectAll('.link').attr('stroke-opacity', l => {
+  const linkOpFn = l => {
     const sr = relevanceMap.get(l.source) || 0;
     const tr = relevanceMap.get(l.target) || 0;
     const minR = Math.min(sr, tr);
     return minR >= 0.5 ? 0.7 : minR >= 0.2 ? 0.25 : minR > 0 ? 0.08 : 0.015;
-  }).attr('stroke-width', l => {
+  };
+  gLinks.selectAll('.link').attr('stroke-opacity', linkOpFn).attr('stroke-width', l => {
     const sr = relevanceMap.get(l.source) || 0;
     const tr = relevanceMap.get(l.target) || 0;
     const minR = Math.min(sr, tr);
     return minR >= 0.5 ? Math.min(4, 1.5 + (l.weight || 1) * 0.5) : Math.min(2, 0.3 + (l.weight || 1) * 0.15);
   });
+  gLinks.selectAll('.arrow').attr('fill-opacity', linkOpFn);
 
   gLabels.selectAll('text').attr('opacity', d => {
     const r = relevanceMap.get(d.id) || 0;
@@ -4348,7 +4444,6 @@ window.addEventListener('resize', () => {
   svg.attr('width', width).attr('height', height);
 });
 
-initEdgeLayerUI();
 initPullLayerUI();
 
 // Load inspect.json, then start
