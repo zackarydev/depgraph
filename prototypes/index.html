@@ -5,7 +5,7 @@
 <title>Equinox — Dependency Graph</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', monospace; overflow: hidden; }
+body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', monospace; overflow: hidden; user-select: none; -webkit-user-select: none; }
 
 #toolbar {
   position: fixed; top: 0; left: 0; right: 0; z-index: 10;
@@ -403,6 +403,9 @@ function pushArrangement(trigger, focalNodes) {
   }
   const focal = focalNodes || (selectedNode ? [selectedNode.id] : []);
   const label = generateArrangementLabel(focal, trigger);
+  // Snapshot cluster importance so it can be restored on undo
+  const impSnapshot = {};
+  for (const [cid, val] of clusterImportance) impSnapshot[cid] = val;
   const arr = {
     id: Math.random().toString(36).slice(2, 8),
     timestamp: new Date().toISOString(),
@@ -410,6 +413,7 @@ function pushArrangement(trigger, focalNodes) {
     focal,
     label,
     trigger,
+    clusterImportance: impSnapshot,
   };
   // If we navigated back and then make a new arrangement, truncate forward history
   if (arrangementIndex < spatialMemory.arrangements.length - 1) {
@@ -461,6 +465,7 @@ function navigateArrangement(delta) {
     targetPositions.set(id, { x: pos[0], y: pos[1] });
   }
   animateToPositions(targetPositions, 300);
+  restoreClusterImportance(arr.clusterImportance);
   updateArrNav();
 }
 
@@ -567,6 +572,7 @@ function navigateToArrangement(targetIdx) {
     targetPositions.set(id, { x: pos[0], y: pos[1] });
   }
   animateToPositions(targetPositions, 300);
+  restoreClusterImportance(arr.clusterImportance);
   updateArrNav();
 }
 
@@ -2202,6 +2208,11 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
       // Mac Ctrl+Click fires contextmenu — reduce cluster importance
       e.preventDefault();
       if (d.cid != null) reduceClusterImportance(d.cid);
+    })
+    .on('dblclick', (e, d) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (d.cid != null) growClusterImportance(d.cid);
     });
   rebuildClusterMemberCache();
   computeClusterLabelPlacement();
@@ -2295,6 +2306,11 @@ function renderHulls() {
       .on('contextmenu', (e, d) => {
         e.preventDefault();
         if (d.cid != null) reduceClusterImportance(d.cid);
+      })
+      .on('dblclick', (e, d) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (d.cid != null) growClusterImportance(d.cid);
       });
   }
   // Also render user clusters on top
@@ -2495,11 +2511,103 @@ function getClusterImportance(cid) {
   return clusterImportance.has(cid) ? clusterImportance.get(cid) : 1.0;
 }
 
+function restoreClusterImportance(snapshot) {
+  if (!snapshot) return;
+  // Reset to defaults, then apply snapshot
+  clusterImportance.clear();
+  for (const [cid, val] of Object.entries(snapshot)) {
+    clusterImportance.set(Number(cid), val);
+  }
+  // Re-apply visual importance for all clusters
+  if (!currentNodes) return;
+  const allCids = new Set(currentNodes.map(n => n.cluster).filter(c => c != null));
+  for (const cid of allCids) {
+    const imp = getClusterImportance(cid);
+    gNodes.selectAll('.node').each(function(d) {
+      if (d.cluster !== cid) return;
+      const scaledR = d.radius * imp;
+      d3.select(this).select('circle').attr('r', scaledR);
+      d3.select(this).select('circle:nth-child(2)').attr('r', scaledR + 2.5);
+    });
+  }
+  // Update meta-edge visuals
+  if (typeof currentMetaLinks !== 'undefined') {
+    for (const d of currentMetaLinks) {
+      const grad = svgDefs.select(`#${d.gradId}`);
+      if (!grad.node()) continue;
+      const edgeImp = Math.min(getClusterImportance(d.sourceCluster), getClusterImportance(d.targetCluster));
+      const baseOps = [0.7, 0.08, 0.05, 0.08, 0.7];
+      const focusMult = (focusedClusterId != null &&
+        (d.sourceCluster === focusedClusterId || d.targetCluster === focusedClusterId)) ? 5 : 1;
+      grad.selectAll('stop').each(function(_, i) {
+        d3.select(this).attr('stop-opacity', Math.min(1, baseOps[i] * focusMult * edgeImp));
+      });
+      gMetaLinks.selectAll('.meta-link').filter(ml => ml === d)
+        .attr('stroke-width', (0.5 + d.normalizedWeight * 4) * edgeImp);
+    }
+  }
+  renderHulls();
+  applySemanticZoom();
+  computeClusterLabelPlacement();
+}
+
 function reduceClusterImportance(cid) {
+  pushArrangement('cluster-shrink', [currentClusterNames?.get(cid) || `cluster_${cid}`]);
   const current = getClusterImportance(cid);
   const next = Math.max(0.05, current * 0.7);
   clusterImportance.set(cid, next);
   applyClusterImportance(cid);
+}
+
+function growClusterImportance(cid) {
+  const current = getClusterImportance(cid);
+  if (current >= 1.0) return;
+  pushArrangement('cluster-grow', [currentClusterNames?.get(cid) || `cluster_${cid}`]);
+  const next = Math.min(1.0, current / 0.7);
+  clusterImportance.set(cid, next);
+
+  // Push nodes away from centroid (inverse of the 30% pull in reduce)
+  const members = currentNodes ? currentNodes.filter(n => n.cluster === cid) : [];
+  if (members.length > 1) {
+    let cx = 0, cy = 0;
+    for (const n of members) { cx += n.x; cy += n.y; }
+    cx /= members.length; cy /= members.length;
+    const push = 1 / (1 - 0.3) - 1; // inverse of 0.7 factor
+    for (const n of members) {
+      n.x = cx + (n.x - cx) * (1 + push);
+      n.y = cy + (n.y - cy) * (1 + push);
+      savedPositions.set(n.id, { x: n.x, y: n.y });
+      stickyNodes.add(n.id);
+    }
+  }
+
+  // Scale node radii
+  gNodes.selectAll('.node').each(function(d) {
+    if (d.cluster !== cid) return;
+    const scaledR = d.radius * next;
+    d3.select(this).select('circle').attr('r', scaledR);
+    d3.select(this).select('circle:nth-child(2)').attr('r', scaledR + 2.5);
+  });
+
+  // Scale meta-edge opacities
+  for (const d of currentMetaLinks) {
+    if (d.sourceCluster !== cid && d.targetCluster !== cid) continue;
+    const grad = svgDefs.select(`#${d.gradId}`);
+    if (!grad.node()) continue;
+    const edgeImp = Math.min(getClusterImportance(d.sourceCluster), getClusterImportance(d.targetCluster));
+    const baseOps = [0.7, 0.08, 0.05, 0.08, 0.7];
+    const focusMult = (focusedClusterId != null &&
+      (d.sourceCluster === focusedClusterId || d.targetCluster === focusedClusterId)) ? 5 : 1;
+    grad.selectAll('stop').each(function(_, i) {
+      d3.select(this).attr('stop-opacity', Math.min(1, baseOps[i] * focusMult * edgeImp));
+    });
+    gMetaLinks.selectAll('.meta-link').filter(ml => ml === d)
+      .attr('stroke-width', (0.5 + d.normalizedWeight * 4) * edgeImp);
+  }
+
+  renderPositions();
+  applySemanticZoom();
+  computeClusterLabelPlacement();
 }
 
 function applyClusterImportance(cid) {
@@ -3343,6 +3451,7 @@ function startZTimeTravel() {
   if (prevIdx < 0) { zKeyHeld = false; return; }
   currentLerpTo = arrPositions(prevIdx);
   arrangementIndex = prevIdx;
+  restoreClusterImportance(spatialMemory.arrangements[prevIdx]?.clusterImportance);
   updateArrNav();
 
   function zLoop() {
@@ -3373,6 +3482,7 @@ function startZTimeTravel() {
       currentLerpTo = arrPositions(nextIdx);
       arrangementIndex = nextIdx;
       stepStart = now;
+      restoreClusterImportance(spatialMemory.arrangements[nextIdx]?.clusterImportance);
       updateArrNav();
     }
 
