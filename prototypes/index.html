@@ -100,6 +100,18 @@ body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', mo
 }
 #comparison-badge.visible { opacity: 1; pointer-events: auto; }
 
+#pull-layers {
+  position: fixed; top: 85px; left: 16px; z-index: 5;
+  background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
+  padding: 10px 14px; font-size: 11px;
+}
+#pull-layers .pull-title { color: #666; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+#pull-layers .layer-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+#pull-layers .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+#pull-layers .layer-name { color: #888; font-size: 11px; min-width: 70px; }
+#pull-layers .pull-slider { width: 50px; height: 3px; accent-color: #666; cursor: pointer; }
+#pull-layers .pull-val { color: #555; font-size: 10px; min-width: 22px; text-align: right; }
+
 svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 .link { transition: none; }
 .meta-link { transition: none; }
@@ -162,6 +174,10 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
 </div>
 
 <div id="comparison-badge">COMPARISON MODE — click or navigate to exit</div>
+
+<div id="pull-layers">
+  <div class="pull-title">Edge layers</div>
+</div>
 
 <div id="legend"></div>
 <div id="styles">
@@ -999,6 +1015,45 @@ const EDGE_LAYERS = [
       return w > 0 ? [{ source: nameA, target: nameB, weight: w }] : [];
     },
   },
+  {
+    id: 'writtenBy',
+    label: 'Written by',
+    color: '#cc5de8',
+    dash: '6,3',
+    defaultOn: true,
+    defaultThreshold: 1,
+    maxThreshold: 10,
+    compute(a, b, nameA, nameB) {
+      const aWrites = new Set([...a.writes, ...a.rw]);
+      const bWrites = new Set([...b.writes, ...b.rw]);
+      let w = 0;
+      for (const v of aWrites) { if (bWrites.has(v)) w++; }
+      return w > 0 ? [{ source: nameA, target: nameB, weight: w }] : [];
+    },
+  },
+  {
+    id: 'importance',
+    label: 'Importance',
+    color: '#ffd43b',
+    dash: '2,4',
+    defaultOn: true,
+    defaultThreshold: 4,
+    maxThreshold: 10,
+    compute(a, b, nameA, nameB) {
+      const impA = codemapImportance.get(nameA) || 0;
+      const impB = codemapImportance.get(nameB) || 0;
+      // Both must be high-importance (>=7) and share some structural link
+      if (impA < 7 || impB < 7) return [];
+      const hasCall = a.calls.has(nameB) || b.calls.has(nameA);
+      const aState = new Set([...a.reads, ...a.writes, ...a.rw]);
+      const bState = new Set([...b.reads, ...b.writes, ...b.rw]);
+      let shared = 0;
+      for (const v of aState) { if (bState.has(v)) shared++; }
+      if (!hasCall && shared === 0) return [];
+      const w = Math.round(Math.sqrt(impA * impB));
+      return [{ source: nameA, target: nameB, weight: w }];
+    },
+  },
 ];
 
 // Runtime state for layer toggles/thresholds (populated by initEdgeLayerUI)
@@ -1019,7 +1074,14 @@ function initEdgeLayerUI() {
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = state.enabled;
-    cb.addEventListener('change', () => { state.enabled = cb.checked; rebuild(); });
+    cb.dataset.layer = layer.id;
+    cb.addEventListener('change', () => {
+      state.enabled = cb.checked;
+      // Sync pull-panel eye button
+      const eyeBtn = document.querySelector(`#pull-layers .eye-btn[data-layer="${layer.id}"]`);
+      if (eyeBtn) eyeBtn.classList.toggle('hidden', !cb.checked);
+      rebuild();
+    });
     const swatch = document.createElement('span');
     swatch.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;background:${layer.color};margin:0 3px;vertical-align:middle;`;
     lbl.appendChild(cb);
@@ -1051,6 +1113,95 @@ function initEdgeLayerUI() {
 
 function getEnabledEdgeLayers() {
   return EDGE_LAYERS.filter(l => edgeLayerState.get(l.id)?.enabled);
+}
+
+// Pull-layer state: per-layer opacity (0–1) controlling edge visibility and pull participation
+const pullLayerState = new Map();
+
+function initPullLayerUI() {
+  const container = document.getElementById('pull-layers');
+  // Clear everything after the title
+  while (container.children.length > 1) container.removeChild(container.lastChild);
+  for (const layer of EDGE_LAYERS) {
+    const defaultOpacity = layer.defaultOn ? 1.0 : 0;
+    pullLayerState.set(layer.id, defaultOpacity);
+    const row = document.createElement('div');
+    row.className = 'layer-row';
+
+    // Swatch + label
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = layer.color;
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'layer-name';
+    nameSpan.textContent = layer.label;
+    row.appendChild(swatch);
+    row.appendChild(nameSpan);
+
+    // Opacity slider
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = 0;
+    slider.max = 100;
+    slider.value = defaultOpacity * 100;
+    slider.className = 'pull-slider';
+    const valSpan = document.createElement('span');
+    valSpan.className = 'pull-val';
+    valSpan.textContent = defaultOpacity > 0 ? Math.round(defaultOpacity * 100) : 'off';
+    slider.addEventListener('input', () => {
+      const v = parseInt(slider.value) / 100;
+      pullLayerState.set(layer.id, v);
+      valSpan.textContent = v > 0 ? Math.round(v * 100) : 'off';
+      // Sync toolbar visibility: enable if opacity > 0
+      const s = edgeLayerState.get(layer.id);
+      if (s) {
+        const shouldEnable = v > 0;
+        if (s.enabled !== shouldEnable) {
+          s.enabled = shouldEnable;
+          const tbCb = document.querySelector(`#edge-layers-ui input[data-layer="${layer.id}"]`);
+          if (tbCb) tbCb.checked = shouldEnable;
+          rebuild();
+          return;
+        }
+      }
+      updateEdgeOpacities();
+    });
+    row.appendChild(slider);
+    row.appendChild(valSpan);
+
+    container.appendChild(row);
+  }
+}
+
+function getPullAdjacency() {
+  if (!currentGraph) return new Map();
+  const adj = new Map();
+  for (const n of currentGraph.nodes) adj.set(n.id, new Set());
+  for (const l of currentGraph.links) {
+    if ((pullLayerState.get(l.type) || 0) <= 0) continue;
+    adj.get(l.source)?.add(l.target);
+    adj.get(l.target)?.add(l.source);
+  }
+  return adj;
+}
+
+function edgeOpacity(l, nodeDegree) {
+  const layerOp = pullLayerState.get(l.type) || 0;
+  if (layerOp <= 0) return 0.02;
+  const maxDeg = Math.max(nodeDegree.get(l.source) || 1, nodeDegree.get(l.target) || 1);
+  const density = Math.max(0.15, 1 / Math.sqrt(maxDeg));
+  const sImp = codemapImportance.get(l.source) || 3;
+  const tImp = codemapImportance.get(l.target) || 3;
+  const imp = Math.min(1, Math.sqrt(sImp * tImp) / 7);
+  return Math.max(0.02, layerOp * density * (0.4 + imp * 0.6));
+}
+
+function updateEdgeOpacities() {
+  if (!currentGraph || !gLinks) return;
+  const nodeDegree = currentGraph.nodeDegree;
+  gLinks.selectAll('.link')
+    .transition().duration(200)
+    .attr('stroke-opacity', l => edgeOpacity(l, nodeDegree));
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1629,38 +1780,20 @@ function applySemanticZoom() {
   const metaZoom = k < 1.5; // zoomed out enough for meta-edges
 
   // ── Meta-edges vs individual edges ──
-  if (metaZoom && !showEdges && showMetaEdges) {
-    // Zoomed out: show meta-edges, hide individual edges (except important ones)
+  if (metaZoom && showMetaEdges) {
     gMetaLinks.style('display', null);
     const metaOpacity = k < 0.3 ? 0.25 : k < 0.7 ? 0.45 : 0.6;
     gMetaLinks.attr('opacity', metaOpacity);
-
-    // Hide individual edges, but keep edges between two high-importance nodes
-    gLinks.attr('opacity', 1);
-    gLinks.selectAll('.link').each(function(d) {
-      const sImp = codemapImportance.get(d.source) || 0;
-      const tImp = codemapImportance.get(d.target) || 0;
-      const important = sImp > 8 && tImp > 8;
-      d3.select(this)
-        .style('display', important ? null : 'none')
-        .attr('stroke-opacity', important ? 0.35 : null);
-    });
   } else {
-    // Zoomed in or edges toggled on: hide meta-edges, show individual edges
     gMetaLinks.style('display', 'none');
+  }
 
-    if (showEdges || zoomedIn) {
-      gLinks.selectAll('.link').style('display', null);
-    } else {
-      gLinks.selectAll('.link').style('display', 'none');
-    }
-    if (showEdges) {
-      gLinks.selectAll('.link').attr('stroke-opacity', 0.45);
-      gLinks.attr('opacity', 1);
-    } else {
-      const edgeOpacity = k < 0.3 ? 0.02 : k < 0.6 ? 0.1 : k < 2.5 ? 1 : Math.min(1, 1 + (k - 2.5) * 0.5);
-      gLinks.attr('opacity', edgeOpacity);
-    }
+  // Individual edges: only show when Edges checkbox is on
+  if (showEdges) {
+    gLinks.selectAll('.link').style('display', null);
+    gLinks.attr('opacity', 1);
+  } else {
+    gLinks.selectAll('.link').style('display', 'none');
   }
 
   const hullOpacity = k < 0.5 ? 0.15 : k < 1.5 ? 0.08 : 0.04;
@@ -1730,8 +1863,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
 
   // Density-adaptive edge styling helpers
   function baseEdgeOpacity(l) {
-    const maxDeg = Math.max(nodeDegree.get(l.source) || 1, nodeDegree.get(l.target) || 1);
-    return Math.max(0.03, 0.15 / Math.sqrt(maxDeg));
+    return edgeOpacity(l, nodeDegree);
   }
   function baseEdgeWidth(l) {
     const maxDeg = Math.max(nodeDegree.get(l.source) || 1, nodeDegree.get(l.target) || 1);
@@ -1785,7 +1917,6 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .attr('stroke-width', d => baseEdgeWidth(d))
     .attr('stroke-opacity', d => baseEdgeOpacity(d))
     .attr('stroke-dasharray', d => { const l = EDGE_LAYERS.find(l => l.id === d.type); return l ? (l.dash || null) : d.type === 'uses' ? '3,3' : null; })
-    .style('display', document.getElementById('show-edges').checked ? null : 'none')
     .attr('x1', d => nodeMap.get(d.source)?.x || 0)
     .attr('y1', d => nodeMap.get(d.source)?.y || 0)
     .attr('x2', d => nodeMap.get(d.target)?.x || 0)
@@ -2625,22 +2756,28 @@ function applyContextualEdgeWeights(focusId) {
   gLinks.selectAll('.link')
     .transition().duration(300)
     .attr('stroke-opacity', l => {
+      const layerOp = pullLayerState.get(l.type) || 0;
+      if (layerOp <= 0) return 0.02;
       const sd = distances.get(l.source) ?? 99;
       const td = distances.get(l.target) ?? 99;
       const minD = Math.min(sd, td);
       const maxD = Math.max(sd, td);
-      if (maxD <= 1) return 0.8;
-      if (maxD <= 2) return 0.35;
-      if (minD <= 2) return 0.12;
-      return 0.03;
+      let base;
+      if (maxD <= 1) base = 0.8;
+      else if (maxD <= 2) base = 0.35;
+      else if (minD <= 2) base = 0.12;
+      else base = 0.03;
+      return base * layerOp;
     })
     .attr('stroke-width', l => {
+      const layerOp = pullLayerState.get(l.type) || 0;
+      if (layerOp <= 0) return 0.3;
       const sd = distances.get(l.source) ?? 99;
       const td = distances.get(l.target) ?? 99;
       const maxD = Math.max(sd, td);
       const w = (l.weight || 1);
-      if (maxD <= 1) return Math.min(4, 1.5 + w * 0.5);
-      if (maxD <= 2) return Math.min(3, 0.8 + w * 0.3);
+      if (maxD <= 1) return Math.min(4, 1.5 + w * 0.5) * layerOp;
+      if (maxD <= 2) return Math.min(3, 0.8 + w * 0.3) * layerOp;
       return Math.min(2, 0.3 + w * 0.15);
     });
 }
@@ -2719,7 +2856,7 @@ function attractorLoop() {
 
   const tx = attractorNode.x;
   const ty = attractorNode.y;
-  const adj = currentGraph?.adjacency;
+  const adj = currentGraph ? getPullAdjacency() : null;
   if (!adj) { attractorRAF = requestAnimationFrame(attractorLoop); return; }
 
   // Hold duration controls how many hops are affected:
@@ -2813,7 +2950,7 @@ function clickPull(d) {
   if (!currentGraph || !currentNodes) return;
   if (clickPullRAF) cancelAnimationFrame(clickPullRAF);
 
-  const adj = currentGraph.adjacency;
+  const adj = getPullAdjacency();
   const edgeWeights = currentGraph.edgeWeights;
   const distances = bfsDistances(d.id, adj, 2);
   const startTime = performance.now();
@@ -3203,7 +3340,7 @@ function dismissNodeToT0(d) {
 function startNeighborGather(anchorNode) {
   if (neighborGatherRAF || !currentGraph || groupMoveActive) return;
   neighborGatherHeld = true;
-  const adj = currentGraph.adjacency;
+  const adj = getPullAdjacency();
   const neighborIds = adj.get(anchorNode.id);
   if (!neighborIds || neighborIds.size === 0) return;
 
@@ -3623,6 +3760,7 @@ document.addEventListener('keydown', (e) => {
     }
     document.getElementById('info-panel').classList.remove('open');
     selectedNode = null;
+    updateEdgeOpacities();
   }
 });
 
@@ -3757,6 +3895,7 @@ function rebuild() {
   const affinities = computeAffinities(analysisResult, clusters, clusterNames);
   const graph = buildGraph(analysisResult, clusters, clusterNames, affinities, getOpts());
   renderGraph(graph, analysisResult, clusters, clusterNames);
+  applySemanticZoom();
 }
 
 document.getElementById('view-mode').addEventListener('change', () => { stickyNodes.clear(); savedPositions.clear(); rebuild(); });
@@ -3790,6 +3929,7 @@ document.getElementById('graph').addEventListener('click', e => {
   if (e.target.tagName === 'svg') {
     document.getElementById('info-panel').classList.remove('open');
     selectedNode = null;
+    updateEdgeOpacities();
     if (focusedClusterId != null) { focusedClusterId = null; applyMetaLinkFocus(); }
     if (comparisonMode) exitComparisonMode();
   }
@@ -3961,6 +4101,7 @@ window.addEventListener('resize', () => {
 });
 
 initEdgeLayerUI();
+initPullLayerUI();
 
 // Load inspect.json, then start
 fetch('/inspect.json').then(r => r.json()).then(config => {
