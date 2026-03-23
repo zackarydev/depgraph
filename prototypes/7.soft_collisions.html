@@ -2629,19 +2629,9 @@ function clusterLabelDrag(getMembersFn) {
     .on('drag', function(e, d) {
       d._clusterDragged = true;
       if (!d._clusterMembers || !d._clusterMembers.length) return;
-      const memberSet = d._clusterMemberSet || (d._clusterMemberSet = new Set(d._clusterMembers.map(n => n.id)));
       for (const n of d._clusterMembers) {
         n.x += e.dx;
         n.y += e.dy;
-      }
-      // Soft collision: push non-member nodes away from dragged cluster members (they spring back)
-      for (const m of d._clusterMembers) {
-        for (const n of currentNodes) {
-          if (memberSet.has(n.id)) continue;
-          if (softCollide(n, m.x, m.y, m.radius || 4, 4)) {
-            springDisplace(n);
-          }
-        }
       }
       // Update saved positions so the gather loop's anchor pin tracks the drag
       if (d._clusterGathering || clusterGatherHeld) {
@@ -3441,17 +3431,17 @@ function attractorLoop() {
   // their immediate static neighbors (nodes they're now overlapping).
   // No cluster-level forces — uninvolved clusters stay perfectly still.
   const _movedSet = new Set(movedNodes.map(n => n.id));
+  if (currentK > 3.5 && currentNodes) {
+    let maxR = 0;
+    for (const n of currentNodes) if ((n.radius || 4) > maxR) maxR = n.radius || 4;
+    _buildCollisionGrid(currentNodes, maxR);
+  }
   for (const m of movedNodes) {
-    for (const n of currentNodes) {
+    const nearby = currentK > 3.5 ? _nearbyNodes(m.x, m.y, m.radius + 30) : currentNodes;
+    for (let i = 0; i < nearby.length; i++) {
+      const n = nearby[i];
       if (n.id === m.id || _movedSet.has(n.id)) continue;
-      const dx = n.x - m.x, dy = n.y - m.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
-      const minDist = m.radius + n.radius + 4;
-      if (dist < minDist) {
-        // Push the static node just enough to not overlap, very gently
-        const push = (minDist - dist) * 0.3;
-        n.x += (dx / dist) * push;
-        n.y += (dy / dist) * push;
+      if (softCollide(n, m.x, m.y, m.radius, 4)) {
         if (currentK > 3.5) springDisplace(n);
       }
     }
