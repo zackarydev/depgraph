@@ -112,7 +112,7 @@ body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', mo
 #pull-layers .pull-slider { width: 50px; height: 3px; accent-color: #666; cursor: pointer; }
 #pull-layers .pull-val { color: #555; font-size: 10px; min-width: 22px; text-align: right; }
 
-svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
+svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: none; }
 .link { transition: none; }
 .meta-link { transition: none; }
 .node circle { cursor: pointer; stroke-width: 1.5; }
@@ -1798,8 +1798,9 @@ function applySemanticZoom() {
     : k < 0.7 ? 0.4 : k < 2.5 ? 0.7 : Math.max(0.2, 0.7 - (k - 2.5) * 0.7);
   // Font stays constant on screen up to k=2, then shrinks very gently
   const clusterFontSize = k <= 2 ? 13 / k : 13 / (2 * Math.pow(k / 2, 0.75));
-  gClusterLabels.selectAll('text').each(function() {
-    d3.select(this).attr('font-size', clusterFontSize).attr('opacity', floatingLabelOpacity);
+  gClusterLabels.selectAll('text').each(function(d) {
+    const imp = d && d.cid != null ? getClusterImportance(d.cid) : 1;
+    d3.select(this).attr('font-size', clusterFontSize).attr('opacity', floatingLabelOpacity * imp);
   });
 
   // TextPath boundary labels: fade in from k=3, full at k=4
@@ -2051,7 +2052,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     );
 
   node.append('circle')
-    .attr('r', d => d.radius)
+    .attr('r', d => d.radius * getClusterImportance(d.cluster))
     .attr('fill', d => d.type === 'global' ? '#333' : d.color)
     .attr('stroke', d => d.type === 'global' ? '#666' : d3.color(d.color).brighter(0.8))
     .on('click', (e, d) => {
@@ -2148,7 +2149,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
     return sorted[1][1] >= 0.15;
   }).append('circle')
-    .attr('r', d => d.radius + 2.5)
+    .attr('r', d => d.radius * getClusterImportance(d.cluster) + 2.5)
     .attr('fill', 'none')
     .attr('stroke', d => {
       const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
@@ -2196,7 +2197,12 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .attr('class', 'cluster-label')
     .attr('fill', d => d.color)
     .text(d => d.name)
-    .call(clusterLabelDrag(d => currentNodes.filter(n => n.cluster === d.cid)));
+    .call(clusterLabelDrag(d => currentNodes.filter(n => n.cluster === d.cid)))
+    .on('contextmenu', (e, d) => {
+      // Mac Ctrl+Click fires contextmenu — reduce cluster importance
+      e.preventDefault();
+      if (d.cid != null) reduceClusterImportance(d.cid);
+    });
   rebuildClusterMemberCache();
   computeClusterLabelPlacement();
 
@@ -2285,7 +2291,11 @@ function renderHulls() {
       .attr('href', `#${pathId}`)
       .text(label);
 
-    text.call(clusterLabelDrag(d => currentNodes.filter(n => n.cluster === d.cid)));
+    text.call(clusterLabelDrag(d => currentNodes.filter(n => n.cluster === d.cid)))
+      .on('contextmenu', (e, d) => {
+        e.preventDefault();
+        if (d.cid != null) reduceClusterImportance(d.cid);
+      });
   }
   // Also render user clusters on top
   renderUserClusters();
@@ -2399,6 +2409,7 @@ function renderUserClusterLegend() {
 
 let clusterDragActive = false;
 let focusedClusterId = null; // cluster being dragged — boosts its meta-edge opacity
+const clusterImportance = new Map(); // cid → scale factor (default 1.0), reduced by Ctrl+Click
 function clusterLabelDrag(getMembersFn) {
   return d3.drag()
     .on('start', function(e, d) {
@@ -2432,6 +2443,15 @@ function clusterLabelDrag(getMembersFn) {
     })
     .on('end', function(e, d) {
       clusterDragActive = false;
+      // Ctrl+Click (not dragged): reduce cluster importance
+      if (!d._clusterDragged && d.cid != null && (e.sourceEvent?.ctrlKey || e.sourceEvent?.metaKey)) {
+        focusedClusterId = null;
+        applyMetaLinkFocus();
+        reduceClusterImportance(d.cid);
+        d3.select(this).style('cursor', null);
+        d._clusterMembers = null;
+        return;
+      }
       // Only clear focusedClusterId if user actually dragged (not a click)
       // so that "click cluster label + Space" can trigger cluster gather
       if (d._clusterDragged) {
@@ -2457,14 +2477,82 @@ function applyMetaLinkFocus() {
     if (!grad.node()) continue;
     const involved = focusedClusterId != null &&
       (d.sourceCluster === focusedClusterId || d.targetCluster === focusedClusterId);
-    const mult = involved ? 5 : 1;
+    const focusMult = involved ? 5 : 1;
+    const edgeImp = Math.min(getClusterImportance(d.sourceCluster), getClusterImportance(d.targetCluster));
     const stops = grad.selectAll('stop');
     // Base opacities: [0.7, 0.08, 0.05, 0.08, 0.7]
     const baseOps = [0.7, 0.08, 0.05, 0.08, 0.7];
     stops.each(function(_, i) {
-      d3.select(this).attr('stop-opacity', Math.min(1, baseOps[i] * mult));
+      d3.select(this).attr('stop-opacity', Math.min(1, baseOps[i] * focusMult * edgeImp));
     });
+    // Scale stroke width by importance
+    gMetaLinks.selectAll('.meta-link').filter(ml => ml === d)
+      .attr('stroke-width', (0.5 + d.normalizedWeight * 4) * edgeImp);
   }
+}
+
+function getClusterImportance(cid) {
+  return clusterImportance.has(cid) ? clusterImportance.get(cid) : 1.0;
+}
+
+function reduceClusterImportance(cid) {
+  const current = getClusterImportance(cid);
+  const next = Math.max(0.05, current * 0.7);
+  clusterImportance.set(cid, next);
+  applyClusterImportance(cid);
+}
+
+function applyClusterImportance(cid) {
+  const imp = getClusterImportance(cid);
+
+  // Pull nodes toward cluster centroid to tighten the cluster
+  const members = currentNodes ? currentNodes.filter(n => n.cluster === cid) : [];
+  if (members.length > 1) {
+    let cx = 0, cy = 0;
+    for (const n of members) { cx += n.x; cy += n.y; }
+    cx /= members.length; cy /= members.length;
+    // Each reduction step pulls nodes 30% closer to centroid
+    const pull = 0.3;
+    for (const n of members) {
+      n.x = cx + (n.x - cx) * (1 - pull);
+      n.y = cy + (n.y - cy) * (1 - pull);
+      savedPositions.set(n.id, { x: n.x, y: n.y });
+      stickyNodes.add(n.id);
+    }
+  }
+
+  // Scale node radii within this cluster
+  gNodes.selectAll('.node').each(function(d) {
+    if (d.cluster !== cid) return;
+    const scaledR = d.radius * imp;
+    d3.select(this).select('circle').attr('r', scaledR);
+    // Also scale secondary affinity ring if present
+    d3.select(this).select('circle:nth-child(2)')
+      .attr('r', scaledR + 2.5);
+  });
+
+  // Scale meta-edge gradient opacities for edges involving this cluster
+  for (const d of currentMetaLinks) {
+    if (d.sourceCluster !== cid && d.targetCluster !== cid) continue;
+    const grad = svgDefs.select(`#${d.gradId}`);
+    if (!grad.node()) continue;
+    // Combine importance of both endpoints (use the min so a dimmed cluster dims its edges)
+    const edgeImp = Math.min(getClusterImportance(d.sourceCluster), getClusterImportance(d.targetCluster));
+    const baseOps = [0.7, 0.08, 0.05, 0.08, 0.7];
+    const focusMult = (focusedClusterId != null &&
+      (d.sourceCluster === focusedClusterId || d.targetCluster === focusedClusterId)) ? 5 : 1;
+    grad.selectAll('stop').each(function(_, i) {
+      d3.select(this).attr('stop-opacity', Math.min(1, baseOps[i] * focusMult * edgeImp));
+    });
+    // Scale stroke width too
+    gMetaLinks.selectAll('.meta-link').filter(ml => ml === d)
+      .attr('stroke-width', (0.5 + d.normalizedWeight * 4) * edgeImp);
+  }
+
+  // Re-render positions, hulls, and cluster labels to reflect tightened layout
+  renderPositions();
+  applySemanticZoom();
+  computeClusterLabelPlacement();
 }
 
 function rebuildClusterMemberCache() {
