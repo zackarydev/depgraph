@@ -1117,6 +1117,7 @@ function getEnabledEdgeLayers() {
 
 // Pull-layer state: per-layer opacity (0–1) controlling edge visibility and pull participation
 const pullLayerState = new Map();
+let proximityBoost = 0.5; // 0–1, how much screen proximity at high zoom boosts edge opacity
 
 function initPullLayerUI() {
   const container = document.getElementById('pull-layers');
@@ -1171,6 +1172,34 @@ function initPullLayerUI() {
 
     container.appendChild(row);
   }
+
+  // Proximity boost slider
+  const proxRow = document.createElement('div');
+  proxRow.className = 'layer-row';
+  proxRow.style.marginTop = '6px';
+  proxRow.style.borderTop = '1px solid #2a2a35';
+  proxRow.style.paddingTop = '6px';
+  const proxName = document.createElement('span');
+  proxName.className = 'layer-name';
+  proxName.textContent = 'Proximity';
+  const proxSlider = document.createElement('input');
+  proxSlider.type = 'range';
+  proxSlider.min = 0;
+  proxSlider.max = 100;
+  proxSlider.value = proximityBoost * 100;
+  proxSlider.className = 'pull-slider';
+  const proxVal = document.createElement('span');
+  proxVal.className = 'pull-val';
+  proxVal.textContent = Math.round(proximityBoost * 100);
+  proxSlider.addEventListener('input', () => {
+    proximityBoost = parseInt(proxSlider.value) / 100;
+    proxVal.textContent = proximityBoost > 0 ? Math.round(proximityBoost * 100) : 'off';
+    updateEdgeOpacities();
+  });
+  proxRow.appendChild(proxName);
+  proxRow.appendChild(proxSlider);
+  proxRow.appendChild(proxVal);
+  container.appendChild(proxRow);
 }
 
 function getPullAdjacency() {
@@ -1193,7 +1222,23 @@ function edgeOpacity(l, nodeDegree) {
   const sImp = codemapImportance.get(l.source) || 3;
   const tImp = codemapImportance.get(l.target) || 3;
   const imp = Math.min(1, Math.sqrt(sImp * tImp) / 7);
-  return Math.max(0.02, layerOp * density * (0.4 + imp * 0.6));
+  let base = layerOp * density * (0.4 + imp * 0.6);
+
+  // Proximity boost: at high zoom, nearby edges get brighter
+  if (proximityBoost > 0 && currentK >= 3 && currentGraph) {
+    const sn = currentGraph.nodeMap.get(l.source);
+    const tn = currentGraph.nodeMap.get(l.target);
+    if (sn && tn) {
+      const screenDist = Math.hypot(sn.x - tn.x, sn.y - tn.y) * currentK;
+      // Ramp: full boost when screenDist < 200px, fades to 0 at 800px
+      const proxFactor = Math.max(0, 1 - screenDist / 800);
+      // Zoom ramp: starts at k=3, full effect at k=10+
+      const zoomRamp = Math.min(1, (currentK - 3) / 7);
+      base += proximityBoost * proxFactor * zoomRamp;
+    }
+  }
+
+  return Math.max(0.02, Math.min(1, base));
 }
 
 function updateEdgeOpacities() {
@@ -1792,6 +1837,11 @@ function applySemanticZoom() {
   if (showEdges) {
     gLinks.selectAll('.link').style('display', null);
     gLinks.attr('opacity', 1);
+    // Recompute per-edge opacity (proximity depends on zoom)
+    if (currentGraph) {
+      const nd = currentGraph.nodeDegree;
+      gLinks.selectAll('.link').attr('stroke-opacity', l => edgeOpacity(l, nd));
+    }
   } else {
     gLinks.selectAll('.link').style('display', 'none');
   }
