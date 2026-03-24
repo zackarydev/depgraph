@@ -51,6 +51,24 @@ Z is the temporal opposite of X: X rewinds node positions toward the original la
 - **Shift+Drag** — *Group Move*: drag all selected nodes together (see Drag section)
 - Locked nodes are not affected by gather/group move
 
+## Trace
+
+Trace propagates a visual BFS wave through the on-screen portion of the hypergraph, following enabled edge layers. Only nodes currently visible on screen are traced (saves CPU).
+
+- **Tap T** -- *Flash*: instantly traces the full reachable graph from the selected node (or a random on-screen node) with a fast staggered animation
+- **Hold T** -- *Trace*: BFS propagates one hop at a time. Speed starts at 1s per edge and ramps up linearly (down to ~0.33x) the longer you hold. Speed is adjustable via the T slider in the toolbar.
+- **Hold T+B** -- *Trace Back*: hold both T and B together to trace backward edges only (reverse of directed edge direction). Bidirectional edges are ignored. Undirected edges are skipped. Releasing B pauses the trace (visuals remain). Pressing B again restarts the backward trace.
+- **Hold T+F** -- *Trace Forward*: hold both T and F together to trace forward edges only (source to target on directed edges). Releasing F pauses the trace. Pressing F again restarts the forward trace.
+- **H** (during trace) -- *Hold*: locks the trace visuals in place. After pressing H, you can release T and the trace remains visible. Press **H** again or **Escape** to clear the held trace. Pressing **T** again also clears the held trace and starts a new one.
+- While a trace is held, **B** and **F** resume navigation from the current wavefront in that direction -- T does not need to be held. Releasing B/F pauses again.
+- Releasing T (without H) stops the trace entirely and clears visuals.
+
+Directed edge layers follow their arrow direction. Undirected edge layers trace both connected nodes (except in backward mode, where they are skipped).
+
+The trace starts from the currently selected/clicked node. If no node is selected, a random on-screen node is chosen.
+
+**Show edges on trace** (checkbox, on by default): when edges are toggled off, traced edges are still revealed during the trace. Traced edges use their layer's own color at full opacity, then hide again when the trace ends.
+
 ## User Clusters
 
 - **Enter** (with 2+ selected nodes): create a user-defined cluster from the selected nodes
@@ -63,7 +81,6 @@ Z is the temporal opposite of X: X rewinds node positions toward the original la
 ## Lock / Unlock
 
 - **Lock button** (toolbar): locks currently selected nodes in place
-- **Space** (no selected nodes): unlock all locked nodes
 - Locked nodes are pinned — they resist rewind, gather, and gravity well from unselected nodes
 - Shift+clicked (pinned) nodes are auto-locked
 
@@ -77,6 +94,12 @@ Z is the temporal opposite of X: X rewinds node positions toward the original la
 | **Hold X** | Rewind to T0 |
 | **Shift+X + Click** | Dismiss node to T0 |
 | **Hold Z** | Time-travel backwards through history |
+| **Tap T** | Flash-trace through visible graph |
+| **Hold T** | Trace BFS propagation (speeds up over time) |
+| **T+B** | Trace backward edges only |
+| **T+F** | Trace forward edges only |
+| **T+H** | Hold trace visuals (persist after T release) |
+| **H** / **Escape** | Clear held trace |
 | **Hold Space** | Gather selected nodes (to centroid) |
 | **Click node + Space** | Gather unselected neighbors toward node |
 | **Click cluster label + Space** | Gather connected clusters toward label |

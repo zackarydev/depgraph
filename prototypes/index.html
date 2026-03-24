@@ -137,6 +137,9 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: non
 .node circle.focus-glow { filter: drop-shadow(0 0 6px currentColor); }
 .node circle.attractor-glow { filter: drop-shadow(0 0 8px #fff) drop-shadow(0 0 20px currentColor); stroke-width: 3; }
 .node circle.selected-glow { filter: drop-shadow(0 0 6px #ff0) drop-shadow(0 0 12px #ff0); stroke: #ff0 !important; stroke-width: 2.5; }
+.node circle.trace-glow { filter: drop-shadow(0 0 6px currentColor) drop-shadow(0 0 14px currentColor); stroke-width: 2; }
+.node circle.trace-wave { filter: drop-shadow(0 0 10px currentColor) drop-shadow(0 0 20px currentColor); stroke-width: 3; }
+.link.trace-active { stroke-opacity: 0.9 !important; stroke-width: 2 !important; }
 </style>
 </head>
 <body>
@@ -161,6 +164,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: non
   <div class="sep"></div>
   <label title="X-key rewind speed (ms)">X: <input type="range" id="x-speed" min="200" max="5000" step="100" value="3000" style="width:60px;vertical-align:middle"> <span id="x-speed-val">3.0s</span></label>
   <label title="Z-key time-travel speed (ms)">Z: <input type="range" id="z-speed" min="200" max="5000" step="100" value="800" style="width:60px;vertical-align:middle"> <span id="z-speed-val">0.8s</span></label>
+  <label title="T-key trace propagation speed (ms per edge)">T: <input type="range" id="t-speed" min="100" max="3000" step="50" value="1000" style="width:60px;vertical-align:middle"> <span id="t-speed-val">1.0s</span></label>
   <span id="status">waiting...</span>
 </div>
 
@@ -196,6 +200,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: non
   <label><input type="checkbox" id="show-cluster-labels" checked> Cluster labels</label>
   <label><input type="checkbox" id="show-boundary-labels" checked> Boundary labels</label>
   <label><input type="checkbox" id="show-edges"> Edges</label>
+  <label><input type="checkbox" id="trace-show-edges" checked> Show edges on trace</label>
   <label><input type="checkbox" id="show-meta-edges" checked> Meta edges</label>
   <div id="zoom-debug" style="color:#555; font-size:10px; margin-top:2px">zoom: 0.80</div>
 </div>
@@ -270,6 +275,21 @@ let xDismissRAFs = new Map(); // per-node dismiss animations
 // Configurable speeds (ms) — updated by toolbar sliders
 let xRewindDuration = 3000;
 let zTravelStepDuration = 800;
+let traceEdgeDuration = 1000; // ms per edge propagation step
+
+// T-key trace (BFS propagation through visible graph)
+let tKeyDown = false;
+let tKeyHeld = false;
+let traceRAF = null;
+let traceMode = 'both'; // 'both' | 'forward' | 'backward'
+let traceWavefront = new Set(); // current frontier node IDs
+let traceVisited = new Set(); // already-traced node IDs
+let traceStartTime = 0;
+let traceStepIndex = 0; // how many BFS hops completed
+let traceFlash = false; // true for quick-press flash mode
+let traceBKeyDown = false;
+let traceFKeyDown = false;
+let traceHeld = false; // H pressed: visuals persist after T release
 
 // Z-key time travel (backwards through arrangement history)
 let zKeyHeld = false;
@@ -305,8 +325,8 @@ let pendingRebuildTimer = null;
 function isUserInteracting() {
   return !!(forcePressDragNode || attractorNode || attractorRAF ||
     groupMoveActive || spacePullRAF || neighborGatherRAF || clusterGatherRAF ||
-    xKeyRAF || xKeyHeld || zKeyRAF || zKeyHeld || animationRAF || clickPullRAF ||
-    clusterDragActive);
+    xKeyRAF || xKeyHeld || zKeyRAF || zKeyHeld || traceRAF || tKeyHeld || traceHeld ||
+    animationRAF || clickPullRAF || clusterDragActive);
 }
 
 function schedulePendingRebuild() {
@@ -2124,8 +2144,26 @@ function applySemanticZoom() {
       gLinks.selectAll('.arrow').attr('fill-opacity', l => edgeOpacity(l, nd));
     }
   } else {
-    gLinks.selectAll('.link').style('display', 'none');
-    gLinks.selectAll('.arrow').style('display', 'none');
+    const traceShowEdges = document.getElementById('trace-show-edges').checked && (tKeyHeld || traceHeld);
+    if (traceShowEdges) {
+      // Hide non-traced edges, show traced ones
+      gLinks.selectAll('.link').each(function() {
+        const el = d3.select(this);
+        el.style('display', el.classed('trace-active') ? null : 'none');
+      });
+      gLinks.selectAll('.arrow').each(function() {
+        const el = d3.select(this);
+        const link = el.datum();
+        // Show arrow if its edge is trace-active
+        const edgeActive = gLinks.selectAll('.link').filter(function(ld) {
+          return ld.source === link.source && ld.target === link.target && ld.type === link.type;
+        }).classed('trace-active');
+        el.style('display', edgeActive ? null : 'none');
+      });
+    } else {
+      gLinks.selectAll('.link').style('display', 'none');
+      gLinks.selectAll('.arrow').style('display', 'none');
+    }
   }
 
   const hullOpacity = k < 0.5 ? 0.15 : k < 1.5 ? 0.08 : 0.04;
@@ -3976,6 +4014,268 @@ function stopZTimeTravel() {
   pushArrangement('z-travel', []);
 }
 
+// ═══════════════════════════════════════════════════════
+// T-KEY TRACE (BFS propagation through visible edges)
+// ═══════════════════════════════════════════════════════
+
+function isNodeOnScreen(n) {
+  const transform = d3.zoomTransform(svg.node());
+  const sx = transform.applyX(n.x);
+  const sy = transform.applyY(n.y);
+  return sx >= -50 && sx <= width + 50 && sy >= -50 && sy <= height + 50;
+}
+
+function getTraceNeighbors(nodeId, mode) {
+  if (!currentGraph || !currentLinks) return [];
+  const enabledLayers = getEnabledEdgeLayers();
+  const enabledIds = new Set(enabledLayers.map(l => l.id));
+  const neighbors = [];
+
+  for (const link of currentLinks) {
+    if (!enabledIds.has(link.type)) continue;
+    const layer = EDGE_LAYERS.find(l => l.id === link.type);
+    if (!layer) continue;
+
+    if (layer.directed) {
+      if (mode === 'forward') {
+        // Follow edge direction: source -> target
+        if (link.source === nodeId) neighbors.push({ id: link.target, link });
+      } else if (mode === 'backward') {
+        // Follow reverse: target -> source, ignore bidirectional
+        // Check if the reverse edge also exists (bidirectional) — if so, skip
+        const reverseExists = currentLinks.some(l =>
+          l.type === link.type && l.source === link.target && l.target === link.source
+        );
+        if (reverseExists) continue;
+        if (link.target === nodeId) neighbors.push({ id: link.source, link });
+      } else {
+        // 'both': follow in both directions
+        if (link.source === nodeId) neighbors.push({ id: link.target, link });
+        if (link.target === nodeId) neighbors.push({ id: link.source, link });
+      }
+    } else {
+      // Undirected: trace both connected nodes
+      if (mode === 'backward') continue; // backward ignores undirected
+      if (link.source === nodeId) neighbors.push({ id: link.target, link });
+      if (link.target === nodeId) neighbors.push({ id: link.source, link });
+    }
+  }
+  return neighbors;
+}
+
+function clearTraceVisuals() {
+  gNodes.selectAll('circle').classed('trace-glow', false).classed('trace-wave', false);
+  gLinks.selectAll('.link').classed('trace-active', false).each(function(d) {
+    // Restore gradient stroke
+    if (d._gradId) d3.select(this).attr('stroke', `url(#${d._gradId})`);
+  });
+  // Re-hide edges if they were only visible due to trace
+  applySemanticZoom();
+}
+
+function startTrace(mode, flash) {
+  if (traceRAF) stopTrace();
+  if (!currentNodes || !currentGraph) return;
+
+  traceMode = mode;
+  traceFlash = flash;
+  tKeyHeld = true;
+  traceVisited = new Set();
+  traceWavefront = new Set();
+  traceStepIndex = 0;
+  traceStartTime = performance.now();
+  traceLastStepTime = performance.now();
+
+  clearTraceVisuals();
+
+  // Start from selected node, or pick a random on-screen node
+  let startNode = selectedNode || forcePressDragNode;
+  if (!startNode) {
+    const onScreen = currentNodes.filter(n => isNodeOnScreen(n));
+    if (onScreen.length === 0) return;
+    startNode = onScreen[Math.floor(Math.random() * onScreen.length)];
+  }
+
+  traceWavefront.add(startNode.id);
+  traceVisited.add(startNode.id);
+
+  // Apply initial glow to start node
+  gNodes.selectAll('.node').each(function(d) {
+    if (d.id === startNode.id) {
+      d3.select(this).select('circle').classed('trace-wave', true);
+    }
+  });
+
+  if (flash) {
+    // Flash mode: run entire BFS immediately with staggered visual timing
+    const waves = [[startNode.id]];
+    let frontier = new Set([startNode.id]);
+    const allVisited = new Set([startNode.id]);
+    const edgesPerWave = [[]];
+
+    while (frontier.size > 0) {
+      const nextFrontier = new Set();
+      const waveEdges = [];
+      for (const nid of frontier) {
+        for (const { id: neighborId, link } of getTraceNeighbors(nid, mode)) {
+          if (allVisited.has(neighborId)) continue;
+          const neighborNode = currentGraph.nodeMap.get(neighborId);
+          if (!neighborNode || !isNodeOnScreen(neighborNode)) continue;
+          allVisited.add(neighborId);
+          nextFrontier.add(neighborId);
+          waveEdges.push(link);
+        }
+      }
+      if (nextFrontier.size === 0) break;
+      waves.push([...nextFrontier]);
+      edgesPerWave.push(waveEdges);
+      frontier = nextFrontier;
+    }
+
+    // Stagger the visuals: 80ms per wave for flash
+    const flashDelay = 80;
+    waves.forEach((wave, wi) => {
+      setTimeout(() => {
+        gNodes.selectAll('.node').each(function(d) {
+          if (wave.includes(d.id)) {
+            d3.select(this).select('circle').classed('trace-glow', true).classed('trace-wave', true);
+          }
+        });
+        if (edgesPerWave[wi]) {
+          gLinks.selectAll('.link').each(function(ld) {
+            for (const el of edgesPerWave[wi]) {
+              if (ld.source === el.source && ld.target === el.target && ld.type === el.type) {
+                const layer = EDGE_LAYERS.find(l => l.id === ld.type);
+                d3.select(this).classed('trace-active', true)
+                  .attr('stroke', layer ? layer.color : ld._edgeColor);
+              }
+            }
+          });
+          applySemanticZoom();
+        }
+      }, wi * flashDelay);
+    });
+
+    // Clear after all waves complete + dwell time
+    const totalDuration = waves.length * flashDelay + 600;
+    setTimeout(() => {
+      clearTraceVisuals();
+      tKeyHeld = false;
+      traceRAF = null;
+    }, totalDuration);
+    traceRAF = -1; // sentinel: flash in progress
+  } else {
+    // Hold mode: BFS one step at a time
+    traceRAF = requestAnimationFrame(traceLoop);
+  }
+}
+
+let traceLastStepTime = 0;
+
+function traceLoop() {
+  if (!tKeyHeld || !currentNodes || !currentGraph) return;
+
+  const now = performance.now();
+  // Speed ramps up linearly: starts at traceEdgeDuration, decreases to 1/3 over 10 steps
+  const speedFactor = Math.max(0.33, 1.0 - traceStepIndex * 0.067);
+  const stepDuration = traceEdgeDuration * speedFactor;
+
+  if (now - traceLastStepTime >= stepDuration || traceStepIndex === 0) {
+    traceLastStepTime = now;
+    // Demote previous wavefront from wave -> glow
+    gNodes.selectAll('.node').each(function(d) {
+      if (traceWavefront.has(d.id)) {
+        d3.select(this).select('circle').classed('trace-wave', false).classed('trace-glow', true);
+      }
+    });
+
+    // Expand BFS by one hop
+    const nextFrontier = new Set();
+    for (const nid of traceWavefront) {
+      for (const { id: neighborId, link } of getTraceNeighbors(nid, traceMode)) {
+        if (traceVisited.has(neighborId)) continue;
+        const neighborNode = currentGraph.nodeMap.get(neighborId);
+        if (!neighborNode || !isNodeOnScreen(neighborNode)) continue;
+        traceVisited.add(neighborId);
+        nextFrontier.add(neighborId);
+
+        // Highlight the edge in its layer color
+        gLinks.selectAll('.link').each(function(ld) {
+          if (ld.source === link.source && ld.target === link.target && ld.type === link.type) {
+            const layer = EDGE_LAYERS.find(l => l.id === ld.type);
+            d3.select(this).classed('trace-active', true)
+              .attr('stroke', layer ? layer.color : ld._edgeColor);
+          }
+        });
+      }
+    }
+
+    if (nextFrontier.size === 0) {
+      // BFS exhausted — hold current visuals until key release
+      traceRAF = null;
+      return;
+    }
+
+    traceWavefront = nextFrontier;
+    traceStepIndex++;
+
+    // Apply wave glow to new frontier
+    gNodes.selectAll('.node').each(function(d) {
+      if (nextFrontier.has(d.id)) {
+        d3.select(this).select('circle').classed('trace-wave', true);
+      }
+    });
+
+    // Reveal newly-active edges when edges are toggled off
+    applySemanticZoom();
+  }
+
+  traceRAF = requestAnimationFrame(traceLoop);
+}
+
+function pauseTrace() {
+  // Stop the loop but keep visuals and BFS state intact
+  if (traceRAF && traceRAF !== -1) { cancelAnimationFrame(traceRAF); }
+  traceRAF = null;
+}
+
+function resumeTrace(mode) {
+  // Resume BFS from existing wavefront in a new direction (no restart)
+  if (!currentNodes || !currentGraph) return;
+  if (traceWavefront.size === 0) return;
+  pauseTrace();
+  traceMode = mode;
+  tKeyHeld = true;
+  traceLastStepTime = performance.now();
+  traceRAF = requestAnimationFrame(traceLoop);
+}
+
+function stopTrace() {
+  tKeyHeld = false;
+  pauseTrace();
+
+  if (traceHeld) return; // H hold: keep visuals and BFS state
+
+  // Fade out visuals after a short dwell
+  setTimeout(() => {
+    if (!tKeyHeld && !traceHeld) clearTraceVisuals();
+  }, 400);
+
+  traceWavefront = new Set();
+  traceVisited = new Set();
+  traceStepIndex = 0;
+}
+
+function releaseTraceHold() {
+  traceHeld = false;
+  tKeyHeld = false;
+  pauseTrace();
+  clearTraceVisuals();
+  traceWavefront = new Set();
+  traceVisited = new Set();
+  traceStepIndex = 0;
+}
+
 // Repulse nearby nodes toward T0 from a point in SVG space
 function repulseFromPoint(svgX, svgY) {
   if (!currentNodes || !currentGraph) return;
@@ -4581,6 +4881,60 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
+  // T: trace through visible graph edges
+  // T alone = hold to traverse (quick tap = flash); T+B = backward only; T+F = forward only
+  if (e.code === 'KeyT' && !e.repeat && currentNodes) {
+    e.preventDefault();
+    tKeyDown = true;
+    traceMode = 'both';
+    traceBKeyDown = false;
+    traceFKeyDown = false;
+    if (traceHeld) { traceHeld = false; clearTraceVisuals(); }
+    // Defer start briefly to detect T+B / T+F combos
+    if (!traceRAF) {
+      setTimeout(() => {
+        if (!tKeyDown) return; // already released (flash handled in keyup)
+        if (traceBKeyDown || traceFKeyDown) return; // B/F took over
+        startTrace('both', false);
+      }, 50);
+    }
+    return;
+  }
+  // H while tracing or trace paused: toggle hold
+  if (e.code === 'KeyH' && !e.repeat && (tKeyHeld || tKeyDown || traceHeld)) {
+    e.preventDefault();
+    if (traceHeld) {
+      releaseTraceHold();
+    } else {
+      traceHeld = true;
+    }
+    return;
+  }
+  // B while T held or trace held: restart/resume trace in backward mode
+  if (e.code === 'KeyB' && !e.repeat && (tKeyDown || traceHeld) && currentNodes) {
+    e.preventDefault();
+    traceBKeyDown = true;
+    traceMode = 'backward';
+    if (traceHeld && !tKeyDown) {
+      resumeTrace('backward');
+    } else {
+      startTrace('backward', false);
+    }
+    return;
+  }
+  // F while T held or trace held: restart/resume trace in forward mode
+  if (e.code === 'KeyF' && !e.repeat && (tKeyDown || traceHeld) && currentNodes) {
+    e.preventDefault();
+    traceFKeyDown = true;
+    traceMode = 'forward';
+    if (traceHeld && !tKeyDown) {
+      resumeTrace('forward');
+    } else {
+      startTrace('forward', false);
+    }
+    return;
+  }
+
   // Alt+Left / Alt+Right: arrangement navigation
   if (e.altKey && e.code === 'ArrowLeft') {
     e.preventDefault();
@@ -4600,8 +4954,9 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Escape: close info panel, exit comparison mode, or clear selection
+  // Escape: clear held trace, close info panel, exit comparison mode, or clear selection
   if (e.code === 'Escape') {
+    if (traceHeld) { releaseTraceHold(); return; }
     if (focusedClusterId != null) { focusedClusterId = null; applyMetaLinkFocus(); }
     if (comparisonMode) { exitComparisonMode(); return; }
     if (selectedNodes.size > 0) {
@@ -4625,6 +4980,28 @@ document.addEventListener('keyup', (e) => {
   if (e.code === 'KeyZ') {
     zKeyDown = false;
     if (zKeyHeld) stopZTimeTravel();
+  }
+  if (e.code === 'KeyT') {
+    const wasTKeyDown = tKeyDown;
+    tKeyDown = false;
+    traceBKeyDown = false;
+    traceFKeyDown = false;
+    if (tKeyHeld) {
+      stopTrace();
+    } else if (wasTKeyDown && !traceRAF) {
+      // Quick tap: flash trace
+      startTrace('both', true);
+    }
+  }
+  if (e.code === 'KeyB' && (tKeyDown || traceHeld)) {
+    traceBKeyDown = false;
+    // Pause trace but keep visuals
+    if (tKeyHeld || traceHeld) pauseTrace();
+  }
+  if (e.code === 'KeyF' && (tKeyDown || traceHeld)) {
+    traceFKeyDown = false;
+    // Pause trace but keep visuals
+    if (tKeyHeld || traceHeld) pauseTrace();
   }
   if (e.code === 'Space') {
     spaceKeyDown = false;
@@ -4764,6 +5141,10 @@ document.getElementById('x-speed').addEventListener('input', e => {
 document.getElementById('z-speed').addEventListener('input', e => {
   zTravelStepDuration = Number(e.target.value);
   document.getElementById('z-speed-val').textContent = (zTravelStepDuration / 1000).toFixed(1) + 's';
+});
+document.getElementById('t-speed').addEventListener('input', e => {
+  traceEdgeDuration = Number(e.target.value);
+  document.getElementById('t-speed-val').textContent = (traceEdgeDuration / 1000).toFixed(1) + 's';
 });
 document.getElementById('show-edges').addEventListener('change', () => applySemanticZoom());
 document.getElementById('show-hulls').addEventListener('change', () => {
