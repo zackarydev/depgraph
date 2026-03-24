@@ -82,3 +82,52 @@ Using the side-panel of nodes to see who called the function. Or who it calls. S
 New edge types reveals the inner structure of this repo.
 
 ![edges for Callee Caller Shared State](./screenshots/callee_caller_state_edges.png)
+
+## Hypergraph of the future
+
+Where this is really going in 2 months:
+
+The graph IS the UI IS the data. There is no distinction between "a node representing a function" and "a node representing a cluster" and "a node representing a view/filter/query." Everything is a node. Everything can contain other nodes. Everything can have edges to anything else.
+
+The key realizations:
+
+Clusters are just visible hyperedges. A cluster "auth_middleware" is really a hyperedge that says "these 12 nodes are related." Today you represent that as a shared integer. Tomorrow it's a first-class node that contains those 12 nodes. But conceptually it was always a hyperedge — a single relationship spanning multiple nodes.
+
+Zoom is traversal, not scaling. When you zoom into a cluster, you're not magnifying pixels — you're descending into a subgraph. The cluster node's children become the new "world." The parent graph combines with context. This is graph traversal through the lens of a camera operation.
+
+Position is meaning. You've already discovered this with islands — nodes that are spatially close should be clustered, regardless of what the static analysis said. The user's spatial arrangement is a form of annotation. Dynamic fission/fusion respects that annotation. In 2 months, the system should be able to learn cluster boundaries from how the user arranges nodes, not just from codegen. Although, codegen is an easy starting point.
+
+The depgraph becomes its own IDE. If clusters are nodes and nodes can contain nodes, then a "file" is just a cluster of functions. A "module" is a cluster of files. A "service" is a cluster of modules. You're not building a visualization of code — we're building a spatial programming environment where the dependency graph IS the project structure, and manipulating the graph (dragging, clustering, splitting) is refactoring.
+
+
+#### Runtime execution
+
+When paired with runtime execution, you might even see the hypergraph update in realtime. Entire sections of the hypergraph will be created and destroyed continuously while the program executes. Some of the hypergraph structure would probably be shielded from this, if desired, similarly to how the glider's factor is persistent unless perturbed from outside.
+
+[...] with respect to how to "instrument" it... I'm guessing the hypergraph itself is the execution medium, instead of hooking into an external program's Debug Adapter Protocol (or language-specific debug API).
+
+Yes. That's the move. The graph doesn't observe execution — it is execution.
+
+A node isn't a picture of a function. It IS the function. When an edge fires, that's not a visualization of a call — it's the call. The data flowing through edges isn't a replay of what happened somewhere else. It's happening here, in the graph, right now.
+
+This eliminates the instrumentation problem entirely. There's no "how do we get traces into the graph" because there's nowhere else for execution to happen. The graph is the runtime.
+
+What this actually looks like mechanically:
+
+Each node holds its own callable. An edge isn't just "A depends on B" — it's a channel. When A invokes B, the data literally traverses the edge. The graph runtime manages scheduling, data passing, and state. You see execution because you see the graph operating on itself.
+
+This is why clusters-as-nodes matters so much. A cluster isn't a visual grouping — it's a scope. Variables live on nodes. Closures are subgraphs. A module is a cluster that can be invoked as a single node from the outside, with its internal edges hidden until you zoom in. The recursive nesting isn't a UI feature. It's the execution model.
+
+The dependency graph and the call graph become the same graph. Static dependencies are edges that can fire. Runtime execution is edges that are firing. No reconciliation needed. No mapping between "the code over here" and "the visualization over there." One thing.
+
+Where this leads that's genuinely different from anything that exists:
+
+Refactoring becomes spatial. Drag a node from one cluster to another — you've moved a function between modules. The edges rewire. The code updates. But also: the runtime behavior changes, visibly, immediately, because the execution paths through the graph have changed and you can see them.
+
+Debugging becomes navigation. A crash isn't a stack trace you read — it's a path through the graph that you can walk. You literally see which edge carried the bad data. You click the edge, see the value, follow it backward to where it originated.
+
+Optimization becomes thermal imaging. Hot paths glow. You see that 90% of your execution time is in three edges forming a tight loop between two clusters. You don't need a profiler to tell you — the graph is showing you.
+
+The key insight you're circling: the distinction between "code" and "visualization of code" is artificial. A graph of functions with data flowing through edges IS a program. We just historically chose to represent programs as text files because that's what fit on 1970s terminals. The graph was always the truer representation. You're not building a tool that shows code as a graph. You're building a programming environment where the graph is the source of truth and text is one possible rendering of it.
+
+Read [HCSN theory](https://github.com/hcsn-theory/hcsn-theory) for potential inspiration, particularly the "rewrite rules".

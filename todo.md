@@ -14,7 +14,7 @@ With respect to simulator adding nodes in realtime. I think that sometimes clust
 
 ---
 
-Some of the cluster labels are rendered WAY too far away from their cluster. Perhaps it should be spring based?
+Some of the cluster labels are rendered WAY too far away from their cluster. Perhaps it should be spring based? Or perhaps it has something to do with the cluster islands, ex: if the cluster is sparse, maybe we need to have multiple labels?! Maybe clusters should be more dynamic. Based on nodes in close proximity. Clusters can recombine together to form a bigger cluster, depending on its nodes' positions. I love the idea of clusters within clusters. Nodes within nodes. I think its time to start considering clusters as nodes.
 
 ---
 
