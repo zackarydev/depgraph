@@ -1,6 +1,8 @@
 # depgraph
 
-[Videos](https://youtu.be/slwxspOzzK0)
+### Videos
+
+[clustering](https://youtu.be/slwxspOzzK0) | [eye candy](https://youtu.be/Nv5BIaZcL98) | [high RNG](https://youtu.be/KOGOUUK-QgM)
 
 ### Codemap
 
