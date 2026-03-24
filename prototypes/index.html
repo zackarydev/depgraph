@@ -1411,77 +1411,130 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
     nodeMap.set(name, nodes[nodes.length - 1]);
   }
 
-  if (viewMode === 'hypergraph') {
-    // Add global variable nodes
-    const globalUsage = new Map();   // gname -> Set of fnames
-    const globalWriters = new Map(); // gname -> Set of fnames that write to it
-    for (const [fname, info] of functions) {
-      const writerSet = new Set([...info.writes, ...info.rw]);
-      for (const s of [info.reads, info.writes, info.rw]) {
-        for (const g of s) {
-          if (!globalUsage.has(g)) globalUsage.set(g, new Set());
-          globalUsage.get(g).add(fname);
-        }
-      }
-      for (const g of writerSet) {
-        if (!globalWriters.has(g)) globalWriters.set(g, new Set());
-        globalWriters.get(g).add(fname);
-      }
-    }
-    for (const [gname, users] of globalUsage) {
-      if (users.size < 2 || nodeMap.has(gname)) continue;
-      const gScores = new Map();
-      const addGScore = (cid, w) => gScores.set(cid, (gScores.get(cid) || 0) + w);
-      for (const token of tokenizeName(gname)) {
-        const section = SYSTEM_KEYWORDS.get(token);
-        if (section) {
-          const cid = sectionToId.get(section);
-          if (cid != null) addGScore(cid, 2.0);
-        }
-      }
-      for (const fname of users) {
-        addGScore(clusters.get(fname) ?? 0, 1.0);
-      }
-      const gTotal = [...gScores.values()].reduce((a, b) => a + b, 0);
-      const gAffinities = new Map();
-      let bestCluster = 0, bestWeight = 0;
-      if (gTotal > 0) {
-        for (const [cid, w] of gScores) {
-          const nw = w / gTotal;
-          if (nw >= 0.05) gAffinities.set(cid, nw);
-          if (nw > bestWeight) { bestCluster = cid; bestWeight = nw; }
-        }
-      }
-      const node = {
-        id: gname, type: 'global', cluster: bestCluster,
-        clusterName: clusterNames.get(bestCluster) || 'misc',
-        affinities: gAffinities,
-        radius: Math.max(3, Math.sqrt(users.size) * 2),
-        color: '#555',
-      };
-      nodes.push(node);
-      nodeMap.set(gname, node);
-      const writers = globalWriters.get(gname) || new Set();
-      for (const fname of users) {
-        const edgeType = writers.has(fname) ? 'writesTo' : 'uses';
-        links.push({ source: fname, target: gname, type: edgeType, weight: 1 });
-      }
-    }
-  }
+  // Use precomputed edges from CSV when available; otherwise compute from AST data
+  if (analysis.precomputedEdges) {
+    const enabledIds = new Set(enabledLayers.map(l => l.id));
+    const layerThresholds = new Map(enabledLayers.map(l => [l.id, l.defaultThreshold]));
 
-  // Function-to-function edges — one pass per enabled layer (all view modes)
-  {
-    const names = [...functions.keys()];
-    for (const layer of enabledLayers) {
-      const threshold = layer.defaultThreshold;
-      for (let i = 0; i < names.length; i++) {
-        for (let j = i + 1; j < names.length; j++) {
-          const a = functions.get(names[i]);
-          const b = functions.get(names[j]);
-          const edges = layer.compute(a, b, names[i], names[j]);
-          for (const e of edges) {
-            if (e.weight >= threshold) {
-              links.push({ source: e.source, target: e.target, type: layer.id, weight: e.weight });
+    for (const e of analysis.precomputedEdges) {
+      // Hypergraph edges (uses/writesTo): only include in hypergraph mode
+      if (e.type === 'uses' || e.type === 'writesTo') {
+        if (viewMode !== 'hypergraph') continue;
+        // Create global node if not already present
+        if (!nodeMap.has(e.target)) {
+          const gScores = new Map();
+          const addGScore = (cid, w) => gScores.set(cid, (gScores.get(cid) || 0) + w);
+          for (const token of tokenizeName(e.target)) {
+            const section = SYSTEM_KEYWORDS.get(token);
+            if (section) {
+              const cid = sectionToId.get(section);
+              if (cid != null) addGScore(cid, 2.0);
+            }
+          }
+          // Cluster affinity from users
+          const userCluster = clusters.get(e.source) ?? 0;
+          addGScore(userCluster, 1.0);
+          const gTotal = [...gScores.values()].reduce((a, b) => a + b, 0);
+          const gAffinities = new Map();
+          let bestCluster = 0, bestWeight = 0;
+          if (gTotal > 0) {
+            for (const [cid, w] of gScores) {
+              const nw = w / gTotal;
+              if (nw >= 0.05) gAffinities.set(cid, nw);
+              if (nw > bestWeight) { bestCluster = cid; bestWeight = nw; }
+            }
+          }
+          const gNode = {
+            id: e.target, type: 'global', cluster: bestCluster,
+            clusterName: clusterNames.get(bestCluster) || 'misc',
+            affinities: gAffinities, radius: 3, color: '#555',
+          };
+          nodes.push(gNode);
+          nodeMap.set(e.target, gNode);
+        }
+      }
+      if (!enabledIds.has(e.type)) continue;
+      const threshold = layerThresholds.get(e.type) || 0;
+      if (e.weight >= threshold) {
+        // Only include edges where both nodes exist in the graph
+        if (nodeMap.has(e.source) && nodeMap.has(e.target)) {
+          links.push({ source: e.source, target: e.target, type: e.type, weight: e.weight });
+        }
+      }
+    }
+  } else {
+    if (viewMode === 'hypergraph') {
+      // Add global variable nodes
+      const globalUsage = new Map();   // gname -> Set of fnames
+      const globalWriters = new Map(); // gname -> Set of fnames that write to it
+      for (const [fname, info] of functions) {
+        const writerSet = new Set([...info.writes, ...info.rw]);
+        for (const s of [info.reads, info.writes, info.rw]) {
+          for (const g of s) {
+            if (!globalUsage.has(g)) globalUsage.set(g, new Set());
+            globalUsage.get(g).add(fname);
+          }
+        }
+        for (const g of writerSet) {
+          if (!globalWriters.has(g)) globalWriters.set(g, new Set());
+          globalWriters.get(g).add(fname);
+        }
+      }
+      for (const [gname, users] of globalUsage) {
+        if (users.size < 2 || nodeMap.has(gname)) continue;
+        const gScores = new Map();
+        const addGScore = (cid, w) => gScores.set(cid, (gScores.get(cid) || 0) + w);
+        for (const token of tokenizeName(gname)) {
+          const section = SYSTEM_KEYWORDS.get(token);
+          if (section) {
+            const cid = sectionToId.get(section);
+            if (cid != null) addGScore(cid, 2.0);
+          }
+        }
+        for (const fname of users) {
+          addGScore(clusters.get(fname) ?? 0, 1.0);
+        }
+        const gTotal = [...gScores.values()].reduce((a, b) => a + b, 0);
+        const gAffinities = new Map();
+        let bestCluster = 0, bestWeight = 0;
+        if (gTotal > 0) {
+          for (const [cid, w] of gScores) {
+            const nw = w / gTotal;
+            if (nw >= 0.05) gAffinities.set(cid, nw);
+            if (nw > bestWeight) { bestCluster = cid; bestWeight = nw; }
+          }
+        }
+        const node = {
+          id: gname, type: 'global', cluster: bestCluster,
+          clusterName: clusterNames.get(bestCluster) || 'misc',
+          affinities: gAffinities,
+          radius: Math.max(3, Math.sqrt(users.size) * 2),
+          color: '#555',
+        };
+        nodes.push(node);
+        nodeMap.set(gname, node);
+        const writers = globalWriters.get(gname) || new Set();
+        for (const fname of users) {
+          const edgeType = writers.has(fname) ? 'writesTo' : 'uses';
+          links.push({ source: fname, target: gname, type: edgeType, weight: 1 });
+        }
+      }
+    }
+
+    // Function-to-function edges — one pass per enabled layer (all view modes)
+    {
+      const names = [...functions.keys()];
+      for (const layer of enabledLayers) {
+        const threshold = layer.defaultThreshold;
+        for (let i = 0; i < names.length; i++) {
+          for (let j = i + 1; j < names.length; j++) {
+            const a = functions.get(names[i]);
+            const b = functions.get(names[j]);
+            const edges = layer.compute(a, b, names[i], names[j]);
+            for (const e of edges) {
+              if (e.weight >= threshold) {
+                links.push({ source: e.source, target: e.target, type: layer.id, weight: e.weight });
+              }
             }
           }
         }
@@ -2634,12 +2687,13 @@ function clusterLabelDrag(getMembersFn) {
         n.x += e.dx;
         n.y += e.dy;
       }
-      // Soft collision: push non-member nodes away from dragged cluster members (they spring back)
+      // Soft collision: push non-member nodes away from dragged cluster members
+      // During cluster gather, don't create springs (gather forces take priority)
       for (const m of d._clusterMembers) {
         for (const n of currentNodes) {
           if (memberSet.has(n.id)) continue;
           if (softCollide(n, m.x, m.y, m.radius || 4, 4)) {
-            springDisplace(n);
+            if (!clusterGatherHeld) springDisplace(n);
           }
         }
       }
@@ -4027,7 +4081,8 @@ function separateClusters(cidList, anchorCid, dt) {
       if (dist >= minDist) continue;
 
       const overlap = minDist - dist;
-      const push = overlap * 0.3 * dt;
+      // Gentle push: cap at 15px/frame to prevent explosive separation
+      const push = Math.min(overlap * 0.15, 15);
       const nx = dx / dist, ny = dy / dist;
 
       const aIsAnchor = cidArr[i] === anchorCid;
@@ -4076,6 +4131,12 @@ function startClusterGather(anchorCid) {
   focusedClusterId = anchorCid;
   applyMetaLinkFocus();
 
+  // Clear any spring-back entries for nodes that will be moved by the gather,
+  // so springs don't fight the gather forces
+  for (const n of currentNodes) {
+    if (n.cluster !== anchorCid) springNodes.delete(n.id);
+  }
+
   let lastFrameTime = performance.now();
   const startTime = performance.now();
 
@@ -4090,7 +4151,7 @@ function startClusterGather(anchorCid) {
     // Recompute anchor centroid each frame (tracks drag movement)
     const ac = clusterCentroid(anchorCid);
 
-    // Pull connected clusters toward anchor
+    // Pull connected clusters toward anchor (capped to prevent overshoot)
     for (const cid of connectedCids) {
       const cc = clusterCentroid(cid);
       const dx = ac.x - cc.x, dy = ac.y - cc.y;
@@ -4103,7 +4164,8 @@ function startClusterGather(anchorCid) {
           break;
         }
       }
-      const pull = dist * 0.025 * ramp * dt * coupling;
+      // Damped pull: sqrt(dist) prevents runaway acceleration at large distances
+      const pull = Math.min(Math.sqrt(dist) * 0.4 * ramp * dt * coupling, dist * 0.3);
       const mx = (dx / dist) * pull, my = (dy / dist) * pull;
       for (const n of currentNodes) {
         if (n.cluster === cid && !lockedNodes.has(n.id)) {
@@ -4118,7 +4180,7 @@ function startClusterGather(anchorCid) {
       const cc = clusterCentroid(cid);
       const dx = cc.x - ac.x, dy = cc.y - ac.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const repulse = Math.max(0, 300 - dist) * 0.003 * ramp * dt;
+      const repulse = Math.max(0, 250 - dist) * 0.002 * ramp * dt;
       if (repulse > 0) {
         const mx = (dx / dist) * repulse, my = (dy / dist) * repulse;
         for (const n of currentNodes) {
@@ -4777,6 +4839,7 @@ async function loadAndAnalyze(force) {
       }
 
       const result = buildAnalysisFromCSV(csvNodes, csvEdges);
+      result.precomputedEdges = csvEdges;
       analysisResult = result;
       const nSys = codemapSections ? codemapSections.size : 0;
       statusEl.textContent = `live -- ${csvNodes.length} nodes, ${csvEdges.length} edges, ${nSys} systems`;
