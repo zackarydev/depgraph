@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { readFile, readFileSync, writeFile, watch } from 'node:fs';
 import { join, extname, resolve } from 'node:path';
 import { exec } from 'node:child_process';
+import { generate as generateGraph } from './codegen/graphgen.mjs';
 
 const PORT = parseInt(process.argv[2] || '3800', 10);
 const ROOT = resolve(import.meta.dirname, '.');
@@ -59,6 +60,44 @@ function readFocus() {
 
 watch(FOCUS_FILE, { persistent: true }, () => readFocus());
 readFocus();
+
+// ── Graph generation: watch src + codemap, regenerate CSVs ─
+const NODES_FILE = join(ROOT, 'runtime/nodes.csv');
+const EDGES_FILE = join(ROOT, 'runtime/edges.csv');
+const graphClients = new Set();
+
+function broadcastGraph(data) {
+  const msg = `data: ${JSON.stringify(data)}\n\n`;
+  for (const res of graphClients) {
+    try { res.write(msg); } catch { graphClients.delete(res); }
+  }
+}
+
+let graphgenTimer = null;
+function triggerGraphgen() {
+  clearTimeout(graphgenTimer);
+  graphgenTimer = setTimeout(() => {
+    try {
+      const result = generateGraph(INSPECT_FILE);
+      if (result) broadcastGraph({ type: 'graph-update', nodes: result.nNodes, edges: result.nEdges });
+    } catch (e) {
+      console.error('[graphgen] error:', e.message);
+    }
+  }, 200); // debounce 200ms
+}
+
+// Generate on startup
+try { generateGraph(INSPECT_FILE); } catch (e) { console.error('[graphgen] initial error:', e.message); }
+
+// Watch source file and codemap for changes
+watch(TARGET_SRC, { persistent: true }, () => {
+  console.log('[watch] src changed');
+  triggerGraphgen();
+});
+watch(CODEMAP_FILE, { persistent: true }, () => {
+  console.log('[watch] codemap changed');
+  triggerGraphgen();
+});
 
 // ── HTTP server ────────────────────────────────────
 function isLocal(req) {
@@ -209,6 +248,38 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // SSE endpoint for graph updates
+  if (url.pathname === '/graph-events') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-store',
+      'Connection': 'keep-alive',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+    graphClients.add(res);
+    req.on('close', () => graphClients.delete(res));
+    return;
+  }
+
+  // Serve CSV files
+  if (url.pathname === '/runtime/nodes.csv') {
+    readFile(NODES_FILE, (err, data) => {
+      if (err) { res.writeHead(404); res.end('nodes.csv not found'); return; }
+      res.writeHead(200, { 'Content-Type': 'text/csv', 'X-Content-Type-Options': 'nosniff' });
+      res.end(data);
+    });
+    return;
+  }
+  if (url.pathname === '/runtime/edges.csv') {
+    readFile(EDGES_FILE, (err, data) => {
+      if (err) { res.writeHead(404); res.end('edges.csv not found'); return; }
+      res.writeHead(200, { 'Content-Type': 'text/csv', 'X-Content-Type-Options': 'nosniff' });
+      res.end(data);
+    });
+    return;
+  }
+
   // Serve inspect.json so the frontend can read it
   if (url.pathname === '/inspect.json') {
     readFile(INSPECT_FILE, (err, data) => {
@@ -251,7 +322,8 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`\x1b[36mdepgraph\x1b[0m → http://127.0.0.1:${PORT}`);
-  console.log(`  SSE    → /focus-events`);
+  console.log(`  SSE    → /focus-events, /graph-events`);
+  console.log(`  CSV    → /runtime/nodes.csv, /runtime/edges.csv`);
   console.log(`  target → /target/src`);
-  console.log(`  watch  → ${FOCUS_FILE}`);
+  console.log(`  watch  → src, codemap, ${FOCUS_FILE}`);
 });

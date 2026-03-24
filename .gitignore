@@ -1,2 +1,5 @@
 screenshots/archive
 runtime/archive
+runtime/nodes.csv
+runtime/edges.csv
+node_modules/

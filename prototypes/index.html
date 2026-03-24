@@ -4570,6 +4570,96 @@ document.getElementById('arr-last').addEventListener('click', () => navigateToAr
 // ═══════════════════════════════════════════════════════
 let currentFocus = null;
 
+// ═══════════════════════════════════════════════════════
+// CSV PARSING & GRAPH SSE
+// ═══════════════════════════════════════════════════════
+function parseCSVLine(line) {
+  const fields = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
+      else if (ch === '"') inQuotes = false;
+      else current += ch;
+    } else {
+      if (ch === '"') inQuotes = true;
+      else if (ch === ',') { fields.push(current); current = ''; }
+      else current += ch;
+    }
+  }
+  fields.push(current);
+  return fields;
+}
+
+function parseNodesCSV(text) {
+  // Format: id,type,cluster,importance,line
+  const nodes = [];
+  for (const line of text.trim().split('\n')) {
+    if (!line) continue;
+    const [id, type, cluster, importance, lineNum] = parseCSVLine(line);
+    nodes.push({ id, type, cluster: cluster || '', importance: parseInt(importance) || 3, line: parseInt(lineNum) || 0 });
+  }
+  return nodes;
+}
+
+function parseEdgesCSV(text) {
+  // Format: source,target,type,weight
+  const edges = [];
+  for (const line of text.trim().split('\n')) {
+    if (!line) continue;
+    const [source, target, type, weight] = parseCSVLine(line);
+    edges.push({ source, target, type, weight: parseFloat(weight) || 1 });
+  }
+  return edges;
+}
+
+function buildAnalysisFromCSV(nodes, edges) {
+  // Build the {functions, globals} structure that downstream code expects
+  const functions = new Map();
+  const globals = new Map();
+
+  for (const n of nodes) {
+    if (n.type === 'function') {
+      functions.set(n.id, {
+        reads: new Set(), writes: new Set(), rw: new Set(), calls: new Set(),
+        params: new Set(), locals: new Set(),
+        line: n.line, endLine: n.line, lines: 1,
+      });
+    } else if (n.type === 'global') {
+      globals.set(n.id, { kind: 'const', line: n.line });
+    }
+  }
+
+  // Populate reads/writes/calls from edges
+  for (const e of edges) {
+    const fn = functions.get(e.source);
+    if (!fn) continue;
+    if (e.type === 'calls') fn.calls.add(e.target);
+    else if (e.type === 'uses') fn.reads.add(e.target);
+    else if (e.type === 'writesTo') fn.writes.add(e.target);
+  }
+
+  return { functions, globals };
+}
+
+function connectGraphSSE() {
+  const source = new EventSource(location.origin + '/graph-events');
+  source.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === 'graph-update') {
+        console.log(`[graph-sse] update: ${data.nodes} nodes, ${data.edges} edges`);
+        loadAndAnalyze(true);
+      }
+    } catch { /* ignore */ }
+  };
+  source.onerror = () => {
+    console.warn('[graph-sse] connection lost, retrying...');
+  };
+}
+
 function connectFocusSSE() {
   const source = new EventSource(location.origin + '/focus-events');
   source.onmessage = (event) => {
@@ -4663,26 +4753,55 @@ async function loadAndAnalyze(force) {
   if (!force && !document.getElementById('live-reload').checked) return;
   const statusEl = document.getElementById('status');
   try {
-    const [html, codemapMd] = await Promise.all([
-      fetch(SRC).then(r => r.text()),
+    const [nodesText, edgesText, codemapMd] = await Promise.all([
+      fetch('/runtime/nodes.csv').then(r => r.ok ? r.text() : null).catch(() => null),
+      fetch('/runtime/edges.csv').then(r => r.ok ? r.text() : null).catch(() => null),
       fetch(CODEMAP_SRC).then(r => r.ok ? r.text() : null).catch(() => null),
     ]);
-    const h = hashStr(html + (codemapMd || ''));
-    if (h === lastHash) return;
-    lastHash = h;
 
-    statusEl.textContent = 'parsing...';
-    if (codemapMd) codemapSections = parseCodemap(codemapMd);
+    // If CSVs are available, use them; otherwise fall back to AST analysis
+    if (nodesText && edgesText) {
+      const h = hashStr(nodesText + edgesText + (codemapMd || ''));
+      if (h === lastHash) return;
+      lastHash = h;
 
-    const { code, lineOffset } = extractJS(html);
-    const result = analyzeCode(code, lineOffset);
-    if (!result) { statusEl.textContent = 'parse error'; return; }
+      statusEl.textContent = 'loading CSVs...';
+      if (codemapMd) codemapSections = parseCodemap(codemapMd);
 
-    analysisResult = result;
-    const nSys = codemapSections ? codemapSections.size : 0;
-    statusEl.textContent = `live — ${result.functions.size} funcs, ${nSys} systems`;
-    statusEl.className = 'live';
-    rebuild();
+      const csvNodes = parseNodesCSV(nodesText);
+      const csvEdges = parseEdgesCSV(edgesText);
+
+      // Set importance from CSV nodes
+      for (const n of csvNodes) {
+        if (n.importance) codemapImportance.set(n.id, n.importance);
+      }
+
+      const result = buildAnalysisFromCSV(csvNodes, csvEdges);
+      analysisResult = result;
+      const nSys = codemapSections ? codemapSections.size : 0;
+      statusEl.textContent = `live -- ${csvNodes.length} nodes, ${csvEdges.length} edges, ${nSys} systems`;
+      statusEl.className = 'live';
+      rebuild();
+    } else {
+      // Fallback: AST analysis in browser (legacy path)
+      const html = await fetch(SRC).then(r => r.text());
+      const h = hashStr(html + (codemapMd || ''));
+      if (h === lastHash) return;
+      lastHash = h;
+
+      statusEl.textContent = 'parsing...';
+      if (codemapMd) codemapSections = parseCodemap(codemapMd);
+
+      const { code, lineOffset } = extractJS(html);
+      const result = analyzeCode(code, lineOffset);
+      if (!result) { statusEl.textContent = 'parse error'; return; }
+
+      analysisResult = result;
+      const nSys = codemapSections ? codemapSections.size : 0;
+      statusEl.textContent = `live -- ${result.functions.size} funcs, ${nSys} systems`;
+      statusEl.className = 'live';
+      rebuild();
+    }
   } catch (e) {
     statusEl.textContent = 'fetch error: ' + e.message;
     console.error(e);
@@ -4730,6 +4849,7 @@ document.getElementById('live-reload').addEventListener('change', (e) => {
 });
 
 connectFocusSSE();
+connectGraphSSE();
 updateArrNav();
 
 // Restore last arrangement positions if available
