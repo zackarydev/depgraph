@@ -2688,12 +2688,14 @@ function clusterLabelDrag(getMembersFn) {
         n.y += e.dy;
       }
       // Soft collision: push non-member nodes away from dragged cluster members
-      // During cluster gather, don't create springs (gather forces take priority)
-      for (const m of d._clusterMembers) {
-        for (const n of currentNodes) {
-          if (memberSet.has(n.id)) continue;
-          if (softCollide(n, m.x, m.y, m.radius || 4, 4)) {
-            if (!clusterGatherHeld) springDisplace(n);
+      // Skip during cluster gather — separateClusters handles cluster-level overlap
+      if (!clusterGatherHeld) {
+        for (const m of d._clusterMembers) {
+          for (const n of currentNodes) {
+            if (memberSet.has(n.id)) continue;
+            if (softCollide(n, m.x, m.y, m.radius || 4, 4)) {
+              springDisplace(n);
+            }
           }
         }
       }
@@ -4109,6 +4111,15 @@ function startClusterGather(anchorCid) {
   if (clusterGatherRAF || !currentGraph || !currentNodes) return;
   clusterGatherHeld = true;
   clusterGatherAnchorCid = anchorCid;
+
+  // Snapshot current anchor-cluster positions so the gather loop pins them
+  // where they are NOW (not where savedPositions last recorded them — which
+  // may be stale if the user dragged the cluster before pressing Space).
+  for (const n of currentNodes) {
+    if (n.cluster === anchorCid) {
+      savedPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
 
   // Find connected cluster IDs via meta-links
   const connectedCids = new Set();
