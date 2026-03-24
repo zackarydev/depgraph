@@ -2145,10 +2145,30 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
   const { nodes, links, nodeDegree } = graph;
   const showHulls = document.getElementById('show-hulls').checked;
 
-  // Save current positions before clearing (unless just reset)
+  // Save current positions before layout
   if (currentNodes && savedPositions.size > 0) {
     for (const n of currentNodes) {
       if (n.x != null && n.y != null) savedPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+
+  // Reuse existing node objects so that in-flight interaction references
+  // (drag d, attractorNode, etc.) remain valid across incremental updates.
+  if (currentNodes) {
+    const existingById = new Map(currentNodes.map(n => [n.id, n]));
+    for (let i = 0; i < nodes.length; i++) {
+      const existing = existingById.get(nodes[i].id);
+      if (existing) {
+        existing.cluster = nodes[i].cluster;
+        existing.clusterName = nodes[i].clusterName;
+        existing.affinities = nodes[i].affinities;
+        existing.color = nodes[i].color;
+        existing.radius = nodes[i].radius;
+        existing.info = nodes[i].info;
+        existing.type = nodes[i].type;
+        nodes[i] = existing;
+        graph.nodeMap.set(existing.id, existing);
+      }
     }
   }
 
@@ -2186,12 +2206,10 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
   currentLinks = links;
   currentGraph = graph;
 
-  // Clear SVG
+  // Clear edges, hulls, cluster labels (cheap to rebuild)
   gLinks.selectAll('*').remove();
-  gNodes.selectAll('*').remove();
   gClusterLabels.selectAll('*').remove();
   gHulls.selectAll('*').remove();
-  gLabels.selectAll('*').remove();
 
   // Density-adaptive edge styling helpers
   function baseEdgeOpacity(l) {
@@ -2282,228 +2300,236 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
     .attr('fill-opacity', d => baseEdgeOpacity(d))
     .attr('stroke', 'none');
 
-  // Render nodes
-  const node = gNodes.selectAll('g')
-    .data(nodes)
-    .join('g')
-    .attr('class', 'node')
-    .attr('transform', d => `translate(${d.x},${d.y})`)
-    .call(d3.drag()
-      .on('start', (e, d) => {
-        d._dragStart = { x: d.x, y: d.y };
-        d._dragStartTime = Date.now();
-        d._isDragging = true;
-        forcePressDragNode = d;
-        // Build spatial grid for collision queries
-        if (currentK > 3.5 && currentNodes) {
-          let maxR = 0;
-          for (const n of currentNodes) if ((n.radius || 4) > maxR) maxR = n.radius || 4;
-          _buildCollisionGrid(currentNodes, maxR);
-        }
-        // Stop centroid pull if dragging a selected node while space is held
-        if (spacePullRAF && selectedNodes.has(d.id)) {
-          cancelAnimationFrame(spacePullRAF);
-          spacePullRAF = null;
-        }
-        // Shift-hold fallback for non-pressure devices: start attractor after 550ms delay
-        if (!hasForceTouch && !hasPressure && e.sourceEvent && e.sourceEvent.shiftKey) {
-          if (shiftAttractorTimer) clearTimeout(shiftAttractorTimer);
-          shiftAttractorTimer = setTimeout(() => {
-            shiftAttractorTimer = null;
-            if (d._isDragging && !attractorNode && !groupMoveActive) {
-              startAttractor(d);
-            }
-          }, 550);
-        }
-      })
-      .on('drag', (e, d) => {
-        if (xKeyRAF) return; // X step animation controls position
-        if (e.sourceEvent && e.sourceEvent.shiftKey && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
-          // Shift+drag selected node: move all selected nodes together
-          if (!groupMoveActive) {
-            groupMoveActive = true;
-            // Cancel attractor timer — group move takes priority
-            if (shiftAttractorTimer) { clearTimeout(shiftAttractorTimer); shiftAttractorTimer = null; }
-            if (attractorNode) lockAttractor();
+  // ── Node drag behavior (shared by enter and existing nodes) ──
+  const nodeDrag = d3.drag()
+    .on('start', (e, d) => {
+      d._dragStart = { x: d.x, y: d.y };
+      d._dragStartTime = Date.now();
+      d._isDragging = true;
+      forcePressDragNode = d;
+      if (currentK > 3.5 && currentNodes) {
+        let maxR = 0;
+        for (const n of currentNodes) if ((n.radius || 4) > maxR) maxR = n.radius || 4;
+        _buildCollisionGrid(currentNodes, maxR);
+      }
+      if (spacePullRAF && selectedNodes.has(d.id)) {
+        cancelAnimationFrame(spacePullRAF);
+        spacePullRAF = null;
+      }
+      if (!hasForceTouch && !hasPressure && e.sourceEvent && e.sourceEvent.shiftKey) {
+        if (shiftAttractorTimer) clearTimeout(shiftAttractorTimer);
+        shiftAttractorTimer = setTimeout(() => {
+          shiftAttractorTimer = null;
+          if (d._isDragging && !attractorNode && !groupMoveActive) {
+            startAttractor(d);
           }
-          const dx = e.x - d.x, dy = e.y - d.y;
+        }, 550);
+      }
+    })
+    .on('drag', (e, d) => {
+      if (xKeyRAF) return;
+      if (e.sourceEvent && e.sourceEvent.shiftKey && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
+        if (!groupMoveActive) {
+          groupMoveActive = true;
+          if (shiftAttractorTimer) { clearTimeout(shiftAttractorTimer); shiftAttractorTimer = null; }
+          if (attractorNode) lockAttractor();
+        }
+        const dx = e.x - d.x, dy = e.y - d.y;
+        for (const n of currentNodes) {
+          if (!selectedNodes.has(n.id)) continue;
+          n.x += dx;
+          n.y += dy;
+        }
+      } else if (e.sourceEvent && e.sourceEvent.shiftKey) {
+        return;
+      } else {
+        d.x = e.x; d.y = e.y;
+        if (currentK > 3.5) {
+          const dr = d.radius || 4;
+          const nearby = _nearbyNodes(d.x, d.y, dr + 30);
+          for (let i = 0; i < nearby.length; i++) {
+            const n = nearby[i];
+            if (n.id === d.id) continue;
+            if (softCollide(n, d.x, d.y, dr, 4)) {
+              springDisplace(n);
+            }
+          }
+        }
+      }
+      renderPositions();
+    })
+    .on('end', (e, d) => {
+      d._isDragging = false;
+      forcePressDragNode = null;
+      groupMoveActive = false;
+      if (shiftAttractorTimer) { clearTimeout(shiftAttractorTimer); shiftAttractorTimer = null; }
+      if (xKeyHeld) stopXForces();
+      const dx = d.x - d._dragStart.x, dy = d.y - d._dragStart.y;
+      const moved = Math.sqrt(dx * dx + dy * dy) > 5;
+      if (moved) {
+        if (e.sourceEvent && e.sourceEvent.shiftKey && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
           for (const n of currentNodes) {
             if (!selectedNodes.has(n.id)) continue;
-            n.x += dx;
-            n.y += dy;
+            stickyNodes.add(n.id);
+            savedPositions.set(n.id, { x: n.x, y: n.y });
           }
-        } else if (e.sourceEvent && e.sourceEvent.shiftKey) {
-          return; // shift-drag on unselected node, don't move
         } else {
-          d.x = e.x; d.y = e.y;
-          // Soft collision avoidance when zoomed in (nodes spring back)
-          if (currentK > 3.5) {
-            const dr = d.radius || 4;
-            const nearby = _nearbyNodes(d.x, d.y, dr + 30);
-            for (let i = 0; i < nearby.length; i++) {
-              const n = nearby[i];
-              if (n.id === d.id) continue;
-              if (softCollide(n, d.x, d.y, dr, 4)) {
-                springDisplace(n);
-              }
-            }
-          }
+          stickyNodes.add(d.id);
+          savedPositions.set(d.id, { x: d.x, y: d.y });
         }
-        renderPositions();
-      })
-      .on('end', (e, d) => {
-        d._isDragging = false;
-        forcePressDragNode = null;
-        groupMoveActive = false;
-        if (shiftAttractorTimer) { clearTimeout(shiftAttractorTimer); shiftAttractorTimer = null; }
-        if (xKeyHeld) stopXForces(); // release during X relaxation — stop and keep position
-        const dx = d.x - d._dragStart.x, dy = d.y - d._dragStart.y;
-        const moved = Math.sqrt(dx * dx + dy * dy) > 5;
-        if (moved) {
-          // If shift+drag moved all selected nodes, save all their positions
-          if (e.sourceEvent && e.sourceEvent.shiftKey && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
-            for (const n of currentNodes) {
-              if (!selectedNodes.has(n.id)) continue;
-              stickyNodes.add(n.id);
-              savedPositions.set(n.id, { x: n.x, y: n.y });
-            }
-          } else {
-            stickyNodes.add(d.id);
-            savedPositions.set(d.id, { x: d.x, y: d.y });
-          }
-          trackDragProximity(d.id);
-          pushArrangement('drag', [d.id]);
-        }
-        if (attractorNode) lockAttractor();
-      })
-    );
+        trackDragProximity(d.id);
+        pushArrangement('drag', [d.id]);
+      }
+      if (attractorNode) lockAttractor();
+    });
 
-  node.append('circle')
-    .attr('r', d => d.radius * getClusterImportance(d.cluster))
-    .attr('fill', d => d.type === 'global' ? '#333' : d.color)
-    .attr('stroke', d => d.type === 'global' ? '#666' : d3.color(d.color).brighter(0.8))
-    .on('click', (e, d) => {
-      e.stopPropagation();
-      const dragDuration = d._dragStartTime ? Date.now() - d._dragStartTime : 0;
-      d._dragStartTime = null;
-      if (dragDuration < 300) {
-        // Clear cluster focus so node-based gathers take priority
-        if (focusedClusterId != null) {
-          focusedClusterId = null;
-          applyMetaLinkFocus();
-        }
-        // Shift+X+click or Ctrl+click: dismiss node to T0
-        if ((e.shiftKey && xKeyDown) || (e.ctrlKey || e.metaKey)) {
-          selectedNodes.delete(d.id);
-          lockedNodes.delete(d.id);
-          d3.select(e.target).classed('selected-glow', false);
-          updateLockUI();
-          dismissNodeToT0(d);
-          return;
-        }
-        if (e.shiftKey) {
-          // Shift-click: toggle multi-select
-          if (selectedNodes.has(d.id)) {
+  // ── Helper: set up circle + all event handlers on a node group selection ──
+  function setupNodeCircle(sel) {
+    sel.append('circle')
+      .attr('r', d => d.radius * getClusterImportance(d.cluster))
+      .attr('fill', d => d.type === 'global' ? '#333' : d.color)
+      .attr('stroke', d => d.type === 'global' ? '#666' : d3.color(d.color).brighter(0.8))
+      .on('click', (e, d) => {
+        e.stopPropagation();
+        const dragDuration = d._dragStartTime ? Date.now() - d._dragStartTime : 0;
+        d._dragStartTime = null;
+        if (dragDuration < 300) {
+          if (focusedClusterId != null) {
+            focusedClusterId = null;
+            applyMetaLinkFocus();
+          }
+          if ((e.shiftKey && xKeyDown) || (e.ctrlKey || e.metaKey)) {
             selectedNodes.delete(d.id);
             lockedNodes.delete(d.id);
             d3.select(e.target).classed('selected-glow', false);
-          } else {
-            selectedNodes.add(d.id);
-            lockedNodes.add(d.id);
-            stickyNodes.add(d.id);
-            savedPositions.set(d.id, { x: d.x, y: d.y });
-            d3.select(e.target).classed('selected-glow', true);
+            updateLockUI();
+            dismissNodeToT0(d);
+            return;
           }
-          updateLockUI();
-          return;
+          if (e.shiftKey) {
+            if (selectedNodes.has(d.id)) {
+              selectedNodes.delete(d.id);
+              lockedNodes.delete(d.id);
+              d3.select(e.target).classed('selected-glow', false);
+            } else {
+              selectedNodes.add(d.id);
+              lockedNodes.add(d.id);
+              stickyNodes.add(d.id);
+              savedPositions.set(d.id, { x: d.x, y: d.y });
+              d3.select(e.target).classed('selected-glow', true);
+            }
+            updateLockUI();
+            return;
+          }
+          selectNode(d, analysisResult);
+          trackClickCoOccurrence(d.id);
         }
-        selectNode(d, analysis);
-        trackClickCoOccurrence(d.id);
-        // clickPull(d); — disabled: single click should not pull neighbors
-      }
-    })
-    .on('contextmenu', (e, d) => {
-      e.preventDefault();
-      // Ctrl+click on Mac fires contextmenu, not click — handle dismiss here
-      selectedNodes.delete(d.id);
-      lockedNodes.delete(d.id);
-      gNodes.selectAll('.node').filter(n => n.id === d.id)
-        .select('circle').classed('selected-glow', false);
-      updateLockUI();
-      dismissNodeToT0(d);
-    })
-    .on('mouseenter', (e, d) => { if (!attractorNode) highlightNeighbors(d, graph); })
-    .on('mouseleave', () => { if (!attractorNode) clearHighlight(); })
-    .each(function(d) {
-      // Force Touch events for attractor (Safari)
-      this.addEventListener('webkitmouseforcewillbegin', (e) => {
+      })
+      .on('contextmenu', (e, d) => {
         e.preventDefault();
-        hasForceTouch = true;
-      });
-      this.addEventListener('webkitmouseforcedown', (e) => {
-        if (!attractorNode) startAttractor(d);
-      });
-      this.addEventListener('webkitmouseforceup', (e) => {
-        if (attractorNode) lockAttractor();
-      });
-      // Pointer Events pressure fallback (Chrome/Firefox)
-      this.addEventListener('pointerdown', (e) => {
-        pressureActive = false;
-      });
-      this.addEventListener('pointermove', (e) => {
-        if (hasForceTouch) return; // webkit events take priority
-        if (e.pressure > 0 && e.pressure !== 0.5) hasPressure = true;
-        if (!hasPressure) return;
-        if (e.pressure >= PRESSURE_THRESHOLD && !pressureActive) {
-          pressureActive = true;
+        selectedNodes.delete(d.id);
+        lockedNodes.delete(d.id);
+        gNodes.selectAll('.node').filter(n => n.id === d.id)
+          .select('circle').classed('selected-glow', false);
+        updateLockUI();
+        dismissNodeToT0(d);
+      })
+      .on('mouseenter', (e, d) => { if (!attractorNode) highlightNeighbors(d, currentGraph); })
+      .on('mouseleave', () => { if (!attractorNode) clearHighlight(); })
+      .each(function(d) {
+        this.addEventListener('webkitmouseforcewillbegin', (e) => {
+          e.preventDefault();
+          hasForceTouch = true;
+        });
+        this.addEventListener('webkitmouseforcedown', (e) => {
           if (!attractorNode) startAttractor(d);
-        } else if (e.pressure < PRESSURE_THRESHOLD && pressureActive) {
-          pressureActive = false;
+        });
+        this.addEventListener('webkitmouseforceup', (e) => {
           if (attractorNode) lockAttractor();
-        }
-      });
-      this.addEventListener('pointerup', () => {
-        if (pressureActive) {
+        });
+        this.addEventListener('pointerdown', (e) => {
           pressureActive = false;
-          if (attractorNode) lockAttractor();
-        }
+        });
+        this.addEventListener('pointermove', (e) => {
+          if (hasForceTouch) return;
+          if (e.pressure > 0 && e.pressure !== 0.5) hasPressure = true;
+          if (!hasPressure) return;
+          if (e.pressure >= PRESSURE_THRESHOLD && !pressureActive) {
+            pressureActive = true;
+            if (!attractorNode) startAttractor(d);
+          } else if (e.pressure < PRESSURE_THRESHOLD && pressureActive) {
+            pressureActive = false;
+            if (attractorNode) lockAttractor();
+          }
+        });
+        this.addEventListener('pointerup', () => {
+          if (pressureActive) {
+            pressureActive = false;
+            if (attractorNode) lockAttractor();
+          }
+        });
       });
-    });
 
-  // Secondary affinity rings
-  node.filter(d => {
-    if (!d.affinities || d.affinities.size < 2) return false;
-    const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
-    return sorted[1][1] >= 0.15;
-  }).append('circle')
-    .attr('r', d => d.radius * getClusterImportance(d.cluster) + 2.5)
-    .attr('fill', 'none')
-    .attr('stroke', d => {
+    // Secondary affinity rings
+    sel.filter(d => {
+      if (!d.affinities || d.affinities.size < 2) return false;
       const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
-      return CLUSTER_COLORS[sorted[1][0] % CLUSTER_COLORS.length];
-    })
-    .attr('stroke-width', d => {
-      const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
-      return Math.max(1, sorted[1][1] * 4);
-    })
-    .attr('stroke-opacity', d => {
-      const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
-      return 0.4 + sorted[1][1] * 0.6;
-    })
-    .style('pointer-events', 'none');
+      return sorted[1][1] >= 0.15;
+    }).append('circle')
+      .attr('r', d => d.radius * getClusterImportance(d.cluster) + 2.5)
+      .attr('fill', 'none')
+      .attr('stroke', d => {
+        const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
+        return CLUSTER_COLORS[sorted[1][0] % CLUSTER_COLORS.length];
+      })
+      .attr('stroke-width', d => {
+        const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
+        return Math.max(1, sorted[1][1] * 4);
+      })
+      .attr('stroke-opacity', d => {
+        const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
+        return 0.4 + sorted[1][1] * 0.6;
+      })
+      .style('pointer-events', 'none');
+  }
 
-  // Labels
+  // ── Incremental node rendering via keyed data join ──
+  const node = gNodes.selectAll('.node')
+    .data(nodes, d => d.id)
+    .join(
+      enter => {
+        const g = enter.append('g').attr('class', 'node').call(nodeDrag);
+        setupNodeCircle(g);
+        return g;
+      },
+      update => {
+        // Update visual properties that may have changed (cluster, importance)
+        update.select('circle')
+          .attr('r', d => d.radius * getClusterImportance(d.cluster))
+          .attr('fill', d => d.type === 'global' ? '#333' : d.color)
+          .attr('stroke', d => d.type === 'global' ? '#666' : d3.color(d.color).brighter(0.8));
+        return update;
+      },
+      exit => exit.remove()
+    )
+    .attr('transform', d => `translate(${d.x},${d.y})`);
+
+  // ── Incremental label rendering via keyed data join ──
   gLabels.selectAll('text')
-    .data(nodes)
-    .join('text')
-    .attr('class', 'label')
-    .attr('fill', '#fff')
-    .attr('text-anchor', 'middle')
-    .attr('dominant-baseline', 'central')
-    .attr('opacity', 0)
-    .style('pointer-events', 'none')
-    .style('user-select', 'none')
-    .text(d => d.id)
+    .data(nodes, d => d.id)
+    .join(
+      enter => enter.append('text')
+        .attr('class', 'label')
+        .attr('fill', '#fff')
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'central')
+        .attr('opacity', 0)
+        .style('pointer-events', 'none')
+        .style('user-select', 'none')
+        .text(d => d.id),
+      update => update,
+      exit => exit.remove()
+    )
     .attr('x', d => d.x)
     .attr('y', d => d.y);
 
@@ -4151,15 +4177,77 @@ function clusterBounds(cid) {
   return { cx, cy, r: maxR + 10, members }; // +10 padding
 }
 
-function separateClusters(cidList, anchorCid, dt) {
-  // Pairwise circle-circle collision: push non-anchor clusters apart
-  const bounds = new Map();
-  for (const cid of cidList) bounds.set(cid, clusterBounds(cid));
+function clusterIslands(cid, nodeList) {
+  // Split a cluster into spatial islands — groups of nodes that are physically
+  // close together. Prevents phantom-centroid forces when nodes are scattered.
+  const members = (nodeList || currentNodes).filter(n => n.cluster === cid);
+  if (members.length === 0) return [];
+  if (members.length === 1) {
+    return [{ members, cx: members[0].x, cy: members[0].y, r: (members[0].radius || 4) + 10, cid }];
+  }
 
-  const cidArr = [...cidList];
-  for (let i = 0; i < cidArr.length; i++) {
-    for (let j = i + 1; j < cidArr.length; j++) {
-      const a = bounds.get(cidArr[i]), b = bounds.get(cidArr[j]);
+  // Adaptive gap threshold: 2.5x average nearest-neighbor distance, min 100px
+  let totalNND = 0;
+  for (let i = 0; i < members.length; i++) {
+    let minD = Infinity;
+    for (let j = 0; j < members.length; j++) {
+      if (i === j) continue;
+      const dx = members[i].x - members[j].x, dy = members[i].y - members[j].y;
+      minD = Math.min(minD, Math.sqrt(dx * dx + dy * dy));
+    }
+    totalNND += minD;
+  }
+  const maxGap = Math.max(100, (totalNND / members.length) * 2.5);
+
+  // Union-find by proximity
+  const par = members.map((_, i) => i);
+  function find(i) { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; }
+  function unite(a, b) { par[find(a)] = find(b); }
+
+  for (let i = 0; i < members.length; i++) {
+    for (let j = i + 1; j < members.length; j++) {
+      const dx = members[i].x - members[j].x, dy = members[i].y - members[j].y;
+      if (Math.sqrt(dx * dx + dy * dy) < maxGap) unite(i, j);
+    }
+  }
+
+  // Group by root
+  const groups = new Map();
+  for (let i = 0; i < members.length; i++) {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(members[i]);
+  }
+
+  // Compute bounds for each island
+  return [...groups.values()].map(g => {
+    let cx = 0, cy = 0;
+    for (const m of g) { cx += m.x; cy += m.y; }
+    cx /= g.length; cy /= g.length;
+    let maxR = 0;
+    for (const m of g) {
+      const dx = m.x - cx, dy = m.y - cy;
+      maxR = Math.max(maxR, Math.sqrt(dx * dx + dy * dy) + (m.radius || 4));
+    }
+    return { members: g, cx, cy, r: maxR + 10, cid };
+  });
+}
+
+function separateClusters(cidList, anchorCid, dt, islandCache) {
+  // Island-aware collision: each cluster may have multiple spatial islands,
+  // so we collide island-vs-island across different clusters instead of using
+  // one giant bounding circle per cluster (which creates phantom collisions
+  // when nodes are scattered).
+  const allIslands = [];
+  for (const cid of cidList) {
+    const islands = islandCache ? (islandCache.get(cid) || clusterIslands(cid)) : clusterIslands(cid);
+    for (const isl of islands) allIslands.push(isl);
+  }
+
+  for (let i = 0; i < allIslands.length; i++) {
+    for (let j = i + 1; j < allIslands.length; j++) {
+      const a = allIslands[i], b = allIslands[j];
+      if (a.cid === b.cid) continue; // same cluster islands don't collide
       if (a.members.length === 0 || b.members.length === 0) continue;
       const dx = b.cx - a.cx, dy = b.cy - a.cy;
       const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
@@ -4167,13 +4255,11 @@ function separateClusters(cidList, anchorCid, dt) {
       if (dist >= minDist) continue;
 
       const overlap = minDist - dist;
-      // Gentle push: cap at 15px/frame to prevent explosive separation
       const push = Math.min(overlap * 0.15, 15);
       const nx = dx / dist, ny = dy / dist;
 
-      const aIsAnchor = cidArr[i] === anchorCid;
-      const bIsAnchor = cidArr[j] === anchorCid;
-      // Distribute push: anchor doesn't move, otherwise 50/50
+      const aIsAnchor = a.cid === anchorCid;
+      const bIsAnchor = b.cid === anchorCid;
       const aShare = aIsAnchor ? 0 : bIsAnchor ? 1 : 0.5;
       const bShare = bIsAnchor ? 0 : aIsAnchor ? 1 : 0.5;
 
@@ -4243,14 +4329,18 @@ function startClusterGather(anchorCid) {
     lastFrameTime = now;
     const ramp = Math.min(1, (now - startTime) / 800);
 
-    // Recompute anchor centroid each frame (tracks drag movement)
-    const ac = clusterCentroid(anchorCid);
+    // Compute islands once per frame and cache for reuse
+    const islandCache = new Map();
+    for (const cid of allCids) islandCache.set(cid, clusterIslands(cid));
 
-    // Pull connected clusters toward anchor (capped to prevent overshoot)
+    // Anchor islands (tracks drag movement via recomputation each frame)
+    const anchorIslands = islandCache.get(anchorCid) || [];
+
+    // Pull connected clusters toward anchor — island-aware: each island in the
+    // connected cluster pulls toward the nearest anchor island, not a phantom
+    // whole-cluster centroid that may be far from any actual node.
     for (const cid of connectedCids) {
-      const cc = clusterCentroid(cid);
-      const dx = ac.x - cc.x, dy = ac.y - cc.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const islands = islandCache.get(cid) || [];
       let coupling = 1;
       for (const ml of currentMetaLinks) {
         if ((ml.sourceCluster === anchorCid && ml.targetCluster === cid) ||
@@ -4259,36 +4349,55 @@ function startClusterGather(anchorCid) {
           break;
         }
       }
-      // Damped pull: sqrt(dist) prevents runaway acceleration at large distances
-      const pull = Math.min(Math.sqrt(dist) * 0.4 * ramp * dt * coupling, dist * 0.3);
-      const mx = (dx / dist) * pull, my = (dy / dist) * pull;
-      for (const n of currentNodes) {
-        if (n.cluster === cid && !lockedNodes.has(n.id)) {
-          n.x += mx;
-          n.y += my;
+      for (const isl of islands) {
+        // Find nearest anchor island to pull toward
+        let nearest = anchorIslands[0];
+        let nearestDist = Infinity;
+        for (const ai of anchorIslands) {
+          const dx = ai.cx - isl.cx, dy = ai.cy - isl.cy;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < nearestDist) { nearestDist = d; nearest = ai; }
+        }
+        if (!nearest) continue;
+
+        const dx = nearest.cx - isl.cx, dy = nearest.cy - isl.cy;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const pull = Math.min(Math.sqrt(dist) * 0.4 * ramp * dt * coupling, dist * 0.3);
+        const mx = (dx / dist) * pull, my = (dy / dist) * pull;
+        for (const n of isl.members) {
+          if (!lockedNodes.has(n.id)) { n.x += mx; n.y += my; }
         }
       }
     }
 
-    // Gently repulse uninvolved clusters away from the gathering mass
+    // Gently repulse uninvolved clusters — island-aware: repulse each island
+    // from the nearest anchor island, not a phantom centroid.
     for (const cid of uninvolvedCids) {
-      const cc = clusterCentroid(cid);
-      const dx = cc.x - ac.x, dy = cc.y - ac.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const repulse = Math.max(0, 250 - dist) * 0.002 * ramp * dt;
-      if (repulse > 0) {
-        const mx = (dx / dist) * repulse, my = (dy / dist) * repulse;
-        for (const n of currentNodes) {
-          if (n.cluster === cid && !lockedNodes.has(n.id)) {
-            n.x += mx;
-            n.y += my;
+      const islands = islandCache.get(cid) || [];
+      for (const isl of islands) {
+        let nearest = anchorIslands[0];
+        let nearestDist = Infinity;
+        for (const ai of anchorIslands) {
+          const dx = isl.cx - ai.cx, dy = isl.cy - ai.cy;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < nearestDist) { nearestDist = d; nearest = ai; }
+        }
+        if (!nearest) continue;
+
+        const dx = isl.cx - nearest.cx, dy = isl.cy - nearest.cy;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const repulse = Math.max(0, 250 - dist) * 0.002 * ramp * dt;
+        if (repulse > 0) {
+          const mx = (dx / dist) * repulse, my = (dy / dist) * repulse;
+          for (const n of isl.members) {
+            if (!lockedNodes.has(n.id)) { n.x += mx; n.y += my; }
           }
         }
       }
     }
 
-    // Cluster-cluster collision: prevent overlapping bounding circles
-    separateClusters(allCids, anchorCid, dt);
+    // Island-aware collision: prevent overlapping bounding circles
+    separateClusters(allCids, anchorCid, dt, islandCache);
 
     // Pin anchor cluster nodes to their saved (drag-updated) positions
     for (const n of currentNodes) {
@@ -4941,7 +5050,7 @@ async function loadAndAnalyze(force) {
       const nSys = codemapSections ? codemapSections.size : 0;
       statusEl.textContent = `live -- ${csvNodes.length} nodes, ${csvEdges.length} edges, ${nSys} systems`;
       statusEl.className = 'live';
-      if (isUserInteracting()) { pendingRebuild = true; schedulePendingRebuild(); } else { rebuild(); }
+      rebuild();
     } else {
       // Fallback: AST analysis in browser (legacy path)
       const html = await fetch(SRC).then(r => r.text());
@@ -4960,7 +5069,7 @@ async function loadAndAnalyze(force) {
       const nSys = codemapSections ? codemapSections.size : 0;
       statusEl.textContent = `live -- ${result.functions.size} funcs, ${nSys} systems`;
       statusEl.className = 'live';
-      if (isUserInteracting()) { pendingRebuild = true; schedulePendingRebuild(); } else { rebuild(); }
+      rebuild();
     }
   } catch (e) {
     statusEl.textContent = 'fetch error: ' + e.message;

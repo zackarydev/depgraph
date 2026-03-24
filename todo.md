@@ -1,13 +1,6 @@
 # depgraph todo
 
-When a node is clicked all nodes connected to it should start being pulled in to the clicked node.
-
-The Harder/longer a node is pressed the more the links strength is high. Other clusters may need to be completely deformed to allow it. Ensure that AST importance is maintained with respect to node separation.
-
-
 Run claude when the AST is done, and ask him to group them with respect to importance, and grouped by "idea", within the context of the repository its in.
-
-Pressing on X should apply slight forces on the currently selected nodes. Selected nodes occur when Shift-Clicking. Upon pressing and holding X forces are applied. After releasing all nodes become fixed in place. Note that the forces applied to nodes during X should be to spread them out, and to restore cohesion between modules based on the edge weights.
 
 Edge weights should change dynamically based on the current context the user is navigating. Please change the Time Arrows to be a bit more advanced. Goto T0, goto Last, 
 
@@ -17,10 +10,17 @@ zKeyRaf, it's being written to in zLoop which occurs INSIDE startZTimeTravel, bu
 
 ---
 
-With respect to simulator adding nodes.
+With respect to simulator adding nodes in realtime. I think that sometimes clusters don't even exist until they appear but the hypergraph isn't updated. I feel like when new nodes are added they should PULL and REPULSE based on the edges in the hypergraph. Maybe we need to create a new control that is "Apply Edge weights", perhaps that's what the "X" control should've been. But just to keep things distinct, a new control should be created. I propose F for forces.
 
-And also, I think that sometimes clusters don't even exist until they appear but the hypergraph isn't updated. I feel like when new nodes are added they should PULL and REPULSE based on the edges in the hypergraph. Maybe we need to create a new control that is "Apply Edge weights", perhaps that's what the "X" control should've been. But just to keep things distinct, a new control should be created. I propose F for forces.
-
---
+---
 
 Some of the cluster labels are rendered WAY too far away from their cluster. Perhaps it should be spring based?
+
+---
+
+There's an bug where if the cluster nodes are FAR away, the repulsion mechanism of cluster probably creates a centroid-repulsion. So everything gets repulsed around that centroid location. Resulting in some chaotic repulsion/pull forces. My guess is that cluster attraction is probably cheap to do, but its probably being done naively via meta edges. Those meta edges should instead create connectivity islands based on the position of the nodes in the UI too. Ex: a cluster with nodes that are physically far apart should probably create new meta edges, effectively separating the cluster. Perhaps.
+
+---
+Control + Clicking in white space should create a repulsion bubble at that location, not to be confused with "returning to their T0 position" which is the current behavior.
+
+---
