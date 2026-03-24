@@ -224,6 +224,7 @@ const SPATIAL_DECAY_MS = 7 * 24 * 3600 * 1000; // 1 week half-life
 let lastHash = null;
 let codemapSections = null;
 let codemapImportance = new Map();
+let csvClusterMap = new Map();  // id → cluster name from CSV, used as fallback when codemap doesn't cover a node
 let analysisResult = null;
 let savedPositions = new Map();
 let stickyNodes = new Set();
@@ -295,6 +296,32 @@ let clusterGatherAnchorCid = null;
 // Spring-back: non-participating nodes displaced by collision return to their origin
 const springNodes = new Map(); // id -> { origX, origY, node }
 let springRAF = null;
+
+// Deferred rebuild: when a graph update arrives during user interaction,
+// stash the flag and apply once the interaction ends.
+let pendingRebuild = false;
+let pendingRebuildTimer = null;
+
+function isUserInteracting() {
+  return !!(forcePressDragNode || attractorNode || attractorRAF ||
+    groupMoveActive || spacePullRAF || neighborGatherRAF || clusterGatherRAF ||
+    xKeyRAF || xKeyHeld || zKeyRAF || zKeyHeld || animationRAF || clickPullRAF ||
+    clusterDragActive);
+}
+
+function schedulePendingRebuild() {
+  if (pendingRebuildTimer) return;
+  pendingRebuildTimer = setInterval(() => {
+    if (!isUserInteracting()) {
+      clearInterval(pendingRebuildTimer);
+      pendingRebuildTimer = null;
+      if (pendingRebuild) {
+        pendingRebuild = false;
+        rebuild();
+      }
+    }
+  }, 200);
+}
 
 function springDisplace(n) {
   // Record original position if not already tracked
@@ -931,14 +958,27 @@ function clusterFunctions(analysis) {
 
   if (codemapSections && codemapSections.size > 0) {
     let clusterId = 0;
-    for (const [, funcs] of codemapSections) {
+    const sectionNameToId = new Map();
+    for (const [sectionName, funcs] of codemapSections) {
+      sectionNameToId.set(sectionName, clusterId);
       for (const fname of funcs) {
         if (functions.has(fname)) result.set(fname, clusterId);
       }
       clusterId++;
     }
+    // Fallback: assign uncovered nodes using CSV cluster names
     for (const fname of functions.keys()) {
-      if (!result.has(fname)) result.set(fname, clusterId);
+      if (!result.has(fname) && csvClusterMap.has(fname)) {
+        const csvCluster = csvClusterMap.get(fname);
+        if (!sectionNameToId.has(csvCluster)) {
+          sectionNameToId.set(csvCluster, clusterId++);
+        }
+        result.set(fname, sectionNameToId.get(csvCluster));
+      }
+    }
+    const unclusteredId = clusterId;
+    for (const fname of functions.keys()) {
+      if (!result.has(fname)) result.set(fname, unclusteredId);
     }
     return result;
   }
@@ -986,6 +1026,12 @@ function nameClusters(analysis, clusters) {
     for (const [section] of codemapSections) {
       clusterNames.set(clusterId, section);
       clusterId++;
+    }
+    // Name any CSV-derived clusters that aren't in the codemap
+    for (const [fname, cid] of clusters) {
+      if (!clusterNames.has(cid) && csvClusterMap.has(fname)) {
+        clusterNames.set(cid, csvClusterMap.get(fname));
+      }
     }
     const maxId = Math.max(...clusters.values());
     if (!clusterNames.has(maxId)) clusterNames.set(maxId, 'Other');
@@ -1839,23 +1885,50 @@ function warmRestart(nodes, links) {
 
   if (newNodes.length === 0) return;
 
+  // Compute cluster centers for placement and tethering
+  const clusterCenter = new Map();
+  const clusterCounts = new Map();
+  for (const n of nodes) {
+    if (n.cluster == null || newNodes.includes(n)) continue;
+    if (n.x == null) continue;
+    const c = n.cluster;
+    if (!clusterCenter.has(c)) { clusterCenter.set(c, { x: 0, y: 0 }); clusterCounts.set(c, 0); }
+    clusterCenter.get(c).x += n.x;
+    clusterCenter.get(c).y += n.y;
+    clusterCounts.set(c, clusterCounts.get(c) + 1);
+  }
+  for (const [c, center] of clusterCenter) {
+    const cnt = clusterCounts.get(c);
+    center.x /= cnt;
+    center.y /= cnt;
+  }
+
   // Place new nodes near their cluster center
   for (const n of newNodes) {
-    const siblings = nodes.filter(m => m.cluster === n.cluster && m !== n && m.x != null);
-    if (siblings.length > 0) {
-      let cx = 0, cy = 0;
-      for (const m of siblings) { cx += m.x; cy += m.y; }
-      cx /= siblings.length; cy /= siblings.length;
-      n.x = cx + (Math.random() - 0.5) * 50;
-      n.y = cy + (Math.random() - 0.5) * 50;
+    const center = clusterCenter.get(n.cluster);
+    if (center) {
+      const angle = Math.random() * 2 * Math.PI;
+      const r = 10 + Math.random() * 20;
+      n.x = center.x + Math.cos(angle) * r;
+      n.y = center.y + Math.sin(angle) * r;
     } else {
-      n.x = (Math.random() - 0.5) * 300;
-      n.y = (Math.random() - 0.5) * 300;
+      // No existing cluster members — find overall center of all placed nodes
+      let ox = 0, oy = 0, cnt = 0;
+      for (const m of nodes) {
+        if (m.x != null && !newNodes.includes(m)) { ox += m.x; oy += m.y; cnt++; }
+      }
+      if (cnt > 0) { ox /= cnt; oy /= cnt; }
+      const angle = Math.random() * 2 * Math.PI;
+      const r = 80 + Math.random() * 60;
+      n.x = ox + Math.cos(angle) * r;
+      n.y = oy + Math.sin(angle) * r;
     }
   }
 
-  // Brief collision resolution
-  for (let iter = 0; iter < 20; iter++) {
+  // Collision resolution with cluster tethering to prevent drift
+  const newNodeSet = new Set(newNodes);
+  for (let iter = 0; iter < 30; iter++) {
+    // Collision pushes
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const a = nodes[i], b = nodes[j];
@@ -1864,19 +1937,30 @@ function warmRestart(nodes, links) {
         const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
         const minDist = (a.radius || 4) + (b.radius || 4) + 6;
         if (dist < minDist) {
-          const push = (minDist - dist) * 0.4;
+          const push = (minDist - dist) * 0.3;
           const nx = (dx / dist) * push;
           const ny = (dy / dist) * push;
-          // Only move new nodes
-          if (newNodes.includes(a) && newNodes.includes(b)) {
+          if (newNodeSet.has(a) && newNodeSet.has(b)) {
             a.x -= nx; a.y -= ny;
             b.x += nx; b.y += ny;
-          } else if (newNodes.includes(a)) {
+          } else if (newNodeSet.has(a)) {
             a.x -= nx * 2; a.y -= ny * 2;
-          } else if (newNodes.includes(b)) {
+          } else if (newNodeSet.has(b)) {
             b.x += nx * 2; b.y += ny * 2;
           }
         }
+      }
+    }
+    // Pull new nodes back toward their cluster center to counteract drift
+    for (const n of newNodes) {
+      const center = clusterCenter.get(n.cluster);
+      if (!center) continue;
+      const dx = center.x - n.x, dy = center.y - n.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > 30) {
+        const pull = 0.1;
+        n.x += dx * pull;
+        n.y += dy * pull;
       }
     }
   }
@@ -4844,9 +4928,11 @@ async function loadAndAnalyze(force) {
       const csvNodes = parseNodesCSV(nodesText);
       const csvEdges = parseEdgesCSV(edgesText);
 
-      // Set importance from CSV nodes
+      // Set importance and cluster info from CSV nodes
+      csvClusterMap.clear();
       for (const n of csvNodes) {
         if (n.importance) codemapImportance.set(n.id, n.importance);
+        if (n.cluster) csvClusterMap.set(n.id, n.cluster);
       }
 
       const result = buildAnalysisFromCSV(csvNodes, csvEdges);
@@ -4855,7 +4941,7 @@ async function loadAndAnalyze(force) {
       const nSys = codemapSections ? codemapSections.size : 0;
       statusEl.textContent = `live -- ${csvNodes.length} nodes, ${csvEdges.length} edges, ${nSys} systems`;
       statusEl.className = 'live';
-      rebuild();
+      if (isUserInteracting()) { pendingRebuild = true; schedulePendingRebuild(); } else { rebuild(); }
     } else {
       // Fallback: AST analysis in browser (legacy path)
       const html = await fetch(SRC).then(r => r.text());
@@ -4874,7 +4960,7 @@ async function loadAndAnalyze(force) {
       const nSys = codemapSections ? codemapSections.size : 0;
       statusEl.textContent = `live -- ${result.functions.size} funcs, ${nSys} systems`;
       statusEl.className = 'live';
-      rebuild();
+      if (isUserInteracting()) { pendingRebuild = true; schedulePendingRebuild(); } else { rebuild(); }
     }
   } catch (e) {
     statusEl.textContent = 'fetch error: ' + e.message;

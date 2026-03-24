@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 // Tools dev server: static files + SSE for depgraph focus events
-// Usage: node tools/depgraph-server.mjs [port]
+// Usage: node depgraph-server.mjs [port] [--simulate[=interval_ms]]
 
 import { createServer } from 'node:http';
 import { readFile, readFileSync, writeFile, watch } from 'node:fs';
 import { join, extname, resolve } from 'node:path';
 import { exec } from 'node:child_process';
 import { generate as generateGraph } from './codegen/graphgen.mjs';
+import { startSimulation } from './codegen/simulator.mjs';
 
-const PORT = parseInt(process.argv[2] || '3800', 10);
+// Parse args: support --simulate and --simulate=2000
+const args = process.argv.slice(2);
+const simArg = args.find(a => a.startsWith('--simulate'));
+const SIMULATE = !!simArg;
+const SIM_INTERVAL = simArg && simArg.includes('=') ? parseInt(simArg.split('=')[1], 10) : 3000;
+const PORT = parseInt(args.find(a => !a.startsWith('-')) || '3800', 10);
 const ROOT = resolve(import.meta.dirname, '.');
 const INSPECT_FILE = join(ROOT, 'inspect.json');
 const FOCUS_FILE = join(ROOT, 'runtime/depgraph-focus.json');
@@ -86,18 +92,23 @@ function triggerGraphgen() {
   }, 200); // debounce 200ms
 }
 
-// Generate on startup
-try { generateGraph(INSPECT_FILE); } catch (e) { console.error('[graphgen] initial error:', e.message); }
+if (SIMULATE) {
+  // Simulation mode: generate evolving synthetic data instead of watching files
+  console.log(`\x1b[35m[sim]\x1b[0m simulation mode enabled (interval: ${SIM_INTERVAL}ms)`);
+  startSimulation(join(ROOT, 'runtime'), broadcastGraph, SIM_INTERVAL);
+} else {
+  // Normal mode: generate on startup, watch for file changes
+  try { generateGraph(INSPECT_FILE); } catch (e) { console.error('[graphgen] initial error:', e.message); }
 
-// Watch source file and codemap for changes
-watch(TARGET_SRC, { persistent: true }, () => {
-  console.log('[watch] src changed');
-  triggerGraphgen();
-});
-watch(CODEMAP_FILE, { persistent: true }, () => {
-  console.log('[watch] codemap changed');
-  triggerGraphgen();
-});
+  watch(TARGET_SRC, { persistent: true }, () => {
+    console.log('[watch] src changed');
+    triggerGraphgen();
+  });
+  watch(CODEMAP_FILE, { persistent: true }, () => {
+    console.log('[watch] codemap changed');
+    triggerGraphgen();
+  });
+}
 
 // ── HTTP server ────────────────────────────────────
 function isLocal(req) {
