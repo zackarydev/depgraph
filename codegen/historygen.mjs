@@ -222,21 +222,36 @@ export function generateHistory(inspectPath) {
   }
 
   const nodes = [];
+  const memberOfEdges = []; // function → cluster edges, added after node indices are assigned
+
+  // Cluster nodes first — they appear at tick 0
+  const clusterNames = codemap ? [...codemap.keys()] : [];
+  for (const clusterName of clusterNames) {
+    nodes.push({
+      name: clusterName,
+      type: 'cluster',
+      line: 0,
+      importance: 5,
+    });
+  }
+
+  // Build function → cluster name lookup
+  const funcToCluster = new Map();
+  if (codemap) {
+    for (const [section, funcs] of codemap) {
+      for (const fname of funcs) {
+        funcToCluster.set(fname, section);
+      }
+    }
+  }
 
   // Functions
   for (const [name, info] of analysis.functions) {
-    let cluster = '';
-    if (codemap) {
-      for (const [section, funcs] of codemap) {
-        if (funcs.includes(name)) { cluster = section; break; }
-      }
-    }
     nodes.push({
       name,
       type: 'function',
       line: info.line,
       importance: importance.get(name) || 3,
-      cluster,
     });
   }
 
@@ -249,27 +264,40 @@ export function generateHistory(inspectPath) {
       type: 'global',
       line: gInfo ? gInfo.line : 0,
       importance: 1,
-      cluster: '',
     });
   }
 
-  // Sort by source line
-  nodes.sort((a, b) => a.line - b.line);
+  // Sort: cluster nodes first (line 0), then by source line
+  nodes.sort((a, b) => {
+    if (a.type === 'cluster' && b.type !== 'cluster') return -1;
+    if (a.type !== 'cluster' && b.type === 'cluster') return 1;
+    return a.line - b.line;
+  });
 
   // Assign numeric indices and build lookup
   const nameToIdx = new Map();
   nodes.forEach((n, i) => nameToIdx.set(n.name, i));
 
-  // Build cluster name → index mapping
-  const clusterNames = [...new Set(nodes.map(n => n.cluster).filter(c => c))];
-  const clusterToIdx = new Map();
-  clusterNames.forEach((c, i) => clusterToIdx.set(c, i));
+  // ── Assign ticks ──────────────────────────────────
+  // Cluster nodes at tick 0, everything else in sorted order starting at 1
+  const nodeTick = new Map();
+  let tick = 0;
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].type === 'cluster') {
+      nodeTick.set(i, 0);
+    } else {
+      nodeTick.set(i, ++tick);
+    }
+  }
 
-  // ── Assign ticks: each node gets a tick based on sorted order ──
-  // Edges appear at the tick of whichever endpoint came last.
-
-  const nodeTick = new Map(); // nodeIdx → tick
-  nodes.forEach((n, i) => nodeTick.set(i, i));
+  // ── Build memberOf edges: function → cluster ──────
+  for (const [fname, clusterName] of funcToCluster) {
+    const funcIdx = nameToIdx.get(fname);
+    const clusterIdx = nameToIdx.get(clusterName);
+    if (funcIdx !== undefined && clusterIdx !== undefined) {
+      memberOfEdges.push({ label: 'memberOf', source: funcIdx, target: clusterIdx });
+    }
+  }
 
   // ── Compute edges ─────────────────────────────────
   // Matches graphgen's full edge taxonomy:
@@ -344,19 +372,30 @@ export function generateHistory(inspectPath) {
 
   // ── Build CSV rows ─────────────────────────────────
 
+  const allEdges = [...memberOfEdges, ...edges];
   const rows = [];
+
+  // Build cluster name → numeric ID for the flat cluster column
+  const clusterNameToNum = new Map();
+  clusterNames.forEach((c, i) => clusterNameToNum.set(c, i));
 
   // Emit nodes at their ticks
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
     const t = nodeTick.get(i);
-    const clusterIdx = n.cluster ? clusterToIdx.get(n.cluster) : '';
     const imp = n.importance / 10; // normalize to 0-1 range
-    rows.push([t, 'NODE', n.name, i, '', imp, clusterIdx].map(escapeCSV).join(','));
+    // cluster column: cluster nodes get their own number, functions get their cluster's number, empty if none
+    let clusterNum = '';
+    if (n.type === 'cluster') {
+      clusterNum = clusterNameToNum.get(n.name) ?? '';
+    } else if (funcToCluster.has(n.name)) {
+      clusterNum = clusterNameToNum.get(funcToCluster.get(n.name)) ?? '';
+    }
+    rows.push([t, 'NODE', n.name, i, '', imp, clusterNum].map(escapeCSV).join(','));
   }
 
   // Emit edges at the tick of the later endpoint
-  for (const e of edges) {
+  for (const e of allEdges) {
     const t = Math.max(nodeTick.get(e.source), nodeTick.get(e.target));
     rows.push([t, 'EDGE', e.label, e.source, e.target, '', ''].map(escapeCSV).join(','));
   }
@@ -382,8 +421,9 @@ export function generateHistory(inspectPath) {
   const outPath = join(runtimeDir, 'history.csv');
   writeFileSync(outPath, csv);
 
-  console.log(`[historygen] ${nodes.length} nodes, ${edges.length} edges → ${outPath}`);
-  return { outPath, nNodes: nodes.length, nEdges: edges.length };
+  const nClusters = clusterNames.length;
+  console.log(`[historygen] ${nodes.length} nodes (${nClusters} clusters), ${allEdges.length} edges → ${outPath}`);
+  return { outPath, nNodes: nodes.length, nEdges: allEdges.length };
 }
 
 // ── CLI ──────────────────────────────────────────────

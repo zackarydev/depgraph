@@ -11,8 +11,9 @@
 import { open } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-export function createFileSource(filepath) {
+export function createFileSource(filepath, opts = {}) {
   const path = resolve(filepath);
+  const follow = opts.follow ?? false; // when true, EOF means "wait for more" not "done"
   let fh = null;           // file handle
   let _header = null;
   let dataOffset = 0;      // byte offset where data rows begin (after header + newline)
@@ -22,6 +23,8 @@ export function createFileSource(filepath) {
   const BUF_SIZE = 4096;
 
   // Read the next raw line from the file. Returns null at EOF.
+  // In follow mode, a partial line (no trailing newline) is kept in remainder
+  // rather than flushed, since the writer may not have finished the line yet.
   async function readLine() {
     while (true) {
       const nlIdx = remainder.indexOf('\n');
@@ -36,7 +39,12 @@ export function createFileSource(filepath) {
       const buf = Buffer.alloc(BUF_SIZE);
       const { bytesRead } = await fh.read(buf, 0, BUF_SIZE, offset);
       if (bytesRead === 0) {
-        // EOF — flush remainder
+        if (follow) {
+          // Don't flush remainder — it may be a partially written line.
+          // Caller will retry on the next interval.
+          return null;
+        }
+        // Not following — flush remainder as final line
         if (remainder.trim().length > 0) {
           const last = remainder.trim();
           remainder = '';
@@ -67,7 +75,7 @@ export function createFileSource(filepath) {
     //   "tick" → returns all consecutive rows sharing the same t value
     async next(mode = 'line') {
       const first = await readLine();
-      if (first === null) return null;
+      if (first === null) return follow ? [] : null;
 
       if (mode === 'line') return [first];
 
