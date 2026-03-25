@@ -313,6 +313,10 @@ let clusterGatherRAF = null;
 let clusterGatherHeld = false;
 let clusterGatherAnchorCid = null;
 
+// Intra-cluster gather (pull all nodes in a cluster toward its centroid)
+let intraClusterGatherRAF = null;
+let intraClusterGatherHeld = false;
+
 // Spring-back: non-participating nodes displaced by collision return to their origin
 const springNodes = new Map(); // id -> { origX, origY, node }
 let springRAF = null;
@@ -324,7 +328,7 @@ let pendingRebuildTimer = null;
 
 function isUserInteracting() {
   return !!(forcePressDragNode || attractorNode || attractorRAF ||
-    groupMoveActive || spacePullRAF || neighborGatherRAF || clusterGatherRAF ||
+    groupMoveActive || spacePullRAF || neighborGatherRAF || clusterGatherRAF || intraClusterGatherRAF ||
     xKeyRAF || xKeyHeld || zKeyRAF || zKeyHeld || traceRAF || tKeyHeld || traceHeld ||
     animationRAF || clickPullRAF || clusterDragActive);
 }
@@ -2823,7 +2827,11 @@ function clusterLabelDrag(getMembersFn) {
       // If space is already held, start cluster gather instead of drag
       if (spaceKeyDown && d.cid != null) {
         d._clusterGathering = true;
-        startClusterGather(d.cid);
+        if (e.sourceEvent && e.sourceEvent.shiftKey) {
+          startIntraClusterGather(d.cid);
+        } else {
+          startClusterGather(d.cid);
+        }
       }
       d3.select(this).style('cursor', 'grabbing');
     })
@@ -4731,6 +4739,69 @@ function stopClusterGather() {
 }
 
 // ═══════════════════════════════════════════════════════
+// INTRA-CLUSTER GATHER (pull cluster nodes toward cluster centroid)
+// ═══════════════════════════════════════════════════════
+
+function startIntraClusterGather(anchorCid) {
+  if (intraClusterGatherRAF || !currentNodes) return;
+  intraClusterGatherHeld = true;
+
+  // Clear spring-back entries for cluster nodes so springs don't fight
+  for (const n of currentNodes) {
+    if (n.cluster === anchorCid) springNodes.delete(n.id);
+  }
+
+  let lastFrameTime = performance.now();
+  const startTime = performance.now();
+
+  function loop() {
+    if (!intraClusterGatherHeld || !currentNodes) return;
+
+    const now = performance.now();
+    const dt = Math.min(now - lastFrameTime, 50) / 16.67;
+    lastFrameTime = now;
+    const ramp = Math.min(1, (now - startTime) / 800);
+
+    // Gather cluster members toward their centroid
+    const members = currentNodes.filter(n => n.cluster === anchorCid);
+    if (members.length < 2) { stopIntraClusterGather(); return; }
+
+    let cx = 0, cy = 0;
+    for (const m of members) { cx += m.x; cy += m.y; }
+    cx /= members.length; cy /= members.length;
+
+    for (const n of members) {
+      if (lockedNodes.has(n.id)) continue;
+      const dx = cx - n.x, dy = cy - n.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const pull = Math.min(Math.sqrt(dist) * 0.5 * ramp * dt, dist * 0.3);
+      n.x += (dx / dist) * pull;
+      n.y += (dy / dist) * pull;
+    }
+
+    renderPositions();
+    intraClusterGatherRAF = requestAnimationFrame(loop);
+  }
+  intraClusterGatherRAF = requestAnimationFrame(loop);
+}
+
+function stopIntraClusterGather() {
+  intraClusterGatherHeld = false;
+  if (intraClusterGatherRAF) { cancelAnimationFrame(intraClusterGatherRAF); intraClusterGatherRAF = null; }
+  focusedClusterId = null;
+  applyMetaLinkFocus();
+  if (currentNodes) {
+    for (const n of currentNodes) {
+      if (n.x != null) {
+        stickyNodes.add(n.id);
+        savedPositions.set(n.id, { x: n.x, y: n.y });
+      }
+    }
+  }
+  pushArrangement('intra-cluster-gather', []);
+}
+
+// ═══════════════════════════════════════════════════════
 // QUICK-GATHER / GROUP-GATHER (pull selected nodes toward centroid or target)
 // ═══════════════════════════════════════════════════════
 let spacePullIsGroupGather = false;
@@ -4843,7 +4914,11 @@ document.addEventListener('keydown', (e) => {
     if (!e.repeat) {
       // Cluster gather: active drag or previously clicked cluster label
       if (focusedClusterId != null) {
-        startClusterGather(focusedClusterId);
+        if (e.shiftKey) {
+          startIntraClusterGather(focusedClusterId);
+        } else {
+          startClusterGather(focusedClusterId);
+        }
         return;
       }
       const anchorNode = forcePressDragNode || selectedNode;
@@ -5008,6 +5083,7 @@ document.addEventListener('keyup', (e) => {
     if (spacePullHeld) stopSpacePull();
     if (neighborGatherHeld) stopNeighborGather();
     if (clusterGatherHeld) stopClusterGather();
+    if (intraClusterGatherHeld) stopIntraClusterGather();
   }
 });
 

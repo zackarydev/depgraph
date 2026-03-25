@@ -15,20 +15,16 @@
 
 ## Gravity Well
 
-- **Force Touch** (macOS trackpad, Safari): force-press a node to pull neighbors in
-- **Pointer Pressure** (Chrome/Firefox): press hard on a trackpad node to activate
-- **Shift+Hold drag** (fallback for mice): starts gravity well after 0.55s delay
-- Works during drag too — drag + force-press to move and attract simultaneously
-- Releasing force/pressure saves the pulled arrangement
-- From an **unselected** node: locked nodes are not affected
-- From a **selected** node: all neighbors are pulled, including locked ones
+- **Click cluster label + Shift + Hold Space** — *Cluster Blackhole*: pull all cluster nodes towards cluster centroid, collapses cluster
+- **Control-click cluster label** - *Cluster Shrink*: all nodes and cluster boundary shrinks centered on its centroid
+
 
 ## Rewind
 
 - **Hold X** — *Rewind*: all unlocked nodes smoothly return to their original layout (T0). Saves a time point on release.
 - **Click+Hold a node, then X** — *Snap Back*: only that held node returns to T0 (fast)
-- **Shift+X held, then click nodes** — *Dismiss*: each clicked node snaps back to T0 individually
-- **Control+Click node** - *Dismiss*: the clicked node snaps back to T0
+- **Shift+X held, then click nodes** — *Dismiss*: each clicked node snaps back to T0 individually, similar to control-click
+- **Control+Click node** - *Dismiss*: the clicked node snaps back to T0, similar to shift-x
 - Release X or mouse at any time to stop — nodes stay where they are
 - Locked nodes are not affected by rewind
 
@@ -48,7 +44,6 @@ Z is the temporal opposite of X: X rewinds node positions toward the original la
 - **Click node + Hold space** - *Stranger Gather*: pull unselected neighbors towards clicked node (works whether the clicked node is selected or not)
 - **Click node + Shift + Hold Space** (with 2+ selected nodes) - *Group Gather*: pull selected nodes towards clicked node
 - **Click cluster label + Hold Space** — *Extra-Cluster Gather*: pull all clusters connected (via meta-edges) toward the clicked cluster. Uninvolved clusters are gently repulsed outward. Release Space to stop.
-- - **Click cluster label + Shift + Hold Space** - *Intra-Cluster Gather*: pull all cluster nodes towards cluster centroid
 - **Shift+Drag** — *Group Move*: drag all selected nodes together (see Drag section)
 - Locked nodes are not affected by gather/group move
 
@@ -104,6 +99,7 @@ The trace starts from the currently selected/clicked node. If no node is selecte
 | **Hold Space** | Gather selected nodes (to centroid) |
 | **Click node + Space** | Gather unselected neighbors toward node |
 | **Click cluster label + Space** | Gather connected clusters toward label |
+| **Click cluster label + Shift+Space** | Gather cluster nodes toward centroid |
 | **Click node + Shift+Space** | Gather selected nodes toward node |
 | **Space** (nothing selected) | Unlock all |
 | **Enter** | Create user cluster from selection |
