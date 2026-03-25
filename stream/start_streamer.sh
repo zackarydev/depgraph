@@ -1,0 +1,1 @@
+node stream/streamer.mjs --interval=100 --mode=line

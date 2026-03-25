@@ -1071,7 +1071,7 @@ function nameClusters(analysis, clusters) {
     [/player/i, 'Player'],
     [/animate|clock|dt/i, 'Main Loop'],
   ];
-  for (const [cid] of new Set(clusters.values())) {
+  for (const cid of new Set(clusters.values())) {
     const members = [...clusters.entries()].filter(([, c]) => c === cid).map(([f]) => f);
     const allText = members.join(' ');
     let name = null;
@@ -5307,6 +5307,141 @@ function connectGraphSSE() {
   };
 }
 
+// ── Stream SSE: progressive graph build from history.csv stream ──
+// Connects to the streamer server and incrementally builds the graph
+// as rows arrive. Each batch triggers a rebuild with the accumulated state.
+//
+// History format: t,type,label,source,target,importance_xi,cluster
+//   NODE: t, NODE, <name>,     <idx>, ,       <importance>, <clusterIdx>
+//   EDGE: t, EDGE, <edgeType>, <src>, <tgt>,  ,
+let _streamState = null;
+
+function connectStreamSSE(url) {
+  // Accumulated state across batches
+  const state = {
+    idxToName: new Map(),   // numeric index → node name
+    clusterIdxToName: new Map(), // cluster index → cluster name (built from nodes)
+    csvNodes: [],           // parsed node objects for the pipeline
+    csvEdges: [],           // parsed edge objects for the pipeline
+    nodesSeen: new Set(),   // track which indices we've added
+  };
+  _streamState = state;
+
+  const source = new EventSource(url || 'http://127.0.0.1:3801/stream');
+  const statusEl = document.getElementById('status');
+
+  source.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+
+      if (data.type === 'header') {
+        // Reset state on new stream
+        state.idxToName.clear();
+        state.clusterIdxToName.clear();
+        state.csvNodes.length = 0;
+        state.csvEdges.length = 0;
+        state.nodesSeen.clear();
+        statusEl.textContent = 'stream connected';
+        statusEl.className = 'live';
+        return;
+      }
+
+      if (data.type === 'end') {
+        statusEl.textContent = `stream complete -- ${state.csvNodes.length} nodes, ${state.csvEdges.length} edges`;
+        return;
+      }
+
+      if (data.type !== 'rows' || !data.rows) return;
+
+      let changed = false;
+
+      for (const row of data.rows) {
+        const fields = parseCSVLine(row);
+        // fields: [t, type, label, source, target, importance_xi, cluster]
+        const rowType = fields[1];
+        const label = fields[2];
+
+        if (rowType === 'NODE') {
+          const idx = parseInt(fields[3]);
+          const importanceXi = parseFloat(fields[5]) || 0;
+          const clusterIdx = fields[6];
+
+          if (!state.nodesSeen.has(idx)) {
+            state.nodesSeen.add(idx);
+            state.idxToName.set(idx, label);
+
+            // Determine node type: globals have low importance and no cluster
+            const isGlobal = importanceXi <= 0.1 && !clusterIdx;
+            const importance = Math.round(importanceXi * 10) || (isGlobal ? 1 : 3);
+
+            // Build cluster name from index (use index as name until we know better)
+            let clusterName = '';
+            if (clusterIdx !== '' && clusterIdx !== undefined) {
+              const ci = parseInt(clusterIdx);
+              if (!isNaN(ci)) {
+                if (!state.clusterIdxToName.has(ci)) {
+                  state.clusterIdxToName.set(ci, `Cluster ${ci}`);
+                }
+                clusterName = state.clusterIdxToName.get(ci);
+              }
+            }
+
+            state.csvNodes.push({
+              id: label,
+              type: isGlobal ? 'global' : 'function',
+              cluster: clusterName,
+              importance,
+              line: 0,
+            });
+            changed = true;
+          }
+
+        } else if (rowType === 'EDGE') {
+          const srcIdx = parseInt(fields[3]);
+          const tgtIdx = parseInt(fields[4]);
+          const srcName = state.idxToName.get(srcIdx);
+          const tgtName = state.idxToName.get(tgtIdx);
+
+          if (srcName && tgtName) {
+            // Map history labels to the edge types the frontend expects
+            state.csvEdges.push({
+              source: srcName,
+              target: tgtName,
+              type: label,       // calls, calledBy, shared, sharedWrites, importance, uses, writesTo
+              weight: 1,
+            });
+            changed = true;
+          }
+        }
+      }
+
+      if (changed) {
+        // Rebuild the analysis from accumulated nodes + edges
+        csvClusterMap.clear();
+        codemapImportance.clear();
+        for (const n of state.csvNodes) {
+          if (n.importance) codemapImportance.set(n.id, n.importance);
+          if (n.cluster) csvClusterMap.set(n.id, n.cluster);
+        }
+
+        const result = buildAnalysisFromCSV(state.csvNodes, state.csvEdges);
+        result.precomputedEdges = state.csvEdges;
+        analysisResult = result;
+        statusEl.textContent = `streaming -- ${state.csvNodes.length} nodes, ${state.csvEdges.length} edges`;
+        rebuild();
+      }
+    } catch (e) {
+      console.warn('[stream-sse] parse error:', e);
+    }
+  };
+
+  source.onerror = () => {
+    console.warn('[stream-sse] connection lost, retrying...');
+  };
+
+  return source;
+}
+
 function connectFocusSSE() {
   const source = new EventSource(location.origin + '/focus-events');
   source.onmessage = (event) => {
@@ -5397,6 +5532,7 @@ function applyFocus(data) {
 // MAIN LOOP
 // ═══════════════════════════════════════════════════════
 async function loadAndAnalyze(force) {
+  if (streamMode) return; // stream SSE drives the graph, skip bulk loading
   if (!force && !document.getElementById('live-reload').checked) return;
   const statusEl = document.getElementById('status');
   try {
@@ -5472,19 +5608,39 @@ window.addEventListener('resize', () => {
 
 initPullLayerUI();
 
-// Load inspect.json, then start
-fetch('/inspect.json').then(r => r.json()).then(config => {
-  CODEMAP_SRC = '/' + config.codemap.replace(/^\.\//, '');
-  SPATIAL_KEY = `depgraph-spatial-${config.name || 'default'}`;
-  document.querySelector('#toolbar strong').textContent = config.name || 'depgraph';
-  loadSpatialMemory(); // reload with project-specific key
+// Load inspect.json, then start — but check for streamer first
+let streamMode = false;  // when true, bulk CSV loading is disabled
+
+async function initDataPipeline() {
+  // Load inspect.json for project config regardless of mode
+  try {
+    const config = await fetch('/inspect.json').then(r => r.json());
+    CODEMAP_SRC = '/' + config.codemap.replace(/^\.\//, '');
+    SPATIAL_KEY = `depgraph-spatial-${config.name || 'default'}`;
+    document.querySelector('#toolbar strong').textContent = config.name || 'depgraph';
+    loadSpatialMemory();
+  } catch (e) {
+    console.error('Failed to load inspect.json:', e);
+  }
+
+  // Check if streamer is running — if so, let it drive the graph
+  try {
+    const info = await fetch('http://127.0.0.1:3801/').then(r => r.ok ? r.json() : null);
+    if (info && info.status === 'ok') {
+      streamMode = true;
+      console.log('[stream] streamer detected, progressive mode');
+      document.getElementById('status').textContent = 'waiting for stream...';
+      connectStreamSSE('http://127.0.0.1:3801/stream');
+      return;
+    }
+  } catch { /* no streamer, fall through to bulk loading */ }
+
+  // No streamer — use bulk CSV loading
   loadAndAnalyze(true);
   setInterval(() => loadAndAnalyze(false), REFRESH_MS);
-}).catch(e => {
-  console.error('Failed to load inspect.json:', e);
-  loadAndAnalyze(true);
-  setInterval(() => loadAndAnalyze(false), REFRESH_MS);
-});
+}
+
+initDataPipeline();
 
 document.getElementById('live-reload').addEventListener('change', (e) => {
   const statusEl = document.getElementById('status');
@@ -5500,6 +5656,7 @@ document.getElementById('live-reload').addEventListener('change', (e) => {
 
 connectFocusSSE();
 connectGraphSSE();
+
 updateArrNav();
 
 // Restore last arrangement positions if available
