@@ -51,6 +51,11 @@ function generateNodesCSV(analysis, codemap, importance) {
     lines.push([param.id, 'parameter', '', 1, param.line].map(escapeCSV).join(','));
   }
 
+  // Argument nodes
+  for (const arg of (analysis.argumentNodes || [])) {
+    lines.push([arg.id, 'argument', '', 1, arg.line].map(escapeCSV).join(','));
+  }
+
   return lines.join('\n') + '\n';
 }
 

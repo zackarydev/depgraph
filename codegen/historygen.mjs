@@ -92,6 +92,11 @@ export function generateHistory(inspectPath) {
     nodes.push({ name: param.id, type: 'parameter', line: param.line, importance: 1 });
   }
 
+  // Argument nodes
+  for (const arg of analysis.argumentNodes) {
+    nodes.push({ name: arg.id, type: 'argument', line: arg.line, importance: 1 });
+  }
+
   // Sort: clusters first (line 0), then by source line
   nodes.sort((a, b) => {
     if (a.type === 'cluster' && b.type !== 'cluster') return -1;
@@ -161,7 +166,7 @@ export function generateHistory(inspectPath) {
     } else if (funcToCluster.has(n.name)) {
       clusterNum = clusterNameToNum.get(funcToCluster.get(n.name)) ?? '';
     }
-    rows.push([t, 'NODE', n.name, i, '', imp, clusterNum].map(escapeCSV).join(','));
+    rows.push([t, 'NODE', n.name, i, n.type, imp, clusterNum].map(escapeCSV).join(','));
   }
 
   // Emit edges at the tick of the later endpoint

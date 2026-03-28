@@ -5,13 +5,13 @@
 // from here to avoid duplication.
 //
 // The analysis captures ALL declarations: functions, variables (const/let/var),
-// object property structure, and function parameters. No filtering is applied —
-// the UI layer decides what to show.
+// object property structure, function parameters, and call-site arguments.
+// No filtering is applied — the UI layer decides what to show.
 
 import * as acorn from 'acorn';
 import * as walk from 'acorn-walk';
 
-// ── Codemap parsing ──────────────────────────────────
+// ── Codemap parsing ────────────��─────────────────────
 
 export function parseCodemap(md) {
   const sections = new Map();
@@ -56,7 +56,7 @@ export function extractJS(html) {
   return { code, lineOffset };
 }
 
-// ── CSV utility ──────────────────────────────────────
+// ── CSV utility ──────────��───────────────────────────
 
 export function escapeCSV(val) {
   const s = String(val);
@@ -85,7 +85,7 @@ function sourceId(code, start, end) {
   return code.slice(start, end).replace(/\s+/g, ' ').trim();
 }
 
-// ── Value node type from AST ─────────────────────────
+// ── Value node type from AST ──���──────────────────────
 
 function valueNodeType(astNode) {
   switch (astNode.type) {
@@ -105,11 +105,9 @@ function valueNodeType(astNode) {
 }
 
 // ── Object structure analysis ────────────────────────
-// Recursively walks ObjectExpression nodes. For each property:
-//   - Nested objects: creates an intermediate node (parent.key) and recurses
-//   - Leaf values: creates a VALUE node (id = source text, e.g. "0", "null",
-//     "new Map()") connected via an edge whose type IS the key name.
-// This means: keys are edge labels, values are nodes.
+// Recursively walks ObjectExpression nodes. Each property value gets its own
+// unique node (id = path like "parent.key"). No deduplication — each
+// declaration site is a distinct node. Keys become edge labels.
 
 function analyzeObjectStructure(objNode, parentId, lineOffset, code) {
   const nodes = [];
@@ -123,22 +121,21 @@ function analyzeObjectStructure(objNode, parentId, lineOffset, code) {
       : (prop.key.name ?? prop.key.value);
     if (key == null) continue;
 
+    const childId = `${parentId}.${key}`;
     const line = (prop.loc?.start.line || 0) + lineOffset;
 
     if (prop.value && prop.value.type === 'ObjectExpression') {
-      // Nested object: intermediate node with path-based id, then recurse
-      const childId = `${parentId}.${key}`;
+      // Nested object: intermediate node, then recurse
       nodes.push({ id: childId, type: 'object', line });
-      edges.push({ source: parentId, target: childId, type: 'key', weight: 1 });
+      edges.push({ source: parentId, target: childId, type: String(key), weight: 1 });
       const sub = analyzeObjectStructure(prop.value, childId, lineOffset, code);
       nodes.push(...sub.nodes);
       edges.push(...sub.edges);
     } else if (prop.value) {
-      // Leaf value: node id IS the source text of the value
-      const valId = sourceId(code, prop.value.start, prop.value.end);
+      // Leaf value: unique node per property, type from AST
       const valType = valueNodeType(prop.value);
-      nodes.push({ id: valId, type: valType, line });
-      edges.push({ source: parentId, target: valId, type: 'key', weight: 1 });
+      nodes.push({ id: childId, type: valType, line });
+      edges.push({ source: parentId, target: childId, type: String(key), weight: 1 });
     }
   }
 
@@ -146,14 +143,14 @@ function analyzeObjectStructure(objNode, parentId, lineOffset, code) {
 }
 
 // ── Variable init value analysis ─────────────────────
-// For non-object variable initializers, creates a value node for the init
-// expression and an "init" edge from the variable to its value.
+// For non-object variable initializers, creates a unique value node
+// (id = "varName:init") and an "init" edge from the variable.
 
-function analyzeVariableInit(decl, varName, lineOffset, code) {
+function analyzeVariableInit(decl, varName, lineOffset) {
   if (!decl.init) return { nodes: [], edges: [] };
-  if (decl.init.type === 'ObjectExpression') return { nodes: [], edges: [] }; // handled by analyzeObjectStructure
+  if (decl.init.type === 'ObjectExpression') return { nodes: [], edges: [] };
 
-  const valId = sourceId(code, decl.init.start, decl.init.end);
+  const valId = `${varName}:init`;
   const valType = valueNodeType(decl.init);
   const line = (decl.init.loc?.start.line || 0) + lineOffset;
 
@@ -163,9 +160,10 @@ function analyzeVariableInit(decl, varName, lineOffset, code) {
   };
 }
 
-// ── Function analysis ────────────────────────────────
+// ── Function analysis ────────���───────────────────────
+// Now also captures call-site arguments for creating argument nodes.
 
-export function analyzeFunction(funcNode, globals) {
+export function analyzeFunction(funcNode, globals, code) {
   const params = new Set();
   const paramList = [];
   funcNode.params.forEach(p => {
@@ -180,6 +178,7 @@ export function analyzeFunction(funcNode, globals) {
   const reads = new Set();
   const writes = new Set();
   const calls = new Set();
+  const callSites = []; // {callee, line, args: [{index, text, type, line}]}
 
   walk.simple(funcNode.body, {
     VariableDeclaration(node) {
@@ -212,7 +211,21 @@ export function analyzeFunction(funcNode, globals) {
     },
     CallExpression(node) {
       if (node.callee.type === 'Identifier' && globals.has(node.callee.name)) {
-        calls.add(node.callee.name);
+        const calleeName = node.callee.name;
+        calls.add(calleeName);
+        // Capture arguments for this call site
+        if (code && node.arguments.length > 0) {
+          callSites.push({
+            callee: calleeName,
+            line: node.loc?.start.line || 0,
+            args: node.arguments.map((arg, i) => ({
+              index: i,
+              text: sourceId(code, arg.start, arg.end),
+              type: valueNodeType(arg),
+              line: arg.loc?.start.line || 0,
+            })),
+          });
+        }
       } else if (node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier') {
         const name = node.callee.object.name;
         if (!locals.has(name) && globals.has(name)) reads.add(name);
@@ -236,17 +249,18 @@ export function analyzeFunction(funcNode, globals) {
   for (const n of reads) { if (writes.has(n)) rw.add(n); }
   for (const n of rw) { reads.delete(n); writes.delete(n); }
 
-  return { params, paramList, locals, reads, writes, rw, calls, line: 0, endLine: 0, lines: 0 };
+  return { params, paramList, locals, reads, writes, rw, calls, callSites, line: 0, endLine: 0, lines: 0 };
 }
 
 // ── Full code analysis ───────────────────────────────
 //
 // Returns:
 //   globals:        Map<name, {kind, line, endLine}>
-//   functions:      Map<name, {params, paramList, locals, reads, writes, rw, calls, line, endLine, lines}>
-//   valueNodes:     [{id, type, line}]  — deduplicated value/property/object nodes
-//   parameterNodes: [{id, type:'parameter', line, function, name}]
-//   structEdges:    [{source, target, type, weight}]  — structural edges (keys, params, inits)
+//   functions:      Map<name, {params, paramList, locals, reads, writes, rw, calls, callSites, ...}>
+//   valueNodes:     [{id, type, line}]        — unique per declaration site (no dedup)
+//   parameterNodes: [{id, type, line, ...}]   — function parameters
+//   argumentNodes:  [{id, type, line, ...}]   — call-site arguments (dual of parameters)
+//   structEdges:    [{source, target, type, weight}]
 
 export function analyzeCode(code, lineOffset) {
   let ast;
@@ -264,8 +278,9 @@ export function analyzeCode(code, lineOffset) {
 
   const globals = new Map();
   const functions = new Map();
-  const rawValueNodes = [];
+  const valueNodes = [];
   const parameterNodes = [];
+  const argumentNodes = [];
   const structEdges = [];
 
   // Pass 1: collect top-level declarations
@@ -282,14 +297,12 @@ export function analyzeCode(code, lineOffset) {
 
           if (decl.init) {
             if (decl.init.type === 'ObjectExpression') {
-              // Recurse into object structure: key-named edges → value nodes
               const struct = analyzeObjectStructure(decl.init, name, lineOffset, code);
-              rawValueNodes.push(...struct.nodes);
+              valueNodes.push(...struct.nodes);
               structEdges.push(...struct.edges);
             } else {
-              // Non-object init: value node + "init" edge
-              const initResult = analyzeVariableInit(decl, name, lineOffset, code);
-              rawValueNodes.push(...initResult.nodes);
+              const initResult = analyzeVariableInit(decl, name, lineOffset);
+              valueNodes.push(...initResult.nodes);
               structEdges.push(...initResult.edges);
             }
           }
@@ -304,50 +317,81 @@ export function analyzeCode(code, lineOffset) {
     }
   }
 
-  // Pass 2: analyze each function body
+  // Pass 2: analyze each function body (with code for argument capture)
   for (const node of ast.body) {
     if (node.type === 'FunctionDeclaration' && node.id) {
-      const info = analyzeFunction(node, globals);
+      const info = analyzeFunction(node, globals, code);
       info.line = node.loc.start.line + lineOffset;
       info.endLine = node.loc.end.line + lineOffset;
       info.lines = info.endLine - info.line + 1;
       functions.set(node.id.name, info);
 
+      const callerName = node.id.name;
+
       // Collect parameters as nodes
       for (const param of info.paramList) {
-        const paramId = `${node.id.name}:${param.name}`;
+        const paramId = `${callerName}:${param.name}`;
         parameterNodes.push({
           id: paramId,
           type: 'parameter',
           line: param.line + lineOffset,
-          function: node.id.name,
+          function: callerName,
           name: param.name,
         });
         structEdges.push({
-          source: node.id.name,
+          source: callerName,
           target: paramId,
           type: 'param',
           weight: 1,
         });
       }
+
+      // Collect call-site arguments as nodes (homologous to callee's parameters)
+      for (const site of info.callSites) {
+        const callLine = site.line + lineOffset;
+        for (const arg of site.args) {
+          const argId = `${callerName}>${site.callee}@${callLine}:${arg.index}`;
+          const argLine = arg.line + lineOffset;
+          argumentNodes.push({
+            id: argId,
+            type: 'argument',
+            line: argLine,
+            caller: callerName,
+            callee: site.callee,
+            index: arg.index,
+            text: arg.text,
+          });
+          // Edge: caller → argument node
+          structEdges.push({
+            source: callerName,
+            target: argId,
+            type: 'arg',
+            weight: 1,
+          });
+        }
+      }
     }
   }
 
-  // Dedup value nodes — multiple properties can point to the same value (e.g. 0, null).
-  // That shared node is intentional; we just don't emit the node definition twice.
-  const seenIds = new Set([...globals.keys(), ...functions.keys()]);
-  const valueNodes = [];
-  for (const n of rawValueNodes) {
-    if (!seenIds.has(n.id)) {
-      seenIds.add(n.id);
-      valueNodes.push(n);
-    }
+  // Pass 3: create binds edges (argument → parameter) now that all functions are analyzed
+  for (const argNode of argumentNodes) {
+    const calleeInfo = functions.get(argNode.callee);
+    if (!calleeInfo) continue;
+    const param = calleeInfo.paramList[argNode.index];
+    if (!param) continue;
+    const paramId = `${argNode.callee}:${param.name}`;
+    structEdges.push({
+      source: argNode.id,
+      target: paramId,
+      type: 'binds',
+      weight: 1,
+    });
   }
 
-  return { globals, functions, valueNodes, parameterNodes, structEdges };
+  return { globals, functions, valueNodes, parameterNodes, argumentNodes, structEdges };
 }
 
-// ── Edge computation ─────────────────────────────────
+// ── Edge computation ─���───────────────────────────────
 // Computes ALL behavioral edges between nodes. No filtering is applied —
 // every global that a function touches gets a hypergraph edge, regardless
 // of how many other functions also touch it.

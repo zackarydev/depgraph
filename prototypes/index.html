@@ -1549,6 +1549,9 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
 
     // Known function-to-function edge types (shown in all view modes)
     const fnToFnTypes = new Set(['calls', 'calledBy', 'shared', 'sharedWrites', 'importance']);
+    // Value types: deep nodes that only appear at max zoom
+    const valueTypes = new Set(['number', 'string', 'boolean', 'null', 'new', 'array', 'object', 'expression', 'ref', 'arrow', 'regex', 'argument']);
+    const nt = analysis.nodeTypes || new Map();
 
     for (const e of analysis.precomputedEdges) {
       // Auto-register unknown edge types
@@ -1580,10 +1583,21 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
               if (nw > bestWeight) { bestCluster = cid; bestWeight = nw; }
             }
           }
+          // Determine visual properties based on CSV node type
+          const csvType = nt.get(e.target) || 'global';
+          let nodeColor = '#555', nodeRadius = 3, minZoom = 0;
+          if (valueTypes.has(csvType)) {
+            nodeColor = '#666'; nodeRadius = 2; minZoom = 10;
+          } else if (csvType === 'parameter') {
+            nodeColor = '#888'; nodeRadius = 2.5; minZoom = 8;
+          } else if (csvType === 'property') {
+            nodeColor = '#666'; nodeRadius = 2; minZoom = 10;
+          }
           const gNode = {
-            id: e.target, type: 'global', cluster: bestCluster,
+            id: e.target, type: csvType, cluster: bestCluster,
             clusterName: clusterNames.get(bestCluster) || 'misc',
-            affinities: gAffinities, radius: 3, color: '#555',
+            affinities: gAffinities, radius: nodeRadius, color: nodeColor,
+            minZoom,
           };
           nodes.push(gNode);
           nodeMap.set(e.target, gNode);
@@ -2492,12 +2506,41 @@ function applySemanticZoom() {
     const maxFontForWidth = (r * 1.8) / Math.max(1, d.id.length * 0.55);
     const maxFontForHeight = r * 0.9;
     const fontSize = Math.max(2, Math.min(maxFontForWidth, maxFontForHeight));
-    el.attr('opacity', opacity)
+    // Deep nodes: override opacity based on zoom threshold
+    const deepOp = d.minZoom ? Math.max(0, Math.min(1, (k - d.minZoom) / 2)) : 1;
+    el.attr('opacity', opacity * deepOp)
       .attr('font-size', fontSize)
       .attr('dominant-baseline', 'central')
       .attr('dy', 0)
       .attr('fill', '#fff');
   });
+
+  // Deep nodes (value, parameter, property): fade in at high zoom
+  gNodes.selectAll('.node').each(function(d) {
+    if (!d.minZoom) return;
+    const deepOp = Math.max(0, Math.min(1, (k - d.minZoom) / 2));
+    d3.select(this).select('circle').attr('opacity', deepOp);
+    d3.select(this).style('pointer-events', deepOp > 0.1 ? 'all' : 'none');
+  });
+
+  // Hide edges connected to hidden deep nodes
+  if (currentGraph) {
+    const nm = currentGraph.nodeMap;
+    gLinks.selectAll('.link').each(function(l) {
+      const sn = nm.get(l.source);
+      const tn = nm.get(l.target);
+      const sHidden = sn && sn.minZoom && k < sn.minZoom;
+      const tHidden = tn && tn.minZoom && k < tn.minZoom;
+      if (sHidden || tHidden) d3.select(this).attr('stroke-opacity', 0);
+    });
+    gLinks.selectAll('.arrow').each(function(l) {
+      const sn = nm.get(l.source);
+      const tn = nm.get(l.target);
+      const sHidden = sn && sn.minZoom && k < sn.minZoom;
+      const tHidden = tn && tn.minZoom && k < tn.minZoom;
+      if (sHidden || tHidden) d3.select(this).attr('fill-opacity', 0);
+    });
+  }
 
   // Floating cluster labels: fade out as textPath labels fade in (k 2.5→3.5)
   const showClusterLabels = document.getElementById('show-cluster-labels').checked;
@@ -2675,8 +2718,8 @@ const nodeDrag = d3.drag()
 function setupNodeCircle(sel) {
   sel.append('circle')
     .attr('r', d => d.radius * getClusterImportance(d.cluster))
-    .attr('fill', d => d.type === 'global' ? '#333' : d.color)
-    .attr('stroke', d => d.type === 'global' ? '#666' : d3.color(d.color).brighter(0.8))
+    .attr('fill', d => d.type === 'function' ? d.color : '#333')
+    .attr('stroke', d => d.type === 'function' ? d3.color(d.color).brighter(0.8) : '#666')
     .on('click', (e, d) => {
       e.stopPropagation();
       const dragDuration = d._dragStartTime ? Date.now() - d._dragStartTime : 0;
@@ -5872,7 +5915,9 @@ function parseHistoryCSV(text) {
         }
       }
 
-      const nodeType = importanceXi <= 0.1 ? 'global' : 'function';
+      // Column 5 (target) carries the node type for enriched CSVs; fall back to importance heuristic
+      const csvType = fields[4];
+      const nodeType = csvType && csvType !== '' ? csvType : (importanceXi <= 0.1 ? 'global' : 'function');
       nodes.push({ id: name, type: nodeType, cluster: clusterName, importance, line: 0 });
 
     } else if (rowType === 'EDGE') {
@@ -5901,17 +5946,20 @@ function buildAnalysisFromCSV(nodes, edges) {
   // Build the {functions, globals} structure that downstream code expects
   const functions = new Map();
   const globals = new Map();
+  const nodeTypes = new Map(); // id → CSV node type (for zoom-level visibility)
 
   for (const n of nodes) {
+    nodeTypes.set(n.id, n.type);
     if (n.type === 'function') {
       functions.set(n.id, {
         reads: new Set(), writes: new Set(), rw: new Set(), calls: new Set(),
         params: new Set(), locals: new Set(),
         line: n.line, endLine: n.line, lines: 1,
       });
-    } else if (n.type === 'global') {
-      globals.set(n.id, { kind: 'const', line: n.line });
+    } else if (n.type === 'const' || n.type === 'let' || n.type === 'var' || n.type === 'global') {
+      globals.set(n.id, { kind: n.type === 'global' ? 'const' : n.type, line: n.line });
     }
+    // parameter, number, string, null, etc. — tracked via nodeTypes but not in functions/globals
   }
 
   // Populate reads/writes/calls from edges
@@ -5923,7 +5971,7 @@ function buildAnalysisFromCSV(nodes, edges) {
     else if (e.type === 'writesTo') fn.writes.add(e.target);
   }
 
-  return { functions, globals };
+  return { functions, globals, nodeTypes };
 }
 
 function connectGraphSSE() {
@@ -6091,7 +6139,15 @@ function connectStreamSSE(url) {
               }
             }
 
-            const nodeType = importanceXi <= 0.1 ? 'global' : 'function';
+            // Read node type from target column (enriched CSV) or fall back to importance heuristic
+            const csvType = fields[col.target];
+            const nodeType = csvType && csvType !== '' ? csvType : (importanceXi <= 0.1 ? 'global' : 'function');
+
+            // Value/structural types get minZoom for zoom-level visibility
+            const valueTypes = new Set(['number', 'string', 'boolean', 'null', 'new', 'array', 'object', 'expression', 'ref', 'arrow', 'regex', 'property', 'argument']);
+            let minZoom = 0;
+            if (valueTypes.has(nodeType)) minZoom = 10;
+            else if (nodeType === 'parameter') minZoom = 8;
 
             state.csvNodes.push({
               id: nodeName, type: nodeType, cluster: '', importance, line: 0,
@@ -6103,6 +6159,7 @@ function connectStreamSSE(url) {
             if (label) nodeDisplayLabels.set(nodeName, label);
 
             // Add directly to the main graph's data structures
+            const isValueNode = minZoom > 0;
             const node = {
               id: nodeName,
               type: nodeType,
@@ -6110,8 +6167,9 @@ function connectStreamSSE(url) {
               clusterName: clusterName || 'misc',
               affinities: new Map([[clusterIdx, 1.0]]),
               info: null,
-              radius: Math.max(4, importance * 2),
-              color: clusterName ? CLUSTER_COLORS[clusterIdx % CLUSTER_COLORS.length] : '#555',
+              radius: isValueNode ? (nodeType === 'parameter' ? 2.5 : 2) : Math.max(4, importance * 2),
+              color: isValueNode ? '#666' : (clusterName ? CLUSTER_COLORS[clusterIdx % CLUSTER_COLORS.length] : '#555'),
+              minZoom,
             };
 
             // Place the node using physics placement logic
