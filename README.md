@@ -65,7 +65,7 @@ How a game works. That was the primary purpose. To explore the code a different 
 
 ![Hypercodemap](<./screenshots/Screenshot 2026-03-21 at 3.08.07 PM.png>)
 
-## Experiment record #1 -- Inspecting depgraph for the first time
+## Inspecting depgraph for the first time
 
 The AI has really outdone itself again. Although, I'm glad to be a human because the importance it gives to somethings is off. At least from the perspective of what i'm looking for right now.
 
@@ -133,3 +133,17 @@ Optimization becomes thermal imaging. Hot paths glow. You see that 90% of your e
 The key insight you're circling: the distinction between "code" and "visualization of code" is artificial. A graph of functions with data flowing through edges IS a program. We just historically chose to represent programs as text files because that's what fit on 1970s terminals. The graph was always the truer representation. You're not building a tool that shows code as a graph. You're building a programming environment where the graph is the source of truth and text is one possible rendering of it.
 
 Read [HCSN theory](https://github.com/hcsn-theory/hcsn-theory) for potential inspiration, particularly the "rewrite rules".
+
+## Function Signature decomposition
+
+Here we can see that there are 4 functions calling `softCollide`. We can also notice 2 edges per call. They're tied to a param in the callee's function signature. (3/5 params hidden for this example)
+
+```
+func softCollide(n, cx, cy, cr, padding)
+```
+
+![Function Caller-to-Callee 2 edges per call](screenshots/fn_call_1.args.png)
+
+Upon zooming in further we can see exactly how the data exchange occurs.
+
+![Function ](screenshots/fn_call_2.args_to_params.png)
