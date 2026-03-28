@@ -129,7 +129,7 @@ function analyzeObjectStructure(objNode, parentId, lineOffset, code) {
       // Nested object: intermediate node with path-based id, then recurse
       const childId = `${parentId}.${key}`;
       nodes.push({ id: childId, type: 'object', line });
-      edges.push({ source: parentId, target: childId, type: String(key), weight: 1 });
+      edges.push({ source: parentId, target: childId, type: 'key', weight: 1 });
       const sub = analyzeObjectStructure(prop.value, childId, lineOffset, code);
       nodes.push(...sub.nodes);
       edges.push(...sub.edges);
@@ -138,7 +138,7 @@ function analyzeObjectStructure(objNode, parentId, lineOffset, code) {
       const valId = sourceId(code, prop.value.start, prop.value.end);
       const valType = valueNodeType(prop.value);
       nodes.push({ id: valId, type: valType, line });
-      edges.push({ source: parentId, target: valId, type: String(key), weight: 1 });
+      edges.push({ source: parentId, target: valId, type: 'key', weight: 1 });
     }
   }
 

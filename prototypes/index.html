@@ -1282,7 +1282,64 @@ const EDGE_LAYERS = [
     maxThreshold: 1,
     compute() { return []; }, // edges created directly in buildGraph for hypergraph mode
   },
+  {
+    id: 'param',
+    label: 'Parameter',
+    desc: 'fn --> param: function parameter (hypergraph only)',
+    directed: true,
+    color: '#6ecfcf',
+    dash: '2,3',
+    defaultOn: true,
+    defaultThreshold: 1,
+    maxThreshold: 1,
+    compute() { return []; },
+  },
+  {
+    id: 'init',
+    label: 'Initializes',
+    desc: 'var --> val: variable initialization value (hypergraph only)',
+    directed: true,
+    color: '#e8a55d',
+    dash: '2,3',
+    defaultOn: true,
+    defaultThreshold: 1,
+    maxThreshold: 1,
+    compute() { return []; },
+  },
+  {
+    id: 'key',
+    label: 'Object key',
+    desc: 'obj --> val: object property key (hypergraph only)',
+    directed: true,
+    color: '#c4a7e7',
+    dash: '2,3',
+    defaultOn: true,
+    defaultThreshold: 1,
+    maxThreshold: 1,
+    compute() { return []; },
+  },
 ];
+
+// Auto-register unknown edge types discovered in precomputed CSV data
+const AUTO_LAYER_COLORS = ['#9cc', '#c9a', '#ac9', '#ca9', '#9ac', '#a9c'];
+let _autoColorIdx = 0;
+function ensureEdgeLayer(typeId) {
+  if (EDGE_LAYERS.find(l => l.id === typeId)) return;
+  EDGE_LAYERS.push({
+    id: typeId,
+    label: typeId,
+    desc: `Auto-discovered edge type: ${typeId} (hypergraph only)`,
+    directed: true,
+    color: AUTO_LAYER_COLORS[_autoColorIdx++ % AUTO_LAYER_COLORS.length],
+    dash: '2,3',
+    defaultOn: true,
+    defaultThreshold: 1,
+    maxThreshold: 1,
+    compute() { return []; },
+  });
+  // Initialize pull layer state so it's enabled
+  pullLayerState.set(typeId, 1);
+}
 
 function getEnabledEdgeLayers() {
   return EDGE_LAYERS.filter(l => (pullLayerState.get(l.id) || 0) > 0);
@@ -1490,11 +1547,17 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
     const enabledIds = new Set(enabledLayers.map(l => l.id));
     const layerThresholds = new Map(enabledLayers.map(l => [l.id, l.defaultThreshold]));
 
+    // Known function-to-function edge types (shown in all view modes)
+    const fnToFnTypes = new Set(['calls', 'calledBy', 'shared', 'sharedWrites', 'importance']);
+
     for (const e of analysis.precomputedEdges) {
-      // Hypergraph edges (uses/writesTo): only include in hypergraph mode
-      if (e.type === 'uses' || e.type === 'writesTo') {
+      // Auto-register unknown edge types
+      ensureEdgeLayer(e.type);
+
+      // Structural/hypergraph edges: only include in hypergraph mode
+      if (!fnToFnTypes.has(e.type)) {
         if (viewMode !== 'hypergraph') continue;
-        // Create global node if not already present
+        // Create target node on-the-fly if not already present
         if (!nodeMap.has(e.target)) {
           const gScores = new Map();
           const addGScore = (cid, w) => gScores.set(cid, (gScores.get(cid) || 0) + w);
@@ -1505,7 +1568,6 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
               if (cid != null) addGScore(cid, 2.0);
             }
           }
-          // Cluster affinity from users
           const userCluster = clusters.get(e.source) ?? 0;
           addGScore(userCluster, 1.0);
           const gTotal = [...gScores.values()].reduce((a, b) => a + b, 0);
@@ -1527,10 +1589,11 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
           nodeMap.set(e.target, gNode);
         }
       }
-      if (!enabledIds.has(e.type)) continue;
-      const threshold = layerThresholds.get(e.type) || 0;
+      // Check layer enabled: use snapshot for known layers, live state for auto-registered
+      const isEnabled = enabledIds.has(e.type) || (pullLayerState.get(e.type) || 0) > 0;
+      if (!isEnabled) continue;
+      const threshold = layerThresholds.get(e.type) || 1;
       if (e.weight >= threshold) {
-        // Only include edges where both nodes exist in the graph
         if (nodeMap.has(e.source) && nodeMap.has(e.target)) {
           links.push({ source: e.source, target: e.target, type: e.type, weight: e.weight });
         }
