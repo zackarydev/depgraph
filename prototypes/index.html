@@ -3898,6 +3898,21 @@ function affinityBarsHTML(d, clusterNames) {
   return `<div class="section"><div class="section-title">Affinities</div>${bars}</div>`;
 }
 
+function structBarsHTML(d, clusterNames) {
+  if (!d.struct || d.struct.size === 0) return '';
+  const sorted = [...d.struct.entries()].sort((a, b) => b[1] - a[1]);
+  const bars = sorted.map(([cid, weight]) => {
+    const pct = Math.round(weight * 100);
+    const color = CLUSTER_COLORS[cid % CLUSTER_COLORS.length];
+    const name = clusterNames.get(cid) || `system_${cid}`;
+    return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0">
+      <div style="width:${Math.max(4, pct)}%;height:6px;background:${color};border-radius:3px;min-width:4px"></div>
+      <span style="color:${color};white-space:nowrap">${name} ${pct}%</span>
+    </div>`;
+  }).join('');
+  return `<div class="section"><div class="section-title">struct</div>${bars}</div>`;
+}
+
 function applyContextualEdgeWeights(focusId) {
   if (!currentGraph || !currentNodes) return;
   const adj = currentGraph.adjacency;
@@ -3946,6 +3961,8 @@ function selectNode(d, analysis) {
   document.getElementById('info-name').textContent = d.id;
   const clusterNames = currentClusterNames;
   const affinitySection = affinityBarsHTML(d, clusterNames);
+  const structSection = structBarsHTML(d);
+  console.log(d, analysis);
 
   if (d.type === 'global') {
     const users = [];
@@ -3959,6 +3976,7 @@ function selectNode(d, analysis) {
     document.getElementById('info-body').innerHTML = `
       <div class="section"><div class="section-title">Type</div>global variable</div>
       ${affinitySection}
+      ${structSection}
       <div class="section"><div class="section-title">Used by ${users.length} functions</div>
         ${users.map(u => `<span class="tag">${u.fname} (${u.access})</span>`).join('')}
       </div>`;
@@ -5744,26 +5762,76 @@ function parseCSVLine(line) {
   return fields;
 }
 
-function parseNodesCSV(text) {
-  // Format: id,type,cluster,importance,line
+function parseHistoryCSV(text) {
+  // Format: t,type,label,source,target,importance_xi,cluster
+  //   NODE: t, NODE, <name>,     <idx>, ,       <importance>, <clusterIdx>
+  //   EDGE: t, EDGE, <edgeType>, <src>, <tgt>,  ,
   const nodes = [];
-  for (const line of text.trim().split('\n')) {
-    if (!line) continue;
-    const [id, type, cluster, importance, lineNum] = parseCSVLine(line);
-    nodes.push({ id, type, cluster: cluster || '', importance: importance !== undefined && importance !== '' ? parseInt(importance) : 3, line: parseInt(lineNum) || 0 });
-  }
-  return nodes;
-}
-
-function parseEdgesCSV(text) {
-  // Format: source,target,type,weight
   const edges = [];
-  for (const line of text.trim().split('\n')) {
+  const idxToName = new Map();
+  const clusterIdxToName = new Map();
+  const clusterNodeNames = new Set();
+
+  const lines = text.trim().split('\n');
+  // Skip header row
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
     if (!line) continue;
-    const [source, target, type, weight] = parseCSVLine(line);
-    edges.push({ source, target, type, weight: parseFloat(weight) || 1 });
+    const fields = parseCSVLine(line);
+    const rowType = fields[1];
+
+    if (rowType === 'NODE') {
+      const name = fields[2];
+      const idx = parseInt(fields[3]);
+      const importanceXi = parseFloat(fields[5]) || 0;
+      const clusterCol = fields[6];
+      const importance = importanceXi * 10;
+
+      idxToName.set(idx, name);
+
+      // Detect cluster-defining nodes: idx matches cluster column
+      if (clusterCol !== '' && clusterCol !== undefined) {
+        const cn = parseInt(clusterCol);
+        if (!isNaN(cn) && cn === idx) {
+          clusterIdxToName.set(cn, name);
+          clusterNodeNames.add(name);
+          nodes.push({ id: name, type: 'cluster', cluster: '', importance, line: 0 });
+          continue;
+        }
+      }
+
+      // Determine cluster name from cluster column
+      let clusterName = '';
+      if (clusterCol !== '' && clusterCol !== undefined) {
+        const cn = parseInt(clusterCol);
+        if (!isNaN(cn) && clusterIdxToName.has(cn)) {
+          clusterName = clusterIdxToName.get(cn);
+        }
+      }
+
+      const nodeType = importanceXi <= 0.1 ? 'global' : 'function';
+      nodes.push({ id: name, type: nodeType, cluster: clusterName, importance, line: 0 });
+
+    } else if (rowType === 'EDGE') {
+      const srcIdx = parseInt(fields[3]);
+      const tgtIdx = parseInt(fields[4]);
+      const srcName = idxToName.get(srcIdx);
+      const tgtName = idxToName.get(tgtIdx);
+      const label = fields[2];
+
+      if (srcName && tgtName) {
+        if (label === 'memberOf') {
+          // Update the source node's cluster to the target name
+          const srcNode = nodes.find(n => n.id === srcName);
+          if (srcNode) srcNode.cluster = tgtName;
+        } else if (!clusterNodeNames.has(srcName) && !clusterNodeNames.has(tgtName)) {
+          edges.push({ source: srcName, target: tgtName, type: label, weight: 1 });
+        }
+      }
+    }
   }
-  return edges;
+
+  return { nodes, edges };
 }
 
 function buildAnalysisFromCSV(nodes, edges) {
@@ -6162,23 +6230,21 @@ async function loadAndAnalyze(force) {
   if (!force && !document.getElementById('live-reload').checked) return;
   const statusEl = document.getElementById('status');
   try {
-    const [nodesText, edgesText, codemapMd] = await Promise.all([
-      fetch('/runtime/nodes.csv').then(r => r.ok ? r.text() : null).catch(() => null),
-      fetch('/runtime/edges.csv').then(r => r.ok ? r.text() : null).catch(() => null),
+    const [historyText, codemapMd] = await Promise.all([
+      fetch('/runtime/history.csv').then(r => r.ok ? r.text() : null).catch(() => null),
       fetch(CODEMAP_SRC).then(r => r.ok ? r.text() : null).catch(() => null),
     ]);
 
-    // If CSVs are available, use them; otherwise fall back to AST analysis
-    if (nodesText && edgesText) {
-      const h = hashStr(nodesText + edgesText + (codemapMd || ''));
+    // If history CSV is available, use it; otherwise fall back to AST analysis
+    if (historyText) {
+      const h = hashStr(historyText + (codemapMd || ''));
       if (h === lastHash) return;
       lastHash = h;
 
-      statusEl.textContent = 'loading CSVs...';
+      statusEl.textContent = 'loading history...';
       if (codemapMd) codemapSections = parseCodemap(codemapMd);
 
-      const csvNodes = parseNodesCSV(nodesText);
-      const csvEdges = parseEdgesCSV(edgesText);
+      const { nodes: csvNodes, edges: csvEdges } = parseHistoryCSV(historyText);
 
       // Set importance and cluster info from CSV nodes
       csvClusterMap.clear();

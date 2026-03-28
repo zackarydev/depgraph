@@ -1,275 +1,30 @@
 #!/usr/bin/env node
 // Graph generator: AST analysis + codemap → nodes.csv + edges.csv
-// Usage: node codegen/graphgen.mjs [inspect.json path]
 //
-// Reads source code and codemap, produces runtime/nodes.csv and runtime/edges.csv.
-// Can be run standalone or imported by the server for watch-triggered regeneration.
+// Reads source code and codemap, produces runtime/nodes.csv and runtime/edges.csv
+// with ALL declarations encoded: functions, variables (const/let/var), object
+// properties, and function parameters. The UI layer controls visibility.
+//
+// Usage: node codegen/graphgen.mjs [inspect.json path]
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
-import * as acorn from 'acorn';
-import * as walk from 'acorn-walk';
+import {
+  parseCodemap, extractJS, analyzeCode, computeEdges, escapeCSV,
+} from './ast.mjs';
 
 // ── Config ───────────────────────────────────────────
 const ROOT = resolve(import.meta.dirname, '..');
 const DEFAULT_INSPECT = join(ROOT, 'inspect.json');
 
-// ── Codemap parsing ──────────────────────────────────
-function parseCodemap(md) {
-  const sections = new Map();       // sectionName → [funcNames]
-  const importance = new Map();     // funcName → number
-  let currentSection = null;
-  let isUserCluster = false;
-  const lines = md.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const secMatch = line.match(/^## (.+)/);
-    if (secMatch) {
-      currentSection = secMatch[1].trim();
-      if (currentSection === 'Controls' || currentSection === 'Constants') { currentSection = null; continue; }
-      isUserCluster = (lines[i + 1] || '').trim() === '<!-- user-cluster -->';
-      if (isUserCluster) {
-        i++; // skip marker
-      }
-      if (!sections.has(currentSection)) sections.set(currentSection, []);
-      continue;
-    }
-    if (!currentSection) continue;
-    const funcMatch = line.match(/^- `(\w+)`/);
-    if (funcMatch) {
-      const name = funcMatch[1];
-      if (sections.has(currentSection)) {
-        sections.get(currentSection).push(name);
-      }
-      const impMatch = line.match(/importance:(\d+)/);
-      if (impMatch) importance.set(name, parseInt(impMatch[1]));
-    }
-  }
-  return { sections, importance };
-}
-
-// ── JS extraction from HTML ──────────────────────────
-function extractJS(html) {
-  const match = html.match(/<script(?:\s+type="module")?>([\s\S]*)<\/script>/);
-  if (!match) return { code: '', lineOffset: 0 };
-  const tagStart = html.indexOf(match[0]);
-  const lineOffset = html.substring(0, tagStart).split('\n').length;
-  const code = match[1]
-    .replace(/^\s*import\s+.*$/gm, '/* import */')
-    .replace(/^\s*export\s+.*$/gm, '/* export */');
-  return { code, lineOffset };
-}
-
-// ── AST analysis ─────────────────────────────────────
-function collectDeclNames(pattern) {
-  const names = [];
-  if (pattern.type === 'Identifier') names.push(pattern.name);
-  else if (pattern.type === 'ObjectPattern') {
-    pattern.properties.forEach(p => names.push(...collectDeclNames(p.value || p.key)));
-  } else if (pattern.type === 'ArrayPattern') {
-    pattern.elements.forEach(e => e && names.push(...collectDeclNames(e)));
-  }
-  return names;
-}
-
-function analyzeFunction(funcNode, globals) {
-  const params = new Set();
-  funcNode.params.forEach(p => collectDeclNames(p).forEach(n => params.add(n)));
-  const locals = new Set(params);
-  const reads = new Set();
-  const writes = new Set();
-  const calls = new Set();
-
-  walk.simple(funcNode.body, {
-    VariableDeclaration(node) {
-      for (const decl of node.declarations) {
-        collectDeclNames(decl.id).forEach(n => locals.add(n));
-      }
-    },
-    FunctionDeclaration(node) { if (node.id) locals.add(node.id.name); },
-  });
-
-  walk.ancestor(funcNode.body, {
-    AssignmentExpression(node) {
-      if (node.left.type === 'Identifier') {
-        const name = node.left.name;
-        if (!locals.has(name) && globals.has(name)) writes.add(name);
-      }
-    },
-    Identifier(node, ancestors) {
-      const name = node.name;
-      if (locals.has(name) || !globals.has(name)) return;
-      const parent = ancestors[ancestors.length - 2];
-      if (parent && parent.type === 'Property' && parent.key === node && !parent.computed && !parent.shorthand) return;
-      if (parent && parent.type === 'MemberExpression' && parent.property === node && !parent.computed) return;
-      if (parent && (parent.type === 'LabeledStatement' || parent.type === 'BreakStatement' || parent.type === 'ContinueStatement')) return;
-      if (parent && parent.type === 'UpdateExpression') {
-        writes.add(name);
-      } else {
-        reads.add(name);
-      }
-    },
-    CallExpression(node) {
-      if (node.callee.type === 'Identifier' && globals.has(node.callee.name)) {
-        calls.add(node.callee.name);
-      } else if (node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier') {
-        const name = node.callee.object.name;
-        if (!locals.has(name) && globals.has(name)) reads.add(name);
-      }
-    },
-    MemberExpression(node, ancestors) {
-      if (node.object.type === 'Identifier') {
-        const name = node.object.name;
-        if (locals.has(name) || !globals.has(name)) return;
-        const parent = ancestors[ancestors.length - 2];
-        if (parent && parent.type === 'AssignmentExpression' && parent.left === node) {
-          writes.add(name);
-        } else {
-          reads.add(name);
-        }
-      }
-    },
-  });
-
-  const rw = new Set();
-  for (const n of reads) { if (writes.has(n)) rw.add(n); }
-  for (const n of rw) { reads.delete(n); writes.delete(n); }
-
-  return { params, locals, reads, writes, rw, calls, line: 0, endLine: 0, lines: 0 };
-}
-
-function analyzeCode(code, lineOffset) {
-  let ast;
-  try {
-    ast = acorn.parse(code, {
-      ecmaVersion: 2022,
-      sourceType: 'script',
-      locations: true,
-      allowImportExportEverywhere: true,
-    });
-  } catch (e) {
-    console.error('Parse error:', e.message);
-    return null;
-  }
-
-  const globals = new Map();
-  const functions = new Map();
-
-  // Pass 1: collect top-level declarations
-  for (const node of ast.body) {
-    if (node.type === 'VariableDeclaration') {
-      for (const decl of node.declarations) {
-        collectDeclNames(decl.id).forEach(name => {
-          globals.set(name, { kind: node.kind, line: node.loc.start.line + lineOffset });
-        });
-      }
-    }
-    if (node.type === 'FunctionDeclaration' && node.id) {
-      globals.set(node.id.name, { kind: 'function', line: node.loc.start.line + lineOffset });
-    }
-  }
-
-  // Pass 2: analyze each function
-  for (const node of ast.body) {
-    if (node.type === 'FunctionDeclaration' && node.id) {
-      const info = analyzeFunction(node, globals);
-      info.line = node.loc.start.line + lineOffset;
-      info.endLine = node.loc.end.line + lineOffset;
-      info.lines = info.endLine - info.line + 1;
-      functions.set(node.id.name, info);
-    }
-  }
-
-  return { globals, functions };
-}
-
-// ── Edge computation ─────────────────────────────────
-function computeEdges(functions, importance) {
-  const edges = [];
-  const names = [...functions.keys()];
-
-  for (let i = 0; i < names.length; i++) {
-    const a = functions.get(names[i]);
-    for (let j = i + 1; j < names.length; j++) {
-      const b = functions.get(names[j]);
-
-      // calls
-      if (a.calls.has(names[j])) edges.push({ source: names[i], target: names[j], type: 'calls', weight: 3 });
-      if (b.calls.has(names[i])) edges.push({ source: names[j], target: names[i], type: 'calls', weight: 3 });
-
-      // calledBy (reverse)
-      if (a.calls.has(names[j])) edges.push({ source: names[j], target: names[i], type: 'calledBy', weight: 3 });
-      if (b.calls.has(names[i])) edges.push({ source: names[i], target: names[j], type: 'calledBy', weight: 3 });
-
-      // shared state
-      const aState = new Set([...a.reads, ...a.writes, ...a.rw]);
-      const bState = new Set([...b.reads, ...b.writes, ...b.rw]);
-      let sharedCount = 0;
-      for (const v of aState) { if (bState.has(v)) sharedCount++; }
-      if (sharedCount > 0) edges.push({ source: names[i], target: names[j], type: 'shared', weight: sharedCount });
-
-      // shared writes
-      const aWrites = new Set([...a.writes, ...a.rw]);
-      const bWrites = new Set([...b.writes, ...b.rw]);
-      let sharedWriteCount = 0;
-      for (const v of aWrites) { if (bWrites.has(v)) sharedWriteCount++; }
-      if (sharedWriteCount > 0) edges.push({ source: names[i], target: names[j], type: 'sharedWrites', weight: sharedWriteCount });
-
-      // importance
-      const impA = importance.get(names[i]) || 0;
-      const impB = importance.get(names[j]) || 0;
-      if (impA >= 7 && impB >= 7) {
-        const hasCall = a.calls.has(names[j]) || b.calls.has(names[i]);
-        if (hasCall || sharedCount > 0) {
-          const w = Math.round(Math.sqrt(impA * impB));
-          edges.push({ source: names[i], target: names[j], type: 'importance', weight: w });
-        }
-      }
-    }
-  }
-
-  // Hypergraph edges: function → global variable
-  const globalUsage = new Map();    // gname → Set of fnames
-  const globalWriters = new Map();  // gname → Set of fnames that write
-  for (const [fname, info] of functions) {
-    const writerSet = new Set([...info.writes, ...info.rw]);
-    for (const s of [info.reads, info.writes, info.rw]) {
-      for (const g of s) {
-        if (!globalUsage.has(g)) globalUsage.set(g, new Set());
-        globalUsage.get(g).add(fname);
-      }
-    }
-    for (const g of writerSet) {
-      if (!globalWriters.has(g)) globalWriters.set(g, new Set());
-      globalWriters.get(g).add(fname);
-    }
-  }
-  for (const [gname, users] of globalUsage) {
-    if (users.size < 2 || functions.has(gname)) continue;
-    const writers = globalWriters.get(gname) || new Set();
-    for (const fname of users) {
-      const edgeType = writers.has(fname) ? 'writesTo' : 'uses';
-      edges.push({ source: fname, target: gname, type: edgeType, weight: 1 });
-    }
-  }
-
-  return { edges, globalUsage };
-}
-
 // ── CSV generation ───────────────────────────────────
-function escapeCSV(val) {
-  const s = String(val);
-  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-    return '"' + s.replace(/"/g, '""') + '"';
-  }
-  return s;
-}
 
-function generateNodesCSV(functions, globals, codemap, importance) {
+function generateNodesCSV(analysis, codemap, importance) {
   const lines = [];
+  const { functions, globals, valueNodes, parameterNodes } = analysis;
+
   // Function nodes
   for (const [name, info] of functions) {
-    // Find which cluster this function belongs to
     let cluster = '';
     if (codemap) {
       for (const [section, funcs] of codemap) {
@@ -279,28 +34,32 @@ function generateNodesCSV(functions, globals, codemap, importance) {
     const imp = importance.get(name) || 3;
     lines.push([name, 'function', cluster, imp, info.line].map(escapeCSV).join(','));
   }
-  // Global variable nodes (those used by 2+ functions)
-  const globalUsage = new Map();
-  for (const [fname, info] of functions) {
-    for (const s of [info.reads, info.writes, info.rw]) {
-      for (const g of s) {
-        if (!globalUsage.has(g)) globalUsage.set(g, new Set());
-        globalUsage.get(g).add(fname);
-      }
-    }
+
+  // Variable nodes — ALL top-level declarations, type = kind (const/let/var)
+  for (const [gname, gInfo] of globals) {
+    if (functions.has(gname)) continue; // already emitted as function
+    lines.push([gname, gInfo.kind, '', 1, gInfo.line].map(escapeCSV).join(','));
   }
-  for (const [gname, users] of globalUsage) {
-    if (users.size < 2 || functions.has(gname)) continue;
-    const gInfo = globals.get(gname);
-    const line = gInfo ? gInfo.line : 0;
-    lines.push([gname, 'global', '', 1, line].map(escapeCSV).join(','));
+
+  // Value nodes (object properties, init values — deduplicated)
+  for (const vn of valueNodes) {
+    lines.push([vn.id, vn.type, '', 1, vn.line].map(escapeCSV).join(','));
   }
+
+  // Parameter nodes
+  for (const param of parameterNodes) {
+    lines.push([param.id, 'parameter', '', 1, param.line].map(escapeCSV).join(','));
+  }
+
   return lines.join('\n') + '\n';
 }
 
-function generateEdgesCSV(edges) {
+function generateEdgesCSV(behavioralEdges, structEdges) {
   const lines = [];
-  for (const e of edges) {
+  for (const e of behavioralEdges) {
+    lines.push([e.source, e.target, e.type, e.weight].map(escapeCSV).join(','));
+  }
+  for (const e of structEdges) {
     lines.push([e.source, e.target, e.type, e.weight].map(escapeCSV).join(','));
   }
   return lines.join('\n') + '\n';
@@ -337,13 +96,14 @@ export function generate(inspectPath) {
     } catch { /* no codemap, that's fine */ }
   }
 
-  // Compute edges
-  const { edges } = computeEdges(analysis.functions, importance);
+  // Compute behavioral edges (calls, shared, hypergraph)
+  const behavioralEdges = computeEdges(analysis.functions, analysis.globals, importance);
 
   // Write CSVs
   mkdirSync(runtimeDir, { recursive: true });
-  const nodesCSV = generateNodesCSV(analysis.functions, analysis.globals, codemap, importance);
-  const edgesCSV = generateEdgesCSV(edges);
+
+  const nodesCSV = generateNodesCSV(analysis, codemap, importance);
+  const edgesCSV = generateEdgesCSV(behavioralEdges, analysis.structEdges);
 
   const nodesPath = join(runtimeDir, 'nodes.csv');
   const edgesPath = join(runtimeDir, 'edges.csv');

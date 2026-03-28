@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { readFile, readFileSync, writeFile, watch } from 'node:fs';
 import { join, extname, resolve } from 'node:path';
 import { exec } from 'node:child_process';
-import { generate as generateGraph } from './codegen/graphgen.mjs';
+import { generateHistory } from './codegen/historygen.mjs';
 import { startSimulation } from './codegen/simulator.mjs';
 
 // Parse args: support --simulate and --simulate=2000
@@ -14,12 +14,14 @@ const args = process.argv.slice(2);
 const simArg = args.find(a => a.startsWith('--simulate'));
 const SIMULATE = !!simArg;
 const SIM_INTERVAL = simArg && simArg.includes('=') ? parseInt(simArg.split('=')[1], 10) : 3000;
+
+
 const PORT = parseInt(args.find(a => !a.startsWith('-')) || '3800', 10);
 const ROOT = resolve(import.meta.dirname, '.');
-const INSPECT_FILE = join(ROOT, 'inspect.json');
 const FOCUS_FILE = join(ROOT, 'runtime/depgraph-focus.json');
 
 // ── Load inspect.json ─────────────────────────────
+const INSPECT_FILE = join(ROOT, 'inspect.json');
 const inspect = JSON.parse(readFileSync(INSPECT_FILE, 'utf8'));
 const TARGET_SRC = resolve(ROOT, inspect.src);
 const CODEMAP_FILE = resolve(ROOT, inspect.codemap);
@@ -68,8 +70,7 @@ watch(FOCUS_FILE, { persistent: true }, () => readFocus());
 readFocus();
 
 // ── Graph generation: watch src + codemap, regenerate CSVs ─
-const NODES_FILE = join(ROOT, 'runtime/nodes.csv');
-const EDGES_FILE = join(ROOT, 'runtime/edges.csv');
+const HISTORY_FILE = join(ROOT, 'runtime/history.csv');
 const graphClients = new Set();
 
 function broadcastGraph(data) {
@@ -84,10 +85,10 @@ function triggerGraphgen() {
   clearTimeout(graphgenTimer);
   graphgenTimer = setTimeout(() => {
     try {
-      const result = generateGraph(INSPECT_FILE);
+      const result = generateHistory(INSPECT_FILE);
       if (result) broadcastGraph({ type: 'graph-update', nodes: result.nNodes, edges: result.nEdges });
     } catch (e) {
-      console.error('[graphgen] error:', e.message);
+      console.error('[historygen] error:', e.message);
     }
   }, 200); // debounce 200ms
 }
@@ -98,7 +99,7 @@ if (SIMULATE) {
   startSimulation(join(ROOT, 'runtime'), broadcastGraph, SIM_INTERVAL);
 } else {
   // Normal mode: generate on startup, watch for file changes
-  try { generateGraph(INSPECT_FILE); } catch (e) { console.error('[graphgen] initial error:', e.message); }
+  try { generateHistory(INSPECT_FILE); } catch (e) { console.error('[historygen] initial error:', e.message); }
 
   watch(TARGET_SRC, { persistent: true }, () => {
     console.log('[watch] src changed');
@@ -273,18 +274,10 @@ const server = createServer((req, res) => {
     return;
   }
 
-  // Serve CSV files
-  if (url.pathname === '/runtime/nodes.csv') {
-    readFile(NODES_FILE, (err, data) => {
-      if (err) { res.writeHead(404); res.end('nodes.csv not found'); return; }
-      res.writeHead(200, { 'Content-Type': 'text/csv', 'X-Content-Type-Options': 'nosniff' });
-      res.end(data);
-    });
-    return;
-  }
-  if (url.pathname === '/runtime/edges.csv') {
-    readFile(EDGES_FILE, (err, data) => {
-      if (err) { res.writeHead(404); res.end('edges.csv not found'); return; }
+  // Serve history CSV (combined nodes + edges time-series)
+  if (url.pathname === '/runtime/history.csv') {
+    readFile(HISTORY_FILE, (err, data) => {
+      if (err) { res.writeHead(404); res.end('history.csv not found'); return; }
       res.writeHead(200, { 'Content-Type': 'text/csv', 'X-Content-Type-Options': 'nosniff' });
       res.end(data);
     });
@@ -334,7 +327,7 @@ const server = createServer((req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`\x1b[36mdepgraph\x1b[0m → http://127.0.0.1:${PORT}`);
   console.log(`  SSE    → /focus-events, /graph-events`);
-  console.log(`  CSV    → /runtime/nodes.csv, /runtime/edges.csv`);
+  console.log(`  CSV    → /runtime/history.csv`);
   console.log(`  target → /target/src`);
   console.log(`  watch  → src, codemap, ${FOCUS_FILE}`);
 });

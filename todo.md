@@ -33,3 +33,8 @@ I'm wondering if we should have some kind of "wait for frontend acknowledgement"
 
 ---
 And I think we also kind of forgot that edges could also potentially have importance. It's actually perhaps more of a frontend thing (based on the pullLayerState). Don't do anything about that, but lets keep in mind that perhaps those two concepts are intertwined and could require a better system. Because this will be DYNAMIC as HELL.
+
+---
+We need to add new nodes. I want the entire code base to encoded in the hypergraph. You'll probably need to refactor the graphgen AST parsing code. I want to see each object, their keys (as edge labels) and the value as another node in the hypergraph. All variables should be declared, and their internals functionalities as well should be encoded in the hypergraph. The UI layer should be the one dictating what's visible or not, not the AST parsing into the csv files. The node types for variables could be specific. 
+
+I tried to implement this but got lost in the codegen/graphgen/historygen files, it might be worth it to share code between the two ways...
