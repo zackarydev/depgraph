@@ -38,3 +38,6 @@ And I think we also kind of forgot that edges could also potentially have import
 We need to add new nodes. I want the entire code base to encoded in the hypergraph. You'll probably need to refactor the graphgen AST parsing code. I want to see each object, their keys (as edge labels) and the value as another node in the hypergraph. All variables should be declared, and their internals functionalities as well should be encoded in the hypergraph. The UI layer should be the one dictating what's visible or not, not the AST parsing into the csv files. The node types for variables could be specific. 
 
 I tried to implement this but got lost in the codegen/graphgen/historygen files, it might be worth it to share code between the two ways...
+
+---
+Need a way to hide certain node types, perhaps based on the edges. Ex: I odn't want to see func args, or func params. But I want to see globals. Or I don't want to see funcs, I want to see classes etc.

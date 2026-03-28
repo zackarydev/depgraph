@@ -1,1 +1,0 @@
-node stream/streamer.mjs --follow --interval=10000 --mode=tick --file=runtime/hcsn.csv

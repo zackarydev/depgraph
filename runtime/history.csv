@@ -685,7 +685,8 @@ t,type,label,source,target,importance_xi,cluster
 299,NODE,_autoColorIdx,317,let,0.1,
 300,NODE,_autoColorIdx:init,318,number,0.1,
 300,EDGE,init,317,318,,
-301,NODE,ensureEdgeLayer,319,function,0.3,
+301,NODE,ensureEdgeLayer,319,function,0.3,18
+301,EDGE,memberOf,319,18,,
 301,EDGE,uses,319,313,,
 301,EDGE,uses,319,315,,
 301,EDGE,writesTo,319,317,,
@@ -4023,7 +4024,8 @@ t,type,label,source,target,importance_xi,cluster
 700,EDGE,memberOf,718,18,,
 701,NODE,parseCSVLine:line,719,parameter,0.1,
 701,EDGE,param,718,719,,
-702,NODE,parseHistoryCSV,720,function,0.3,
+702,NODE,parseHistoryCSV,720,function,0.3,18
+702,EDGE,memberOf,720,18,,
 702,EDGE,calls,720,718,,
 702,EDGE,calledBy,718,720,,
 703,NODE,parseHistoryCSV:text,721,parameter,0.1,
