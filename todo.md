@@ -21,9 +21,6 @@ Some of the cluster labels are rendered WAY too far away from their cluster. Per
 There's an bug where if the cluster nodes are FAR away, the repulsion mechanism of cluster probably creates a centroid-repulsion. So everything gets repulsed around that centroid location. Resulting in some chaotic repulsion/pull forces. My guess is that cluster attraction is probably cheap to do, but its probably being done naively via meta edges. Those meta edges should instead create connectivity islands based on the position of the nodes in the UI too. Ex: a cluster with nodes that are physically far apart should probably create new meta edges, effectively separating the cluster. Perhaps.
 
 ---
-Control + Clicking in white space should create a repulsion bubble at that location, not to be confused with "returning to their T0 position" which is the current behavior.
-
----
 Write a hypergraph navigation helper at the top right hand corner of the screen. There, controls can be explained dynamically based on what the user is doing. Ex: if they haven't clicked on a node, the nav helper can say "click a node", "hold click a node". Once the user hold click a node, the navigation helper can say "Space to Gather", and "Drag to Move". To name a few examples. If we can do this for all controls it could be cool. Also I think the controls.md file is out of date with respect to the features in the code. Can you scan to make sure we didn't miss anything, or if there's a mismatched between whats in the controls and in the code.
 
 ---

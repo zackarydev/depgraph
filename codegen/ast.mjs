@@ -339,8 +339,8 @@ export function analyzeCode(code, lineOffset) {
           name: param.name,
         });
         structEdges.push({
-          source: callerName,
-          target: paramId,
+          source: paramId,
+          target: callerName,
           type: 'param',
           weight: 1,
         });

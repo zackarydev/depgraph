@@ -47,6 +47,7 @@ export function createStreamer(source, opts = {}) {
   let timer = null;
   let sending = false; // guard against overlapping async sends
   let pending = false; // start() called but no clients yet
+  let paused = false;
 
   function broadcast(data) {
     const msg = `data: ${JSON.stringify(data)}\n\n`;
@@ -56,7 +57,7 @@ export function createStreamer(source, opts = {}) {
   }
 
   async function sendNext() {
-    if (sending) return;
+    if (sending || paused) return;
     sending = true;
     try {
       const batch = await source.next(mode);
@@ -111,7 +112,84 @@ export function createStreamer(source, opts = {}) {
     if (pending) start();
   }
 
-  return { start, stop, attachSSE, clients };
+  function pause() {
+    if (paused) return false;
+    paused = true;
+    broadcast({ type: 'paused' });
+    console.log('[streamer] paused');
+    return true;
+  }
+
+  function resume() {
+    if (!paused) return false;
+    paused = false;
+    broadcast({ type: 'resumed' });
+    console.log('[streamer] resumed');
+    return true;
+  }
+
+  // Replay the last `tail` rows of the source.
+  // Resets the source, sends all rows except the last `tail` as a bulk "base" message,
+  // then streams the tail rows at the normal interval.
+  async function replay(tail = 50) {
+    // Stop current streaming
+    stop();
+    paused = false;
+
+    // Read all rows from source
+    await source.reset();
+    const allRows = [];
+    while (true) {
+      const batch = await source.next('line');
+      if (batch === null) break;
+      allRows.push(...batch);
+    }
+
+    if (allRows.length <= tail) {
+      // Not enough rows — just replay everything from scratch
+      await source.reset();
+      start();
+      return { total: allRows.length, base: 0, tail: allRows.length };
+    }
+
+    const baseRows = allRows.slice(0, allRows.length - tail);
+    const tailRows = allRows.slice(allRows.length - tail);
+
+    // Send header + base as bulk load + tail marker
+    broadcast({ type: 'header', columns: source.header() });
+    // Send base rows in one big batch so the frontend builds the base graph quickly
+    if (baseRows.length > 0) {
+      broadcast({ type: 'rows', rows: baseRows });
+    }
+    // Signal that the base is done and streaming portion begins
+    broadcast({ type: 'replay-tail', count: tailRows.length });
+
+    // Now drip-feed the tail rows
+    let idx = 0;
+    timer = setInterval(() => {
+      if (paused || sending) return;
+      if (idx >= tailRows.length) {
+        broadcast({ type: 'end' });
+        stop();
+        return;
+      }
+      // Use tick grouping: send all rows with same t value
+      const row = tailRows[idx];
+      const t = row.split(',', 1)[0];
+      const batch = [row];
+      idx++;
+      while (idx < tailRows.length && tailRows[idx].split(',', 1)[0] === t) {
+        batch.push(tailRows[idx]);
+        idx++;
+      }
+      broadcast({ type: 'rows', rows: batch });
+    }, interval);
+
+    console.log(`[streamer] replay: ${baseRows.length} base, ${tailRows.length} tail`);
+    return { total: allRows.length, base: baseRows.length, tail: tailRows.length };
+  }
+
+  return { start, stop, pause, resume, replay, attachSSE, clients, isPaused: () => paused };
 }
 
 // ── Spawn as subprocess ───────────────────────────────
@@ -180,7 +258,40 @@ if (IS_MAIN) {
 
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'application/json', ...CORS });
-      res.end(JSON.stringify({ status: 'ok', clients: streamer.clients.size }));
+      res.end(JSON.stringify({ status: 'ok', clients: streamer.clients.size, paused: streamer.isPaused() }));
+      return;
+    }
+
+    // CORS preflight for POST endpoints
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { ...CORS, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' });
+      res.end();
+      return;
+    }
+
+    if (url.pathname === '/pause' && req.method === 'POST') {
+      const ok = streamer.pause();
+      res.writeHead(200, { 'Content-Type': 'application/json', ...CORS });
+      res.end(JSON.stringify({ paused: true, changed: ok }));
+      return;
+    }
+
+    if (url.pathname === '/resume' && req.method === 'POST') {
+      const ok = streamer.resume();
+      res.writeHead(200, { 'Content-Type': 'application/json', ...CORS });
+      res.end(JSON.stringify({ paused: false, changed: ok }));
+      return;
+    }
+
+    if (url.pathname === '/replay' && req.method === 'POST') {
+      const tail = parseInt(url.searchParams.get('tail') || '50', 10);
+      streamer.replay(tail).then(info => {
+        res.writeHead(200, { 'Content-Type': 'application/json', ...CORS });
+        res.end(JSON.stringify(info));
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...CORS });
+        res.end(JSON.stringify({ error: err.message }));
+      });
       return;
     }
 

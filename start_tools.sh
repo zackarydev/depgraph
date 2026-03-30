@@ -8,6 +8,6 @@ code ./codegen/historygen.mjs
 # python3 codegen/codemap.py --update
 
 # For streaming:
-# ./stream/start_depgraph.sh &
+./stream/start_depgraph.sh &
 
 node depgraph-server.mjs "$@"
