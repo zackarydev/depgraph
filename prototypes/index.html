@@ -171,6 +171,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: non
   <div class="sep"></div>
   <button id="sim-stream-btn" title="Simulate streaming the last N rows">Sim Stream</button>
   <label title="Number of CSV rows to replay">N: <input type="number" id="sim-stream-n" value="50" min="5" max="500" style="width:50px"></label>
+  <label><input type="checkbox" id="cinematic-stream"> Cinematic</label>
 </div>
 
 <div id="info-panel">
@@ -207,6 +208,15 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: non
   <label><input type="checkbox" id="show-edges"> Edges</label>
   <label><input type="checkbox" id="trace-show-edges" checked> Show edges on trace</label>
   <label><input type="checkbox" id="show-meta-edges" checked> Meta edges</label>
+  <label><input type="checkbox" id="zoom-breakpoints" checked> Zoom breakpoints</label>
+  <label>Level:
+    <select id="zoom-level" style="font-size:10px">
+      <option value="overview">Overview</option>
+      <option value="systems" selected>Systems</option>
+      <option value="structural">Structural</option>
+      <option value="deep">Deep</option>
+    </select>
+  </label>
   <div id="zoom-debug" style="color:#555; font-size:10px; margin-top:2px">zoom: 0.80</div>
 </div>
 
@@ -243,6 +253,61 @@ let stickyNodes = new Set();
 let lockedNodes = new Set(); // explicitly locked nodes (pinned in place)
 let selectedNode = null;
 let currentK = 0.8;
+
+// ── Zoom breakpoints: dynamic edge layer presets by zoom level ──
+const ZOOM_BREAKPOINTS = [
+  {
+    name: 'Overview',
+    zoom: 0.3,
+    layers: { memberOf: 1, importance: 0.6 },
+  },
+  {
+    name: 'Systems',
+    zoom: 1.0,
+    layers: { memberOf: 1, calls: 1, calledBy: 1, shared: 0.8, sharedWrites: 0.7, importance: 0.5 },
+  },
+  {
+    name: 'Structural',
+    zoom: 4.0,
+    layers: { memberOf: 1, calls: 1, calledBy: 1, shared: 0.8, sharedWrites: 0.7, importance: 0.5, uses: 0.7, writesTo: 0.7 },
+  },
+  {
+    name: 'Deep',
+    zoom: 10.0,
+    layers: { memberOf: 1, calls: 1, calledBy: 1, shared: 0.6, sharedWrites: 0.5, importance: 0.4, uses: 0.8, writesTo: 0.8, param: 0.7, arg: 0.7, binds: 0.6, init: 0.6, key: 0.5 },
+  },
+];
+let zoomBreakpointsEnabled = true;
+let _lastBreakpointName = '';
+
+function getZoomBreakpointOpacity(layerId) {
+  if (!zoomBreakpointsEnabled) return null;
+  const k = currentK;
+  const bp = ZOOM_BREAKPOINTS;
+  // Clamp to endpoints
+  if (k <= bp[0].zoom) return bp[0].layers[layerId] || 0;
+  if (k >= bp[bp.length - 1].zoom) return bp[bp.length - 1].layers[layerId] || 0;
+  // Find bracketing pair and lerp
+  for (let i = 0; i < bp.length - 1; i++) {
+    if (k >= bp[i].zoom && k <= bp[i + 1].zoom) {
+      const t = (k - bp[i].zoom) / (bp[i + 1].zoom - bp[i].zoom);
+      const lo = bp[i].layers[layerId] || 0;
+      const hi = bp[i + 1].layers[layerId] || 0;
+      return lo + (hi - lo) * t;
+    }
+  }
+  return 0;
+}
+
+function getActiveBreakpointName() {
+  const k = currentK;
+  // Return the name of the nearest breakpoint we're at or past
+  for (let i = ZOOM_BREAKPOINTS.length - 1; i >= 0; i--) {
+    if (k >= ZOOM_BREAKPOINTS[i].zoom * 0.7) return ZOOM_BREAKPOINTS[i].name;
+  }
+  return ZOOM_BREAKPOINTS[0].name;
+}
+
 let currentGraph = null;
 let currentClusterNames = new Map();
 let currentNodes = null;
@@ -504,6 +569,7 @@ async function deleteUserCluster(sectionName) {
 
 // SVG layers
 let svg, gLinks, gMetaLinks, gNodes, gHulls, gLabels, gClusterLabels, svgDefs;
+let _zoomBehavior = null;
 let width, height;
 
 // ═══════════════════════════════════════════════════════
@@ -1491,10 +1557,15 @@ function initPullLayerUI() {
     slider.max = 100;
     slider.value = currentOpacity * 100;
     slider.className = 'pull-slider';
+    slider.setAttribute('data-layer-id', layer.id);
     const valSpan = document.createElement('span');
     valSpan.className = 'pull-val';
     valSpan.textContent = currentOpacity > 0 ? Math.round(currentOpacity * 100) : 'off';
     slider.addEventListener('input', () => {
+      // Manual slider interaction disables zoom breakpoints
+      zoomBreakpointsEnabled = false;
+      const zbCheckbox = document.getElementById('zoom-breakpoints');
+      if (zbCheckbox) zbCheckbox.checked = false;
       const v = parseInt(slider.value) / 100;
       const oldV = pullLayerState.get(layer.id) || 0;
       pullLayerState.set(layer.id, v);
@@ -1602,6 +1673,23 @@ function initPullLayerUI() {
 function refreshPullLayerUI() {
   if (EDGE_LAYERS.length !== _lastLayerCount) {
     initPullLayerUI();
+  }
+}
+
+// Sync slider DOM to current pullLayerState values (used by zoom breakpoints)
+function syncPullLayerSliders() {
+  const container = document.getElementById('pull-layers');
+  if (!container) return;
+  for (const slider of container.querySelectorAll('.pull-slider[data-layer-id]')) {
+    const lid = slider.getAttribute('data-layer-id');
+    const v = pullLayerState.get(lid) || 0;
+    slider.value = Math.round(v * 100);
+    const row = slider.closest('.layer-row');
+    if (row) {
+      const valSpan = row.querySelector('.pull-val');
+      if (valSpan) valSpan.textContent = v > 0 ? Math.round(v * 100) : 'off';
+      row.classList.toggle('disabled', v <= 0);
+    }
   }
 }
 
@@ -1718,17 +1806,24 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
           if (nodeMap.has(nid)) continue;
           const gScores = new Map();
           const addGScore = (cid, w) => gScores.set(cid, (gScores.get(cid) || 0) + w);
-          for (const token of tokenizeName(nid)) {
-            const section = SYSTEM_KEYWORDS.get(token);
-            if (section) {
-              const cid = sectionToId.get(section);
-              if (cid != null) addGScore(cid, 2.0);
+          const csvType = nt.get(nid) || 'global';
+          const isChildNode = csvType === 'parameter' || csvType === 'argument' || csvType === 'property';
+          // For child nodes (param/arg/property), strongly inherit parent's cluster
+          // For others, use keyword heuristics
+          if (!isChildNode) {
+            for (const token of tokenizeName(nid)) {
+              const section = SYSTEM_KEYWORDS.get(token);
+              if (section) {
+                const cid = sectionToId.get(section);
+                if (cid != null) addGScore(cid, 2.0);
+              }
             }
           }
           // Inherit cluster from the other endpoint if known
           const otherEnd = nid === e.source ? e.target : e.source;
-          const userCluster = clusters.get(otherEnd) ?? 0;
-          addGScore(userCluster, 1.0);
+          const otherNode = nodeMap.get(otherEnd);
+          const userCluster = otherNode ? otherNode.cluster : (clusters.get(otherEnd) ?? 0);
+          addGScore(userCluster, isChildNode ? 10.0 : 1.0);
           const gTotal = [...gScores.values()].reduce((a, b) => a + b, 0);
           const gAffinities = new Map();
           let bestCluster = 0, bestWeight = 0;
@@ -1740,7 +1835,6 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
             }
           }
           // Determine visual properties based on CSV node type
-          const csvType = nt.get(nid) || 'global';
           let nodeColor = '#555', nodeRadius = 3, minZoom = 0;
           if (valueTypes.has(csvType)) {
             nodeColor = '#666'; nodeRadius = 2; minZoom = 10;
@@ -1849,7 +1943,7 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
     }
   }
 
-  // Build adjacency
+  // Build adjacency (enabled edges only — used for physics/rendering)
   const adjacency = new Map();
   const nodeDegree = new Map();
   for (const n of nodes) { adjacency.set(n.id, new Set()); nodeDegree.set(n.id, 0); }
@@ -1863,7 +1957,26 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
     edgeWeights.set(l.target + '\0' + l.source, l.weight || 1);
   }
 
-  return { nodes, links, nodeMap, adjacency, nodeDegree, edgeWeights };
+  // Full adjacency (ALL edges regardless of layer state — used for structural
+  // operations like drag-follow, cluster membership, reachability)
+  const fullAdjacency = new Map();
+  for (const n of nodes) fullAdjacency.set(n.id, new Set());
+  for (const l of links) {
+    fullAdjacency.get(l.source)?.add(l.target);
+    fullAdjacency.get(l.target)?.add(l.source);
+  }
+  // Also include disabled-layer edges from precomputed edges
+  if (analysis && analysis.precomputedEdges) {
+    for (const e of analysis.precomputedEdges) {
+      if (e.type === 'memberOf') continue; // cluster edges are structural, not navigational
+      if (fullAdjacency.has(e.source) && fullAdjacency.has(e.target)) {
+        fullAdjacency.get(e.source).add(e.target);
+        fullAdjacency.get(e.target).add(e.source);
+      }
+    }
+  }
+
+  return { nodes, links, nodeMap, adjacency, fullAdjacency, nodeDegree, edgeWeights };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1936,13 +2049,14 @@ function computeLayout(nodes, links, opts = {}) {
     }
   }
 
-  // Phase 6: Snap arg/param nodes onto caller→callee edge vectors
-  // Now that all nodes have final world positions, reposition deep nodes
-  // along the data flow path: caller → args → params → callee
-  const deepTypes = new Set(['parameter', 'argument']);
-  const deepNodes = nodes.filter(n => deepTypes.has(n.type));
-  if (deepNodes.length > 0) {
-    positionDeepNodes(deepNodes, links, nodeMap);
+  // Phase 6: Snap structural nodes near their parent nodes
+  // arg/param nodes go along caller→callee edge vectors
+  // init/key/value nodes go near their connected parent
+  const structuralTypes = new Set(['parameter', 'argument', 'number', 'string', 'boolean',
+    'null', 'new', 'array', 'object', 'expression', 'ref', 'arrow', 'regex', 'property']);
+  const structuralNodes = nodes.filter(n => structuralTypes.has(n.type) || n.minZoom > 0);
+  if (structuralNodes.length > 0) {
+    positionDeepNodes(structuralNodes, links, nodeMap);
   }
 
   // Zero velocities
@@ -2080,6 +2194,7 @@ function positionDeepNodes(deepNodes, allLinks, nodeMap) {
   for (const dn of deepNodes) {
     let callerNode = null, calleeNode = null;
     let t = 0.5; // interpolation: 0 = caller, 1 = callee
+    let placed = true;
 
     if (dn.type === 'argument') {
       // Argument ID: "caller>callee@line:index"
@@ -2129,7 +2244,38 @@ function positionDeepNodes(deepNodes, allLinks, nodeMap) {
       dn.x = calleeNode.x + (Math.random() - 0.5) * 8;
       dn.y = calleeNode.y + (Math.random() - 0.5) * 8;
     } else {
-      // Fallback: place at origin
+      placed = false;
+    }
+    if (!placed) continue; // handle below in generic pass
+    dn.vx = 0;
+    dn.vy = 0;
+  }
+
+  // Generic pass: place any unpositioned structural nodes near their
+  // first connected neighbor (via any edge type)
+  const edgeNeighbors = new Map(); // nodeId → [neighborId, ...]
+  for (const link of allLinks) {
+    if (!edgeNeighbors.has(link.source)) edgeNeighbors.set(link.source, []);
+    if (!edgeNeighbors.has(link.target)) edgeNeighbors.set(link.target, []);
+    edgeNeighbors.get(link.source).push(link.target);
+    edgeNeighbors.get(link.target).push(link.source);
+  }
+
+  for (const dn of deepNodes) {
+    if (dn.x != null && dn.x !== 0 && dn.y != null && dn.y !== 0) continue;
+    // Already placed by arg/param logic — check if it has meaningful coordinates
+    const neighbors = edgeNeighbors.get(dn.id) || [];
+    let parentNode = null;
+    for (const nid of neighbors) {
+      const nn = nodeMap.get(nid);
+      if (nn && nn.x != null) { parentNode = nn; break; }
+    }
+    if (parentNode) {
+      const angle = Math.random() * Math.PI * 2;
+      const r = (parentNode.radius || 4) + 4 + Math.random() * 6;
+      dn.x = parentNode.x + Math.cos(angle) * r;
+      dn.y = parentNode.y + Math.sin(angle) * r;
+    } else {
       dn.x = (Math.random() - 0.5) * 10;
       dn.y = (Math.random() - 0.5) * 10;
     }
@@ -2408,6 +2554,9 @@ const GraphPhysics = (function () {
     clusterCentroids.clear();
     if (!currentNodes) return;
     for (const n of currentNodes) {
+      // Skip invisible nodes so centroids reflect visible cluster center
+      if (n.minZoom && currentK < n.minZoom) continue;
+      if (_hiddenNodes.has(n.id)) continue;
       const name = n.clusterName;
       if (!name) continue;
       if (!clusterCentroids.has(name)) clusterCentroids.set(name, { sx: 0, sy: 0, count: 0 });
@@ -2930,7 +3079,7 @@ function initSVG() {
   gLabels = svg.append('g').attr('class', 'labels');
   gClusterLabels = svg.append('g').attr('class', 'cluster-labels');
 
-  const zoom = d3.zoom()
+  _zoomBehavior = d3.zoom()
     .scaleExtent([0.1, 12])
     .on('zoom', e => {
       gHulls.attr('transform', e.transform);
@@ -2942,8 +3091,8 @@ function initSVG() {
       currentK = e.transform.k;
       applySemanticZoom();
     });
-  svg.call(zoom);
-  svg.call(zoom.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
+  svg.call(_zoomBehavior);
+  svg.call(_zoomBehavior.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
 }
 
 function expandHull(hull, pad) {
@@ -2959,7 +3108,34 @@ function expandHull(hull, pad) {
 
 function applySemanticZoom() {
   const k = currentK;
-  document.getElementById('zoom-debug').textContent = `zoom: ${k.toFixed(2)}`;
+
+  // ── Zoom breakpoints: auto-adjust edge layer opacities ──
+  if (zoomBreakpointsEnabled) {
+    let layerChanged = false;
+    for (const layer of EDGE_LAYERS) {
+      const target = getZoomBreakpointOpacity(layer.id);
+      if (target == null) continue;
+      const current = pullLayerState.get(layer.id) || 0;
+      if (Math.abs(current - target) > 0.01) {
+        pullLayerState.set(layer.id, target);
+        layerChanged = true;
+      }
+    }
+    if (layerChanged) {
+      syncPullLayerSliders();
+      applyNodeHiding();
+    }
+    // Update breakpoint name in zoom debug and sync dropdown
+    const bpName = getActiveBreakpointName();
+    if (bpName !== _lastBreakpointName) {
+      _lastBreakpointName = bpName;
+      const levelSelect = document.getElementById('zoom-level');
+      if (levelSelect) levelSelect.value = bpName.toLowerCase();
+    }
+    document.getElementById('zoom-debug').textContent = `zoom: ${k.toFixed(2)} [${bpName}]`;
+  } else {
+    document.getElementById('zoom-debug').textContent = `zoom: ${k.toFixed(2)}`;
+  }
 
   gLabels.selectAll('text').each(function(d) {
     const el = d3.select(this);
@@ -3086,6 +3262,50 @@ function edgeMidOpacity(dist) {
   return 1.0 - t * 0.92; // lerp from 1.0 to 0.08
 }
 
+// ── Invisible-node following: move hidden descendants when visible node is dragged ──
+// Follow depth scales with zoom: zoomed out far = deeper following.
+// Stops at cluster boundaries to avoid dragging foreign clusters along.
+function getFollowDepth() {
+  if (currentK <= 0.3) return 6;  // overview: deep follow
+  if (currentK <= 1.0) return 4;  // systems
+  if (currentK <= 4.0) return 2;  // structural
+  return 1;                        // deep: minimal follow
+}
+
+function moveInvisibleFollowers(nodeId, dx, dy) {
+  if (!currentGraph || (dx === 0 && dy === 0)) return;
+  // Use fullAdjacency (all edges regardless of layer visibility) so disabled
+  // layers don't sever structural connections during drag
+  const adj = currentGraph.fullAdjacency || currentGraph.adjacency;
+  if (!adj) return;
+  const maxDepth = getFollowDepth();
+  const dragNode = currentGraph.nodeMap.get(nodeId);
+  const dragCluster = dragNode ? dragNode.cluster : null;
+  const visited = new Set([nodeId]);
+  const queue = [{ id: nodeId, depth: 0 }];
+  while (queue.length) {
+    const { id, depth } = queue.shift();
+    if (depth >= maxDepth) continue;
+    const neighbors = adj.get(id);
+    if (!neighbors) continue;
+    for (const nid of neighbors) {
+      if (visited.has(nid)) continue;
+      visited.add(nid);
+      const n = currentGraph.nodeMap.get(nid);
+      if (!n) continue;
+      // Stop at cluster boundaries: don't cross into a different cluster
+      if (dragCluster != null && n.cluster != null && n.cluster !== dragCluster) continue;
+      // Only move invisible nodes (below minZoom or hidden by edge layer)
+      const invisible = (n.minZoom && currentK < n.minZoom) || _hiddenNodes.has(n.id);
+      if (invisible) {
+        n.x += dx;
+        n.y += dy;
+        queue.push({ id: nid, depth: depth + 1 });
+      }
+    }
+  }
+}
+
 // ── Node drag behavior (extracted to module level for reuse by streaming) ──
 const nodeDrag = d3.drag()
   .on('start', (e, d) => {
@@ -3125,11 +3345,14 @@ const nodeDrag = d3.drag()
         if (!selectedNodes.has(n.id)) continue;
         n.x += dx;
         n.y += dy;
+        moveInvisibleFollowers(n.id, dx, dy);
       }
     } else if (e.sourceEvent && e.sourceEvent.shiftKey) {
       return;
     } else {
+      const dragDx = e.x - d.x, dragDy = e.y - d.y;
       d.x = e.x; d.y = e.y;
+      moveInvisibleFollowers(d.id, dragDx, dragDy);
       if (currentK > 3.5) {
         const dr = d.radius || 4;
         const nearby = _nearbyNodes(d.x, d.y, dr + 30);
@@ -3833,6 +4056,27 @@ function clusterLabelDrag(getMembersFn) {
         n.x += e.dx;
         n.y += e.dy;
       }
+      // Move invisible nodes connected to cluster members (via full adjacency)
+      // This catches structural children that may not match the cluster filter
+      if (currentGraph && currentGraph.fullAdjacency) {
+        const adj = currentGraph.fullAdjacency;
+        const moved = new Set(memberSet);
+        for (const mid of memberSet) {
+          const neighbors = adj.get(mid);
+          if (!neighbors) continue;
+          for (const nid of neighbors) {
+            if (moved.has(nid)) continue;
+            const n = currentGraph.nodeMap.get(nid);
+            if (!n) continue;
+            const invisible = (n.minZoom && currentK < n.minZoom) || _hiddenNodes.has(n.id);
+            if (invisible) {
+              n.x += e.dx;
+              n.y += e.dy;
+              moved.add(nid);
+            }
+          }
+        }
+      }
       // Soft collision: push non-member nodes away from dragged cluster members
       // Skip during cluster gather — separateClusters handles cluster-level overlap
       if (!clusterGatherHeld) {
@@ -4118,6 +4362,9 @@ function rebuildClusterMemberCache() {
   if (!currentNodes) return;
   for (const n of currentNodes) {
     if (n.cid != null || n.cluster != null) {
+      // Only include visible nodes so hulls and labels reflect what's on screen
+      if (_hiddenNodes.has(n.id)) continue;
+      if (n.minZoom && currentK < n.minZoom) continue;
       const cid = n.cluster;
       if (!clusterMemberCache.has(cid)) clusterMemberCache.set(cid, []);
       clusterMemberCache.get(cid).push(n);
@@ -4368,7 +4615,15 @@ function computeMetaLinks() {
 
 function clusterCentroid(cid) {
   if (!currentNodes) return { x: 0, y: 0 };
-  const members = currentNodes.filter(n => n.cluster === cid);
+  // Only consider visible nodes for centroid
+  const visible = currentNodes.filter(n =>
+    n.cluster === cid &&
+    !_hiddenNodes.has(n.id) &&
+    !(n.minZoom && currentK < n.minZoom)
+  );
+  const members = visible.length > 0
+    ? visible
+    : currentNodes.filter(n => n.cluster === cid); // fallback to all
   if (members.length === 0) return { x: 0, y: 0 };
   let cx = 0, cy = 0;
   for (const m of members) { cx += m.x; cy += m.y; }
@@ -4626,7 +4881,15 @@ function selectNode(d, analysis) {
   }
 
   const info = d.info;
-  if (!info) return;
+  if (!info) {
+    // Non-function nodes (parameter, argument, value types, etc.)
+    document.getElementById('info-body').innerHTML = `
+      <div class="section"><div class="section-title">Type</div>${d.type || 'unknown'}</div>
+      <div class="section"><div class="section-title">System</div>${d.clusterName || 'misc'}</div>
+      ${affinitySection}
+      ${structSection}`;
+    return;
+  }
   const reads = [...info.reads].sort();
   const writes = [...info.writes].sort();
   const rw = [...info.rw].sort();
@@ -6349,6 +6612,22 @@ document.getElementById('show-cluster-labels').addEventListener('change', () => 
 document.getElementById('show-boundary-labels').addEventListener('change', () => applySemanticZoom());
 document.getElementById('show-meta-edges').addEventListener('change', () => applySemanticZoom());
 
+document.getElementById('zoom-breakpoints').addEventListener('change', (e) => {
+  zoomBreakpointsEnabled = e.target.checked;
+  if (zoomBreakpointsEnabled) applySemanticZoom();
+});
+
+document.getElementById('zoom-level').addEventListener('change', (e) => {
+  const name = e.target.value;
+  const bp = ZOOM_BREAKPOINTS.find(b => b.name.toLowerCase() === name);
+  if (bp && _zoomBehavior && svg) {
+    zoomBreakpointsEnabled = true;
+    document.getElementById('zoom-breakpoints').checked = true;
+    svg.transition().duration(600)
+      .call(_zoomBehavior.scaleTo, bp.zoom);
+  }
+});
+
 document.getElementById('lock-btn').addEventListener('click', () => {
   if (lockedNodes.size > 0 && selectedNodes.size === 0) {
     unlockNodes();
@@ -6561,6 +6840,7 @@ function connectGraphSSE() {
 let _streamState = null;
 let streamPaused = false;
 let _streamSource = null; // the EventSource reference
+let _streamOnMessage = null; // the real message handler, exposed for cinematic mode
 const STREAMER_URL = 'http://127.0.0.1:3801';
 
 function pauseStream() {
@@ -6603,7 +6883,7 @@ function connectStreamSSE(url) {
   // Phase tracking: 'base' = accumulating rows for bulk build, 'tail' = incremental streaming
   let phase = 'base';
 
-  const _realOnMessage = (event) => {
+  _streamOnMessage = (event) => {
     try {
       const data = JSON.parse(event.data);
 
@@ -6686,6 +6966,7 @@ function connectStreamSSE(url) {
       }
 
       if (data.type === 'end') {
+        CinematicStream.stop(); // drain cinematic queue if active
         statusEl.textContent = `stream complete -- ${state.csvNodes.length} nodes, ${state.csvEdges.length} edges`;
 
         // Stop render loop, finalize immediately (no physics settle needed)
@@ -6719,6 +7000,12 @@ function connectStreamSSE(url) {
       if (phase === 'base') {
         state.baseRows.push(...data.rows);
         statusEl.textContent = `loading base -- ${state.baseRows.length} rows`;
+        return;
+      }
+
+      // Cinematic mode: queue rows for one-at-a-time animated processing
+      if (CinematicStream.isEnabled()) {
+        CinematicStream.enqueue(data.rows);
         return;
       }
 
@@ -6807,6 +7094,7 @@ function connectStreamSSE(url) {
             currentNodes.push(node);
             currentGraph.nodeMap.set(nodeName, node);
             currentGraph.adjacency.set(nodeName, new Set());
+            if (currentGraph.fullAdjacency) currentGraph.fullAdjacency.set(nodeName, new Set());
             currentGraph.nodeDegree.set(nodeName, 0);
 
             // Place the node — no physics, static positioning
@@ -6857,9 +7145,13 @@ function connectStreamSSE(url) {
               state.csvEdges.push(edge);
               currentLinks.push(edge);
 
-              // Update adjacency
+              // Update adjacency (both filtered and full)
               if (currentGraph.adjacency.has(srcName)) currentGraph.adjacency.get(srcName).add(tgtName);
               if (currentGraph.adjacency.has(tgtName)) currentGraph.adjacency.get(tgtName).add(srcName);
+              if (currentGraph.fullAdjacency) {
+                if (currentGraph.fullAdjacency.has(srcName)) currentGraph.fullAdjacency.get(srcName).add(tgtName);
+                if (currentGraph.fullAdjacency.has(tgtName)) currentGraph.fullAdjacency.get(tgtName).add(srcName);
+              }
               currentGraph.nodeDegree.set(srcName, (currentGraph.nodeDegree.get(srcName) || 0) + 1);
               currentGraph.nodeDegree.set(tgtName, (currentGraph.nodeDegree.get(tgtName) || 0) + 1);
 
@@ -6909,7 +7201,7 @@ function connectStreamSSE(url) {
       }
     } catch { /* fall through */ }
 
-    _realOnMessage(event);
+    _streamOnMessage(event);
   };
 
   source.onerror = () => {
@@ -6918,6 +7210,163 @@ function connectStreamSSE(url) {
 
   return source;
 }
+
+// ═══════════════════════════════════════════════════════
+// CINEMATIC STREAMING — zoom-and-pan animation per node
+// ═══════════════════════════════════════════════════════
+const CinematicStream = (function () {
+  let queue = [];
+  let active = false;
+  let processing = false;
+  let _bypassCinematic = false; // flag to prevent re-queuing during processSingleRow
+
+  function isEnabled() {
+    if (_bypassCinematic) return false;
+    return document.getElementById('cinematic-stream')?.checked || false;
+  }
+
+  function enqueue(rows) {
+    queue.push(...rows);
+    if (!processing) drainQueue();
+  }
+
+  function stop() {
+    queue.length = 0;
+    active = false;
+    // processing flag cleared when drainQueue's while loop exits naturally
+  }
+
+  async function drainQueue() {
+    if (processing) return;
+    processing = true;
+    active = true;
+
+    // First pass: process all rows immediately to add them to the graph
+    const addedNodes = [];
+    const allRows = [...queue];
+    queue.length = 0;
+
+    for (const row of allRows) {
+      if (!active) break;
+      const fields = parseCSVLine(row);
+      const state = _streamState;
+      if (!state) break;
+      const col = state.col;
+      const rowType = fields[col.type];
+
+      const nodeCountBefore = currentNodes ? currentNodes.length : 0;
+      processSingleRow(row);
+      const nodeCountAfter = currentNodes ? currentNodes.length : 0;
+
+      if (rowType === 'NODE' && nodeCountAfter > nodeCountBefore) {
+        const newNode = currentNodes[currentNodes.length - 1];
+        // Only animate visible nodes (skip deep structural types)
+        if (newNode && newNode.x != null && !(newNode.minZoom && newNode.minZoom > 4)) {
+          addedNodes.push(newNode);
+        }
+      }
+    }
+
+    // Second pass: animate through the newly added visible nodes
+    if (addedNodes.length > 0) {
+      await animateTour(addedNodes);
+    }
+
+    processing = false;
+    active = false;
+
+    // If more rows arrived while we were touring, process them
+    if (queue.length > 0) drainQueue();
+  }
+
+  function processSingleRow(row) {
+    // Feed a single row through the normal tail handler
+    const fakeEvent = {
+      data: JSON.stringify({ type: 'rows', rows: [row] })
+    };
+    _bypassCinematic = true;
+    try {
+      if (_streamOnMessage) _streamOnMessage(fakeEvent);
+    } finally {
+      _bypassCinematic = false;
+    }
+  }
+
+  async function animateTour(nodes) {
+    if (!svg || !_zoomBehavior || nodes.length === 0) return;
+
+    const svgEl = svg.node();
+    const width = svgEl.clientWidth || window.innerWidth;
+    const height = svgEl.clientHeight || window.innerHeight;
+
+    function zoomTo(targetTransform, durationMs, easing) {
+      return new Promise(resolve => {
+        svg.transition('cinematic')
+          .duration(durationMs)
+          .ease(easing || d3.easeCubicInOut)
+          .call(_zoomBehavior.transform, targetTransform);
+        setTimeout(resolve, durationMs + 30);
+      });
+    }
+
+    const makeTransform = (k, x, y) =>
+      d3.zoomIdentity.translate(width / 2, height / 2).scale(k).translate(-x, -y);
+
+    // Compute the bounding box of all new nodes to pick a good zoom level
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      if (n.x < minX) minX = n.x;
+      if (n.x > maxX) maxX = n.x;
+      if (n.y < minY) minY = n.y;
+      if (n.y > maxY) maxY = n.y;
+    }
+    const bboxW = maxX - minX + 200;
+    const bboxH = maxY - minY + 200;
+    const overviewK = Math.max(0.3, Math.min(2, Math.min(width / bboxW, height / bboxH)));
+    const detailK = Math.max(overviewK, 3.0);
+
+    // If many nodes, do a quick overview of all of them first
+    if (nodes.length > 3) {
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      await zoomTo(makeTransform(overviewK, cx, cy), 800, d3.easeCubicOut);
+      await sleep(400);
+    }
+
+    // Tour each node: pan to it, highlight briefly, move on
+    for (let i = 0; i < nodes.length && active; i++) {
+      const node = nodes[i];
+
+      // Pan to this node
+      const duration = i === 0 && nodes.length <= 3 ? 600 : 400;
+      await zoomTo(makeTransform(detailK, node.x, node.y), duration);
+
+      // Highlight the node
+      const circle = gNodes.selectAll('.node')
+        .filter(d => d.id === node.id)
+        .select('circle');
+      if (!circle.empty()) {
+        circle
+          .attr('stroke', '#fff')
+          .attr('stroke-width', 3)
+          .attr('stroke-opacity', 1);
+        circle.transition().duration(800)
+          .attr('stroke-opacity', 0)
+          .attr('stroke-width', 0);
+      }
+
+      // Hold on this node — longer for last node
+      const isLast = i === nodes.length - 1;
+      await sleep(isLast ? 600 : 300);
+    }
+
+    // Stay at the last node — don't return to original view
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  return { isEnabled, enqueue, stop, drainQueue };
+})();
 
 function connectFocusSSE() {
   const source = new EventSource(location.origin + '/focus-events');
