@@ -37,6 +37,7 @@ body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', mo
 #info-panel .tag.rw { border-left: 2px solid #fa6; }
 
 #legend {
+  display: none;
   position: fixed; bottom: 16px; left: 16px; z-index: 5;
   background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
   padding: 12px; font-size: 11px;
@@ -101,9 +102,10 @@ body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', mo
 #comparison-badge.visible { opacity: 1; pointer-events: auto; }
 
 #pull-layers {
-  position: fixed; top: 85px; left: 16px; z-index: 5;
+  position: fixed; bottom: 16px; left: 16px; z-index: 5;
   background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
   padding: 10px 14px; font-size: 11px;
+  max-height: calc(100vh - 100px); overflow-y: auto;
 }
 #pull-layers .pull-title { color: #666; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
 #pull-layers .layer-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
@@ -1354,13 +1356,120 @@ const pullLayerState = new Map();
 const pullLayerPrevOpacity = new Map(); // stored opacity before toggling off
 let proximityBoost = 0.5; // 0–1, how much screen proximity at high zoom boosts edge opacity
 
+// Count edge types in the current graph for sorting the panel
+function getEdgeTypeCounts() {
+  const counts = new Map();
+  if (currentGraph && currentGraph.links) {
+    for (const l of currentGraph.links) {
+      counts.set(l.type, (counts.get(l.type) || 0) + 1);
+    }
+  }
+  // Count memberOf from nodes with clusters
+  if (currentNodes) {
+    let clusterCount = 0;
+    for (const n of currentNodes) {
+      if (n.cluster != null && n.cluster >= 0) clusterCount++;
+    }
+    if (clusterCount > 0) counts.set('memberOf', clusterCount);
+  }
+  return counts;
+}
+
+// Compute which nodes should be hidden based on disabled edge types.
+// A node is hidden if ALL its edges are of disabled types (no enabled edge connects it).
+function computeHiddenNodes() {
+  const hidden = new Set();
+  if (!currentGraph || !currentGraph.links) return hidden;
+
+  // Collect nodes that have at least one enabled edge
+  const hasEnabledEdge = new Set();
+  for (const l of currentGraph.links) {
+    if ((pullLayerState.get(l.type) || 0) > 0) {
+      hasEnabledEdge.add(l.source);
+      hasEnabledEdge.add(l.target);
+    }
+  }
+
+  // Cluster membership counts as a connection if memberOf is enabled
+  const memberOfEnabled = (pullLayerState.get('memberOf') || 0) > 0;
+
+  if (currentNodes) {
+    for (const n of currentNodes) {
+      // Nodes with no edges at all stay visible
+      const degree = currentGraph.nodeDegree.get(n.id) || 0;
+      if (degree === 0) continue;
+      // If node has at least one enabled edge, it's visible
+      if (hasEnabledEdge.has(n.id)) continue;
+      // If memberOf is enabled and node has a cluster, it's visible
+      if (memberOfEnabled && n.cluster != null && n.cluster >= 0) continue;
+      hidden.add(n.id);
+    }
+  }
+  return hidden;
+}
+
+let _hiddenNodes = new Set();
+
+function applyNodeHiding() {
+  _hiddenNodes = computeHiddenNodes();
+  if (!currentNodes) return;
+  gNodes.selectAll('.node').each(function(d) {
+    d3.select(this).style('display', _hiddenNodes.has(d.id) ? 'none' : null);
+  });
+  gLabels.selectAll('text').each(function(d) {
+    d3.select(this).style('display', _hiddenNodes.has(d.id) ? 'none' : null);
+  });
+}
+
+let _lastLayerCount = 0; // track how many layers we've rendered to detect new ones
+let _layerSortOrder = null; // frozen sort order after first graph build
+
 function initPullLayerUI() {
   const container = document.getElementById('pull-layers');
   // Clear everything after the title
   while (container.children.length > 1) container.removeChild(container.lastChild);
-  for (const layer of EDGE_LAYERS) {
-    const defaultOpacity = layer.defaultOn ? 1.0 : 0;
-    pullLayerState.set(layer.id, defaultOpacity);
+
+  const counts = getEdgeTypeCounts();
+
+  // Ensure memberOf layer exists
+  if (!EDGE_LAYERS.find(l => l.id === 'memberOf')) {
+    EDGE_LAYERS.push({
+      id: 'memberOf',
+      label: 'Clusters',
+      desc: 'Cluster membership: toggling off hides cluster hulls and labels',
+      directed: false,
+      color: '#777',
+      dash: null,
+      defaultOn: true,
+      defaultThreshold: 1,
+      maxThreshold: 1,
+      compute() { return []; },
+    });
+    if (!pullLayerState.has('memberOf')) pullLayerState.set('memberOf', 1);
+  }
+
+  // Sort layers by frequency (descending) on first build, then freeze order
+  if (!_layerSortOrder) {
+    _layerSortOrder = [...EDGE_LAYERS].sort((a, b) => {
+      return (counts.get(b.id) || 0) - (counts.get(a.id) || 0);
+    }).map(l => l.id);
+  }
+  // Use frozen order, appending any new layers at the end
+  const orderMap = new Map(_layerSortOrder.map((id, i) => [id, i]));
+  const sortedLayers = [...EDGE_LAYERS].sort((a, b) => {
+    return (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999);
+  });
+  // Update frozen order with any new entries
+  for (const l of sortedLayers) {
+    if (!orderMap.has(l.id)) _layerSortOrder.push(l.id);
+  }
+
+  for (const layer of sortedLayers) {
+    // Preserve existing opacity if already set, else use default
+    if (!pullLayerState.has(layer.id)) {
+      pullLayerState.set(layer.id, layer.defaultOn ? 1.0 : 0);
+    }
+    const currentOpacity = pullLayerState.get(layer.id) || 0;
     const row = document.createElement('div');
     row.className = 'layer-row';
 
@@ -1371,38 +1480,44 @@ function initPullLayerUI() {
     const nameSpan = document.createElement('span');
     nameSpan.className = 'layer-name';
     nameSpan.textContent = layer.label;
+    if (layer.desc) nameSpan.title = layer.desc;
     row.appendChild(swatch);
     row.appendChild(nameSpan);
-
-    // Info tooltip
-    if (layer.desc) {
-      const info = document.createElement('span');
-      info.className = 'layer-info';
-      info.textContent = '(i)';
-      info.setAttribute('data-tip', layer.desc);
-      row.appendChild(info);
-    }
 
     // Opacity slider
     const slider = document.createElement('input');
     slider.type = 'range';
     slider.min = 0;
     slider.max = 100;
-    slider.value = defaultOpacity * 100;
+    slider.value = currentOpacity * 100;
     slider.className = 'pull-slider';
     const valSpan = document.createElement('span');
     valSpan.className = 'pull-val';
-    valSpan.textContent = defaultOpacity > 0 ? Math.round(defaultOpacity * 100) : 'off';
+    valSpan.textContent = currentOpacity > 0 ? Math.round(currentOpacity * 100) : 'off';
     slider.addEventListener('input', () => {
       const v = parseInt(slider.value) / 100;
       const oldV = pullLayerState.get(layer.id) || 0;
       pullLayerState.set(layer.id, v);
       valSpan.textContent = v > 0 ? Math.round(v * 100) : 'off';
-      // Sync disabled state with slider
       row.classList.toggle('disabled', v <= 0);
-      // Rebuild if layer toggled on/off, otherwise just update opacities
-      if ((oldV > 0) !== (v > 0)) {
+      if (layer.id === 'memberOf') {
+        // Toggle hull and cluster label visibility
+        const showHulls = v > 0;
+        document.getElementById('show-hulls').checked = showHulls;
+        document.getElementById('show-cluster-labels').checked = showHulls;
+        if (showHulls && currentNodes) {
+          currentHullClusterIds = [...new Set(currentNodes.filter(n => n.cluster != null && n.cluster >= 0).map(n => n.cluster))];
+          renderHulls();
+          renderClusterLabels();
+        } else {
+          currentHullClusterIds = null;
+          gHulls.selectAll('path').remove();
+          gClusterLabels.selectAll('text').attr('opacity', 0);
+        }
+        applyNodeHiding();
+      } else if ((oldV > 0) !== (v > 0)) {
         rebuild();
+        applyNodeHiding();
       } else {
         updateEdgeOpacities();
       }
@@ -1411,25 +1526,40 @@ function initPullLayerUI() {
     row.appendChild(valSpan);
 
     // Toggle on/off by clicking swatch or name
-    if (!defaultOpacity) row.classList.add('disabled');
+    if (currentOpacity <= 0) row.classList.add('disabled');
     const toggleLayer = () => {
       const current = pullLayerState.get(layer.id) || 0;
       if (current > 0) {
-        // Turn off: save current opacity, set to 0
         pullLayerPrevOpacity.set(layer.id, current);
         pullLayerState.set(layer.id, 0);
         slider.value = 0;
         valSpan.textContent = 'off';
         row.classList.add('disabled');
       } else {
-        // Turn on: restore previous opacity (default to 1)
         const restore = pullLayerPrevOpacity.get(layer.id) || 1;
         pullLayerState.set(layer.id, restore);
         slider.value = Math.round(restore * 100);
         valSpan.textContent = Math.round(restore * 100);
         row.classList.remove('disabled');
       }
-      rebuild();
+      if (layer.id === 'memberOf') {
+        const showHulls = (pullLayerState.get('memberOf') || 0) > 0;
+        document.getElementById('show-hulls').checked = showHulls;
+        document.getElementById('show-cluster-labels').checked = showHulls;
+        if (showHulls && currentNodes) {
+          currentHullClusterIds = [...new Set(currentNodes.filter(n => n.cluster != null && n.cluster >= 0).map(n => n.cluster))];
+          renderHulls();
+          renderClusterLabels();
+        } else {
+          currentHullClusterIds = null;
+          gHulls.selectAll('path').remove();
+          gClusterLabels.selectAll('text').attr('opacity', 0);
+        }
+        applyNodeHiding();
+      } else {
+        rebuild();
+        applyNodeHiding();
+      }
     };
     swatch.addEventListener('click', toggleLayer);
     nameSpan.addEventListener('click', toggleLayer);
@@ -1464,6 +1594,15 @@ function initPullLayerUI() {
   proxRow.appendChild(proxSlider);
   proxRow.appendChild(proxVal);
   container.appendChild(proxRow);
+
+  _lastLayerCount = EDGE_LAYERS.length;
+}
+
+// Refresh panel when new edge types appear (e.g. during streaming)
+function refreshPullLayerUI() {
+  if (EDGE_LAYERS.length !== _lastLayerCount) {
+    initPullLayerUI();
+  }
 }
 
 function getPullAdjacency() {
@@ -1574,18 +1713,21 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
       // Structural/hypergraph edges: only include in hypergraph mode
       if (!fnToFnTypes.has(e.type)) {
         if (viewMode !== 'hypergraph') continue;
-        // Create target node on-the-fly if not already present
-        if (!nodeMap.has(e.target)) {
+        // Create source/target nodes on-the-fly if not already present
+        for (const nid of [e.source, e.target]) {
+          if (nodeMap.has(nid)) continue;
           const gScores = new Map();
           const addGScore = (cid, w) => gScores.set(cid, (gScores.get(cid) || 0) + w);
-          for (const token of tokenizeName(e.target)) {
+          for (const token of tokenizeName(nid)) {
             const section = SYSTEM_KEYWORDS.get(token);
             if (section) {
               const cid = sectionToId.get(section);
               if (cid != null) addGScore(cid, 2.0);
             }
           }
-          const userCluster = clusters.get(e.source) ?? 0;
+          // Inherit cluster from the other endpoint if known
+          const otherEnd = nid === e.source ? e.target : e.source;
+          const userCluster = clusters.get(otherEnd) ?? 0;
           addGScore(userCluster, 1.0);
           const gTotal = [...gScores.values()].reduce((a, b) => a + b, 0);
           const gAffinities = new Map();
@@ -1598,7 +1740,7 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
             }
           }
           // Determine visual properties based on CSV node type
-          const csvType = nt.get(e.target) || 'global';
+          const csvType = nt.get(nid) || 'global';
           let nodeColor = '#555', nodeRadius = 3, minZoom = 0;
           if (valueTypes.has(csvType)) {
             nodeColor = '#666'; nodeRadius = 2; minZoom = 10;
@@ -1608,13 +1750,13 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
             nodeColor = '#666'; nodeRadius = 2; minZoom = 10;
           }
           const gNode = {
-            id: e.target, type: csvType, cluster: bestCluster,
+            id: nid, type: csvType, cluster: bestCluster,
             clusterName: clusterNames.get(bestCluster) || 'misc',
             affinities: gAffinities, radius: nodeRadius, color: nodeColor,
             minZoom,
           };
           nodes.push(gNode);
-          nodeMap.set(e.target, gNode);
+          nodeMap.set(nid, gNode);
         }
       }
       // Check layer enabled: use snapshot for known layers, live state for auto-registered
@@ -2204,6 +2346,42 @@ const GraphPhysics = (function () {
 
   const COLLISION_PAD = 6;
 
+  // ── Spatial grid for O(n) repulsion + collision ──
+  const GRID_CELL = REPULSION_MAX_DIST; // one cell = repulsion range
+  let _gridMap = null;   // Map<cellKey, number[]> — indices into nodes array
+  let _gridNodes = null; // reference to the nodes array used to build the grid
+
+  function _cellKey(cx, cy) { return cx * 100003 + cy; }
+
+  function _buildGrid(nodes) {
+    const map = new Map();
+    for (let i = 0; i < nodes.length; i++) {
+      const nd = nodes[i];
+      const cx = Math.floor(nd.x / GRID_CELL);
+      const cy = Math.floor(nd.y / GRID_CELL);
+      const key = _cellKey(cx, cy);
+      let bucket = map.get(key);
+      if (!bucket) { bucket = []; map.set(key, bucket); }
+      bucket.push(i);
+    }
+    _gridMap = map;
+    _gridNodes = nodes;
+  }
+
+  // Iterate all node indices within `range` of (x, y).
+  // Calls cb(index) for each candidate. Caller does final distance check.
+  function _gridNeighbors(x, y, range, cb) {
+    const r = Math.ceil(range / GRID_CELL);
+    const cx0 = Math.floor(x / GRID_CELL);
+    const cy0 = Math.floor(y / GRID_CELL);
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dy = -r; dy <= r; dy++) {
+        const bucket = _gridMap.get(_cellKey(cx0 + dx, cy0 + dy));
+        if (bucket) for (let k = 0; k < bucket.length; k++) cb(bucket[k]);
+      }
+    }
+  }
+
   const EDGE_TYPE_MULT = {
     calls: 3.0, calledBy: 3.0,
     shared: 1.5, sharedWrites: 2.0,
@@ -2359,21 +2537,27 @@ const GraphPhysics = (function () {
     // Adaptive scaling
     const nScale = 1 / Math.max(1, Math.sqrt(n / 20));
 
-    // ── 1. Repulsion ────────────────────────────────
+    // ── 1. Repulsion (spatial-grid accelerated) ─────
+    _buildGrid(nodes);
+    const repMaxSq = REPULSION_MAX_DIST * REPULSION_MAX_DIST;
+
     for (let i = 0; i < n; i++) {
       const a = nodes[i];
-      if (isDragged.has(a.id) || lockedNodes.has(a.id)) continue;
-      if (a.minZoom && currentK < a.minZoom) continue; // invisible node
+      const aFixed = isDragged.has(a.id) || lockedNodes.has(a.id);
+      if (a.minZoom && currentK < a.minZoom) continue;
+      if (_hiddenNodes.has(a.id)) continue;
       const ax = a.x, ay = a.y;
       const am = a.mass || 1;
 
-      for (let j = i + 1; j < n; j++) {
+      _gridNeighbors(ax, ay, REPULSION_MAX_DIST, (j) => {
+        if (j <= i) return; // only process each pair once (j > i)
         const b = nodes[j];
-        if (b.minZoom && currentK < b.minZoom) continue; // invisible node
+        if (b.minZoom && currentK < b.minZoom) return;
+        if (_hiddenNodes.has(b.id)) return;
         const dx = b.x - ax;
         const dy = b.y - ay;
         const distSq = dx * dx + dy * dy;
-        if (distSq > REPULSION_MAX_DIST * REPULSION_MAX_DIST) continue;
+        if (distSq > repMaxSq) return;
 
         const dist = Math.sqrt(distSq) || 0.01;
         const F = REPULSION_K * nScale / (distSq + 10);
@@ -2381,7 +2565,7 @@ const GraphPhysics = (function () {
         const fy = (dy / dist) * F * dt;
         const bm = b.mass || 1;
 
-        if (!isDragged.has(a.id) && !lockedNodes.has(a.id)) {
+        if (!aFixed) {
           a.vx = (a.vx || 0) - fx / am;
           a.vy = (a.vy || 0) - fy / am;
         }
@@ -2389,7 +2573,7 @@ const GraphPhysics = (function () {
           b.vx = (b.vx || 0) + fx / bm;
           b.vy = (b.vy || 0) + fy / bm;
         }
-      }
+      });
     }
 
     // ── 2. Edge attraction ──────────────────────────
@@ -2468,23 +2652,29 @@ const GraphPhysics = (function () {
       totalKE += nd.vx * nd.vx + nd.vy * nd.vy;
     }
 
-    // ── 6. Hard collision ───────────────────────────
+    // ── 6. Hard collision (spatial-grid accelerated) ─
+    // Rebuild grid after velocity integration moved nodes
+    _buildGrid(nodes);
+    const MAX_COLLIDE_RANGE = 30; // max possible (radius+radius+pad)
+
     for (let i = 0; i < n; i++) {
       const a = nodes[i];
-      for (let j = i + 1; j < n; j++) {
+      const aFixed = isDragged.has(a.id) || lockedNodes.has(a.id);
+
+      _gridNeighbors(a.x, a.y, MAX_COLLIDE_RANGE, (j) => {
+        if (j <= i) return;
         const b = nodes[j];
         const dx = b.x - a.x;
         const dy = b.y - a.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
         const minDist = (a.radius || 4) + (b.radius || 4) + COLLISION_PAD;
-        if (dist >= minDist) continue;
+        if (dist >= minDist) return;
 
         const overlap = minDist - dist;
         const nx = dx / dist, ny = dy / dist;
         const am = a.mass || 1, bm = b.mass || 1;
         const totalM = am + bm;
 
-        const aFixed = isDragged.has(a.id) || lockedNodes.has(a.id);
         const bFixed = isDragged.has(b.id) || lockedNodes.has(b.id);
 
         if (!aFixed && !bFixed) {
@@ -2514,7 +2704,7 @@ const GraphPhysics = (function () {
             b.vy = (b.vy || 0) - ny * approach * (am / totalM);
           }
         }
-      }
+      });
     }
 
     // ── 7. Rebuild centroids ────────────────────────
@@ -2576,6 +2766,111 @@ const GraphPhysics = (function () {
   function isRunning() { return running; }
 
   return { start, stop, endStream, isRunning, placeNewNode, rebuildCentroids };
+})();
+
+// ═══════════════════════════════════════════════════════
+// STREAM PLACEMENT — positions new nodes without physics
+// ═══════════════════════════════════════════════════════
+// Decoupled from GraphPhysics. No forces, no weights, no velocity.
+// New nodes with an edge to an existing node are placed near that node.
+// New nodes with no edges yet go to the outskirts of the current graph.
+// Edges are added to the data model only — no positional side-effects.
+
+const StreamPlacement = (function () {
+  let rafId = null;
+  let hullCounter = 0;
+
+  function graphBounds() {
+    if (!currentNodes || currentNodes.length === 0) return { cx: 0, cy: 0, r: 200 };
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of currentNodes) {
+      if (n.x < minX) minX = n.x;
+      if (n.x > maxX) maxX = n.x;
+      if (n.y < minY) minY = n.y;
+      if (n.y > maxY) maxY = n.y;
+    }
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const r = Math.max(80, Math.sqrt((maxX - minX) ** 2 + (maxY - minY) ** 2) / 2);
+    return { cx, cy, r };
+  }
+
+  // Place a new node. If it has a connected neighbor already in the graph,
+  // position near that neighbor. Otherwise, place on the outskirts.
+  function placeNode(node) {
+    // Check for a connected neighbor already in the graph
+    const adj = currentGraph?.adjacency?.get(node.id);
+    if (adj && adj.size > 0) {
+      let sx = 0, sy = 0, cnt = 0;
+      for (const nid of adj) {
+        const n = currentGraph.nodeMap.get(nid);
+        if (n && n.x != null) { sx += n.x; sy += n.y; cnt++; }
+      }
+      if (cnt > 0) {
+        const angle = Math.random() * Math.PI * 2;
+        const jitter = 12 + Math.random() * 18;
+        node.x = sx / cnt + Math.cos(angle) * jitter;
+        node.y = sy / cnt + Math.sin(angle) * jitter;
+        node.vx = 0; node.vy = 0;
+        return;
+      }
+    }
+
+    // No neighbor — place on the outskirts
+    const { cx, cy, r } = graphBounds();
+    const angle = Math.random() * Math.PI * 2;
+    const dist = r + 30 + Math.random() * 40;
+    node.x = cx + Math.cos(angle) * dist;
+    node.y = cy + Math.sin(angle) * dist;
+    node.vx = 0; node.vy = 0;
+  }
+
+  // Called when an edge is added that connects to a node placed on the outskirts.
+  // If the node was orphaned and now has a neighbor, reposition it.
+  function repositionIfOrphaned(nodeName) {
+    const node = currentGraph?.nodeMap?.get(nodeName);
+    if (!node) return;
+    // Only reposition nodes that were added during this stream session
+    if (!node._streamAdded) return;
+    // If the node already had edges when placed, don't move it
+    if (node._hadEdgesOnPlace) return;
+
+    const adj = currentGraph.adjacency.get(nodeName);
+    if (!adj || adj.size === 0) return;
+
+    // Find the first neighbor with a position
+    for (const nid of adj) {
+      const n = currentGraph.nodeMap.get(nid);
+      if (n && n.x != null) {
+        const angle = Math.random() * Math.PI * 2;
+        const jitter = 12 + Math.random() * 18;
+        node.x = n.x + Math.cos(angle) * jitter;
+        node.y = n.y + Math.sin(angle) * jitter;
+        node._hadEdgesOnPlace = true;
+        return;
+      }
+    }
+  }
+
+  function renderLoop() {
+    rafId = requestAnimationFrame(renderLoop);
+    // renderPositions already calls renderHulls + renderClusterLabels
+    renderPositions();
+  }
+
+  function begin() {
+    if (rafId) return;
+    hullCounter = 0;
+    rafId = requestAnimationFrame(renderLoop);
+  }
+
+  function end(callback) {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    // No settle needed — positions are final. Call back immediately.
+    if (callback) callback();
+  }
+
+  return { placeNode, repositionIfOrphaned, begin, end };
 })();
 
 // ═══════════════════════════════════════════════════════
@@ -3064,6 +3359,7 @@ function renderIncremental() {
     );
 
   applySemanticZoom();
+  applyNodeHiding();
 }
 
 function renderGraph(graph, analysis, clusters, clusterNames) {
@@ -3839,7 +4135,37 @@ function computeClusterLabelPlacement() {
   if (!currentNodes || currentNodes.length === 0) return;
 
   const fontSize = (currentK <= 2 ? 13 / currentK : 13 / (2 * Math.pow(currentK / 2, 0.75)));
-  const nudgeStrength = 0.15; // how far to nudge per tick (fraction of force)
+  const nudgeStrength = 0.2;
+
+  // Build spatial grid for fast node proximity queries
+  const CELL = 60;
+  const nodeGrid = new Map();
+  for (const n of currentNodes) {
+    const key = ((n.x / CELL | 0) + 5000) + ',' + ((n.y / CELL | 0) + 5000);
+    if (!nodeGrid.has(key)) nodeGrid.set(key, []);
+    nodeGrid.get(key).push(n);
+  }
+  function nearbyNodes(x, y, radius) {
+    const result = [];
+    const r = Math.ceil(radius / CELL);
+    const gx = (x / CELL | 0) + 5000, gy = (y / CELL | 0) + 5000;
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dy = -r; dy <= r; dy++) {
+        const cell = nodeGrid.get((gx + dx) + ',' + (gy + dy));
+        if (cell) for (const n of cell) result.push(n);
+      }
+    }
+    return result;
+  }
+
+  // Compute hulls per cluster for boundary awareness
+  const clusterHulls = new Map();
+  for (const [cid, members] of clusterMemberCache) {
+    if (members.length < 3) continue;
+    const pts = members.map(m => [m.x, m.y]);
+    const hull = d3.polygonHull(pts);
+    if (hull) clusterHulls.set(cid, expandHull(hull, 15));
+  }
 
   // Collect labels and their current positions
   const labelData = [];
@@ -3852,24 +4178,52 @@ function computeClusterLabelPlacement() {
     for (const m of members) { mcx += m.x; mcy += m.y; }
     mcx /= members.length; mcy /= members.length;
 
-    // Get or seed current placement
+    // Seed placement: find the hull edge with the most negative space (fewest foreign nodes)
     if (!clusterLabelPlacement.has(d.cid)) {
-      const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
-      const gap = (currentK <= 2 ? 12 / currentK : 12 / (2 * Math.pow(currentK / 2, 0.75)));
-      clusterLabelPlacement.set(d.cid, { dx: 0, dy: (minY - gap) - mcy, angle: 0 });
+      const hull = clusterHulls.get(d.cid);
+      if (hull && hull.length >= 3) {
+        let bestX = mcx, bestY = mcy - 30, bestScore = Infinity;
+        for (let i = 0; i < hull.length; i++) {
+          const [ax, ay] = hull[i];
+          const [bx, by] = hull[(i + 1) % hull.length];
+          // Candidate: midpoint of hull edge, pushed outward
+          const mx = (ax + bx) / 2, my = (ay + by) / 2;
+          const odx = mx - mcx, ody = my - mcy;
+          const od = Math.hypot(odx, ody) || 1;
+          const px = mx + (odx / od) * 10, py = my + (ody / od) * 10;
+          // Score: count nearby foreign nodes (lower = more negative space)
+          const nearby = nearbyNodes(px, py, 80);
+          let score = 0;
+          for (const n of nearby) {
+            if (n.cluster === d.cid) continue;
+            const dist = Math.hypot(n.x - px, n.y - py);
+            if (dist < 80) score += (80 - dist) / 80;
+          }
+          // Bonus for being above the centroid (slight preference)
+          if (py < mcy) score -= 0.3;
+          if (score < bestScore) { bestScore = score; bestX = px; bestY = py; }
+        }
+        clusterLabelPlacement.set(d.cid, { dx: bestX - mcx, dy: bestY - mcy, angle: 0 });
+      } else {
+        const gap = (currentK <= 2 ? 12 / currentK : 12 / (2 * Math.pow(currentK / 2, 0.75)));
+        const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
+        clusterLabelPlacement.set(d.cid, { dx: 0, dy: (minY - gap) - mcy, angle: 0 });
+      }
     }
     const p = clusterLabelPlacement.get(d.cid);
-    labelData.push({ d, members, mcx, mcy, p, bbox: estimateLabelBBox(d.name, fontSize) });
+    labelData.push({ d, members, mcx, mcy, p, bbox: estimateLabelBBox(d.name, fontSize), hull: clusterHulls.get(d.cid) });
   });
 
   // Apply forces to nudge each label
   for (const label of labelData) {
-    const { d, members, mcx, mcy, p, bbox } = label;
+    const { d, members, mcx, mcy, p, bbox, hull } = label;
     const lx = mcx + p.dx, ly = mcy + p.dy;
     let fx = 0, fy = 0, torque = 0;
 
-    // Repel from nodes
-    for (const n of currentNodes) {
+    // Repel from nearby nodes (using spatial grid)
+    const searchR = Math.max(bbox.w, bbox.h) * 0.5 + 20;
+    const nearby = nearbyNodes(lx, ly, searchR);
+    for (const n of nearby) {
       const nr = (n.radius || 4) + 4;
       const dx = lx - n.x, dy = ly - n.y;
       const dist = Math.hypot(dx, dy) || 0.1;
@@ -3881,33 +4235,48 @@ function computeClusterLabelPlacement() {
       }
     }
 
-    // Repel from other labels
+    // Repel from other labels (stronger)
     for (const other of labelData) {
       if (other.d.cid === d.cid) continue;
       const ox = other.mcx + other.p.dx, oy = other.mcy + other.p.dy;
       const dx = lx - ox, dy = ly - oy;
       const dist = Math.hypot(dx, dy) || 0.1;
-      const minDist = (bbox.w + other.bbox.w) * 0.5 + 4;
+      const minDist = (bbox.w + other.bbox.w) * 0.5 + 10;
       if (dist < minDist) {
         const push = (minDist - dist) / minDist;
-        fx += (dx / dist) * push * 2;
-        fy += (dy / dist) * push * 2;
+        fx += (dx / dist) * push * 6;
+        fy += (dy / dist) * push * 6;
       }
     }
 
-    // Gentle pull toward cluster centroid (stay close)
-    const distFromCenter = Math.hypot(p.dx, p.dy);
-    if (distFromCenter > 1) {
-      fx -= (p.dx / distFromCenter) * 0.15;
-      fy -= (p.dy / distFromCenter) * 0.15;
+    // Pull toward nearest hull edge (stay near the boundary)
+    if (hull && hull.length >= 3) {
+      let bestDist = Infinity, nearHx = lx, nearHy = ly;
+      for (let i = 0; i < hull.length; i++) {
+        const [ax, ay] = hull[i];
+        const [bx, by] = hull[(i + 1) % hull.length];
+        // Project lx,ly onto segment ab
+        const abx = bx - ax, aby = by - ay;
+        const abLen2 = abx * abx + aby * aby;
+        if (abLen2 < 0.01) continue;
+        let t = ((lx - ax) * abx + (ly - ay) * aby) / abLen2;
+        t = Math.max(0, Math.min(1, t));
+        const px = ax + t * abx, py = ay + t * aby;
+        const dist = Math.hypot(lx - px, ly - py);
+        if (dist < bestDist) { bestDist = dist; nearHx = px; nearHy = py; }
+      }
+      // Gentle pull toward nearest hull point (label hovers near boundary)
+      const hullPull = 0.08;
+      fx += (nearHx - lx) * hullPull;
+      fy += (nearHy - ly) * hullPull;
+    } else {
+      // No hull — fallback: pull toward above-centroid
+      const gap = (currentK <= 2 ? 12 / currentK : 12 / (2 * Math.pow(currentK / 2, 0.75)));
+      const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
+      const defaultDy = (minY - gap) - mcy;
+      fy += (defaultDy - p.dy) * 0.1;
+      fx += (0 - p.dx) * 0.1;
     }
-
-    // Gentle pull toward "above cluster" default position
-    const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
-    const gap = (currentK <= 2 ? 12 / currentK : 12 / (2 * Math.pow(currentK / 2, 0.75)));
-    const defaultDy = (minY - gap) - mcy;
-    fy += (defaultDy - p.dy) * 0.05;
-    fx += (0 - p.dx) * 0.05; // prefer centered horizontally
 
     // Decay rotation toward 0
     torque -= p.angle * 0.1;
@@ -4147,7 +4516,14 @@ function bfsDistances(startId, adjacency, maxDepth) {
 }
 
 function highlightNeighbors(d, graph) {}
-function clearHighlight() {}
+function clearHighlight() {
+  // Reset all node opacities to their default (respecting semantic zoom)
+  gNodes.selectAll('.node').style('opacity', null);
+  gLabels.selectAll('text').attr('opacity', null);
+  // Re-apply semantic zoom to restore correct opacities
+  applySemanticZoom();
+  applyNodeHiding();
+}
 
 function affinityBarsHTML(d, clusterNames) {
   if (!d.affinities || d.affinities.size === 0) return '';
@@ -5615,6 +5991,17 @@ function stopSpacePull() {
 // KEYBOARD
 // ═══════════════════════════════════════════════════════
 document.addEventListener('keydown', (e) => {
+  // ESC: clear search bar from anywhere
+  if (e.code === 'Escape') {
+    const searchEl = document.getElementById('search');
+    if (searchEl.value) {
+      searchEl.value = '';
+      clearHighlight();
+    }
+    searchEl.blur();
+    return;
+  }
+
   // Skip keyboard shortcuts when typing in an input or select
   if (e.target.closest('input, select, textarea')) return;
 
@@ -5929,6 +6316,7 @@ function rebuild() {
   const graph = buildGraph(analysisResult, clusters, clusterNames, affinities, getOpts());
   renderGraph(graph, analysisResult, clusters, clusterNames);
   applySemanticZoom();
+  applyNodeHiding();
 }
 
 document.getElementById('view-mode').addEventListener('change', () => { stickyNodes.clear(); savedPositions.clear(); rebuild(); });
@@ -6212,18 +6600,23 @@ function connectStreamSSE(url) {
   _streamSource = source;
   const statusEl = document.getElementById('status');
 
+  // Phase tracking: 'base' = accumulating rows for bulk build, 'tail' = incremental streaming
+  let phase = 'base';
+
   const _realOnMessage = (event) => {
     try {
       const data = JSON.parse(event.data);
 
       if (data.type === 'header') {
-        // Reset state on new stream
+        // Reset stream accumulator state
         state.idxToName.clear();
         state.clusterIdxToName.clear();
         state.clusterNodeNames.clear();
         state.csvNodes.length = 0;
         state.csvEdges.length = 0;
         state.nodesSeen.clear();
+        state.baseRows = [];  // accumulate raw CSV rows during base phase
+        phase = 'base';
         statusEl.textContent = 'stream connected';
         statusEl.className = 'live';
 
@@ -6232,44 +6625,72 @@ function connectStreamSSE(url) {
           const cols = data.columns.split(',').map(c => c.trim());
           state.col = {};
           cols.forEach((name, i) => { state.col[name] = i; });
+          state.headerLine = data.columns;
         } else {
           state.col = { t: 0, type: 1, label: 2, source: 3, target: 4, importance_xi: 5, cluster: 6 };
+          state.headerLine = 't,type,label,source,target,importance_xi,cluster';
         }
         state.hasLabel = state.col.label !== undefined;
 
-        // Initialize the main graph data structures for streaming
-        currentNodes = [];
-        currentLinks = [];
-        currentGraph = {
-          nodes: currentNodes,
-          links: currentLinks,
-          nodeMap: new Map(),
-          adjacency: new Map(),
-          nodeDegree: new Map(),
-          edgeWeights: new Map(),
-        };
-        currentClusterNames = new Map();
-        codemapImportance.clear();
-        nodeDisplayLabels.clear();
+        streamMode = true;
+        return;
+      }
 
-        // Clear SVG and start fresh
-        gLinks.selectAll('*').remove();
-        gNodes.selectAll('*').remove();
-        gLabels.selectAll('*').remove();
-        gClusterLabels.selectAll('*').remove();
-        gHulls.selectAll('*').remove();
+      if (data.type === 'replay-tail') {
+        // Base phase is done — build the graph from accumulated base rows using buildGraph
+        if (state.baseRows.length > 0) {
+          const csvText = state.headerLine + '\n' + state.baseRows.join('\n');
+          const { nodes: csvNodes, edges: csvEdges } = parseHistoryCSV(csvText);
+          csvClusterMap.clear();
+          for (const nd of csvNodes) {
+            if (nd.importance != null) codemapImportance.set(nd.id, nd.importance);
+            if (nd.cluster) csvClusterMap.set(nd.id, nd.cluster);
+          }
+          const result = buildAnalysisFromCSV(csvNodes, csvEdges);
+          result.precomputedEdges = csvEdges;
+          analysisResult = result;
+          state.csvNodes = csvNodes;
+          state.csvEdges = csvEdges;
+          rebuild();
 
-        // Start the physics engine
-        GraphPhysics.start();
+          // Seed the stream state's idxToName and nodeDisplayLabels from base rows
+          // so tail edges can resolve and base node labels persist in renderIncremental
+          const col = state.col;
+          for (const row of state.baseRows) {
+            const fields = parseCSVLine(row);
+            if (fields[col.type] === 'NODE') {
+              const idx = parseInt(fields[col.source]);
+              const name = fields[col.label] || `node_${idx}`;
+              state.idxToName.set(idx, name);
+              state.nodesSeen.add(idx);
+              if (fields[col.label]) nodeDisplayLabels.set(name, fields[col.label]);
+              const cn = parseInt(fields[col.cluster]);
+              if (!isNaN(cn) && cn === idx) {
+                state.clusterIdxToName.set(cn, name);
+                state.clusterNodeNames.add(name);
+              } else if (!isNaN(cn)) {
+                if (!state.clusterIdxToName.has(cn)) state.clusterIdxToName.set(cn, `Cluster ${cn}`);
+              }
+            }
+          }
+
+          // Reset cluster label placement so labels start fresh near their clusters
+          clusterLabelPlacement.clear();
+        }
+
+        // Switch to incremental tail phase — no physics, just placement
+        phase = 'tail';
+        StreamPlacement.begin();
+        statusEl.textContent = `sim: streaming ${data.count} rows...`;
         return;
       }
 
       if (data.type === 'end') {
         statusEl.textContent = `stream complete -- ${state.csvNodes.length} nodes, ${state.csvEdges.length} edges`;
 
-        // Let physics settle, then finalize
-        GraphPhysics.endStream(() => {
-          // Save settled positions
+        // Stop render loop, finalize immediately (no physics settle needed)
+        StreamPlacement.end(() => {
+          // Save positions
           for (const n of currentNodes) {
             savedPositions.set(n.id, { x: n.x, y: n.y });
             stickyNodes.add(n.id);
@@ -6283,6 +6704,7 @@ function connectStreamSSE(url) {
           // Do a final full rebuild to get gradients, arrowheads, meta-edges, etc.
           rebuild();
           statusEl.textContent = `stream settled -- ${state.csvNodes.length} nodes, ${state.csvEdges.length} edges`;
+          streamMode = false;
           if (_simActive) {
             _simActive = false;
             document.getElementById('sim-stream-btn').textContent = 'Sim Stream';
@@ -6292,6 +6714,13 @@ function connectStreamSSE(url) {
       }
 
       if (data.type !== 'rows' || !data.rows) return;
+
+      // During base phase, just accumulate raw rows — don't render incrementally
+      if (phase === 'base') {
+        state.baseRows.push(...data.rows);
+        statusEl.textContent = `loading base -- ${state.baseRows.length} rows`;
+        return;
+      }
 
       const col = state.col || { t: 0, type: 1, label: 2, source: 3, target: 4, importance_xi: 5, cluster: 6 };
       const hasLabel = state.hasLabel !== false;
@@ -6374,13 +6803,16 @@ function connectStreamSSE(url) {
               minZoom,
             };
 
-            // Place the node using physics placement logic
-            GraphPhysics.placeNewNode(node);
-
+            // Register in graph data structures first so adjacency is available for placement
             currentNodes.push(node);
             currentGraph.nodeMap.set(nodeName, node);
             currentGraph.adjacency.set(nodeName, new Set());
             currentGraph.nodeDegree.set(nodeName, 0);
+
+            // Place the node — no physics, static positioning
+            node._streamAdded = true;
+            node._hadEdgesOnPlace = (currentGraph.adjacency.get(nodeName)?.size || 0) > 0;
+            StreamPlacement.placeNode(node);
 
             // Track cluster names
             if (clusterName && !currentClusterNames.has(clusterIdx)) {
@@ -6420,6 +6852,7 @@ function connectStreamSSE(url) {
               // Skip edges involving cluster-defining nodes
               if (state.clusterNodeNames.has(srcName) || state.clusterNodeNames.has(tgtName)) continue;
 
+              ensureEdgeLayer(label);
               const edge = { source: srcName, target: tgtName, type: label, weight: 1 };
               state.csvEdges.push(edge);
               currentLinks.push(edge);
@@ -6429,6 +6862,10 @@ function connectStreamSSE(url) {
               if (currentGraph.adjacency.has(tgtName)) currentGraph.adjacency.get(tgtName).add(srcName);
               currentGraph.nodeDegree.set(srcName, (currentGraph.nodeDegree.get(srcName) || 0) + 1);
               currentGraph.nodeDegree.set(tgtName, (currentGraph.nodeDegree.get(tgtName) || 0) + 1);
+
+              // Reposition orphaned nodes that now have a connection
+              StreamPlacement.repositionIfOrphaned(srcName);
+              StreamPlacement.repositionIfOrphaned(tgtName);
 
               needsRender = true;
             }
@@ -6445,6 +6882,9 @@ function connectStreamSSE(url) {
         }
         renderIncremental();
       }
+
+      // Refresh edge layer panel if new edge types appeared during streaming
+      refreshPullLayerUI();
 
       statusEl.textContent = `streaming -- ${state.csvNodes.length} nodes, ${state.csvEdges.length} edges`;
     } catch (e) {
@@ -6465,10 +6905,6 @@ function connectStreamSSE(url) {
       if (data.type === 'resumed') {
         streamPaused = false;
         statusEl.textContent = statusEl.textContent.replace(' (paused)', '');
-        return;
-      }
-      if (data.type === 'replay-tail') {
-        statusEl.textContent = `sim: streaming ${data.count} rows...`;
         return;
       }
     } catch { /* fall through */ }
@@ -6579,19 +7015,16 @@ async function startStreamSim() {
   const btn = document.getElementById('sim-stream-btn');
   const n = parseInt(document.getElementById('sim-stream-n').value) || 50;
 
-  // If already active, request a fresh replay (restarts)
   statusEl.textContent = 'requesting replay...';
   btn.textContent = 'Replaying...';
 
   // Ensure we have an SSE connection to the streamer
   if (!_streamSource) {
-    streamMode = true;
     connectStreamSSE(STREAMER_URL + '/stream');
     // Brief delay so the SSE client registers before replay begins
     await new Promise(r => setTimeout(r, 300));
   }
 
-  streamMode = true;
   streamPaused = false;
   _simActive = true;
 
@@ -6604,7 +7037,7 @@ async function startStreamSim() {
       _simActive = false;
       return;
     }
-    statusEl.textContent = `replay: ${info.base} base + ${info.tail} streaming`;
+    // Status will be updated by SSE events (base loading → replay-tail → streaming)
   } catch (e) {
     statusEl.textContent = 'streamer not running — start with: node stream/streamer.mjs';
     btn.textContent = 'Sim Stream';
@@ -6706,21 +7139,18 @@ async function initDataPipeline() {
     console.error('Failed to load inspect.json:', e);
   }
 
-  // Check if streamer is running — if so, let it drive the graph
-  try {
-    const info = await fetch('http://127.0.0.1:3801/').then(r => r.ok ? r.json() : null);
-    if (info && info.status === 'ok') {
-      streamMode = true;
-      console.log('[stream] streamer detected, progressive mode');
-      document.getElementById('status').textContent = 'waiting for stream...';
-      connectStreamSSE('http://127.0.0.1:3801/stream');
-      return;
-    }
-  } catch { /* no streamer, fall through to bulk loading */ }
-
-  // No streamer — use bulk CSV loading
+  // Always load the graph via bulk CSV first
   loadAndAnalyze(true);
   setInterval(() => loadAndAnalyze(false), REFRESH_MS);
+
+  // Check if streamer is running — connect SSE but don't auto-stream
+  try {
+    const info = await fetch(STREAMER_URL + '/').then(r => r.ok ? r.json() : null);
+    if (info && info.status === 'ok') {
+      console.log('[stream] streamer detected, connecting SSE (idle until replay)');
+      connectStreamSSE(STREAMER_URL + '/stream');
+    }
+  } catch { /* no streamer */ }
 }
 
 initDataPipeline();
