@@ -1076,10 +1076,7 @@ function clusterFunctions(analysis) {
         result.set(fname, sectionNameToId.get(csvCluster));
       }
     }
-    const unclusteredId = clusterId;
-    for (const fname of functions.keys()) {
-      if (!result.has(fname)) result.set(fname, unclusteredId);
-    }
+    // Nodes without a cluster assignment are simply left out of the map
     return result;
   }
 
@@ -1768,17 +1765,17 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
 
   // Function nodes
   for (const [name, info] of functions) {
-    const clusterId = clusters.get(name) ?? 0;
-    const nodeAffinities = affinities.get(name) || new Map([[clusterId, 1.0]]);
+    const clusterId = clusters.has(name) ? clusters.get(name) : null;
+    const nodeAffinities = affinities.get(name) || (clusterId != null ? new Map([[clusterId, 1.0]]) : new Map());
     nodes.push({
       id: name,
       type: 'function',
       cluster: clusterId,
-      clusterName: clusterNames.get(clusterId) || 'misc',
+      clusterName: clusterId != null ? (clusterNames.get(clusterId) || 'misc') : null,
       affinities: nodeAffinities,
       info,
       radius: Math.max(4, (codemapImportance.has(name) ? codemapImportance.get(name) : 3) * 2),
-      color: CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length],
+      color: clusterId != null ? CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length] : '#555',
     });
     nodeMap.set(name, nodes[nodes.length - 1]);
   }
@@ -1822,11 +1819,13 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
           // Inherit cluster from the other endpoint if known
           const otherEnd = nid === e.source ? e.target : e.source;
           const otherNode = nodeMap.get(otherEnd);
-          const userCluster = otherNode ? otherNode.cluster : (clusters.get(otherEnd) ?? 0);
-          addGScore(userCluster, isChildNode ? 10.0 : 1.0);
+          const parentCluster = otherNode ? otherNode.cluster : clusters.get(otherEnd);
+          if (parentCluster != null) {
+            addGScore(parentCluster, isChildNode ? 10.0 : 1.0);
+          }
           const gTotal = [...gScores.values()].reduce((a, b) => a + b, 0);
           const gAffinities = new Map();
-          let bestCluster = 0, bestWeight = 0;
+          let bestCluster = -1, bestWeight = 0;
           if (gTotal > 0) {
             for (const [cid, w] of gScores) {
               const nw = w / gTotal;
@@ -1844,8 +1843,8 @@ function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
             nodeColor = '#666'; nodeRadius = 2; minZoom = 10;
           }
           const gNode = {
-            id: nid, type: csvType, cluster: bestCluster,
-            clusterName: clusterNames.get(bestCluster) || 'misc',
+            id: nid, type: csvType, cluster: bestCluster >= 0 ? bestCluster : null,
+            clusterName: bestCluster >= 0 ? (clusterNames.get(bestCluster) || 'misc') : null,
             affinities: gAffinities, radius: nodeRadius, color: nodeColor,
             minZoom,
           };
@@ -3566,7 +3565,7 @@ function renderIncremental() {
     );
 
   // Update cluster labels (d3 data join so they appear incrementally)
-  const allClusterIds = [...new Set(nodes.filter(n => n.type === 'function' || n.type === 'global').map(n => n.cluster))];
+  const allClusterIds = [...new Set(nodes.filter(n => (n.type === 'function' || n.type === 'global') && n.cluster != null).map(n => n.cluster))];
   gClusterLabels.selectAll('text:not(.user-cluster-label)')
     .data(allClusterIds.map(cid => ({
       cid, name: currentClusterNames.get(cid) || `cluster_${cid}`,
@@ -3795,7 +3794,7 @@ function renderGraph(graph, analysis, clusters, clusterNames) {
   renderHulls();
 
   // Cluster labels (floating — always visible)
-  const allClusterIds = [...new Set(nodes.filter(n => n.type === 'function').map(n => n.cluster))];
+  const allClusterIds = [...new Set(nodes.filter(n => n.type === 'function' && n.cluster != null).map(n => n.cluster))];
   gClusterLabels.selectAll('text')
     .data(allClusterIds.map(cid => ({
       cid, name: clusterNames.get(cid) || `cluster_${cid}`,
@@ -4859,56 +4858,64 @@ function selectNode(d, analysis) {
   const clusterNames = currentClusterNames;
   const affinitySection = affinityBarsHTML(d, clusterNames);
   const structSection = structBarsHTML(d);
-  console.log(d, analysis);
-
-  if (d.type === 'global') {
-    const users = [];
-    for (const [fname, info] of analysis.functions) {
-      const access = [];
-      if (info.reads.has(d.id)) access.push('read');
-      if (info.writes.has(d.id)) access.push('write');
-      if (info.rw.has(d.id)) access.push('r/w');
-      if (access.length) users.push({ fname, access: access.join(', ') });
+  // Collect ALL edges connected to this node from precomputed edges (complete set)
+  const allEdges = analysisResult?.precomputedEdges || [];
+  const edgesByType = new Map(); // type → [{ other, direction }]
+  for (const e of allEdges) {
+    if (e.source === d.id || e.target === d.id) {
+      const other = e.source === d.id ? e.target : e.source;
+      const direction = e.source === d.id ? 'out' : 'in';
+      if (!edgesByType.has(e.type)) edgesByType.set(e.type, []);
+      edgesByType.get(e.type).push({ other, direction });
     }
-    document.getElementById('info-body').innerHTML = `
-      <div class="section"><div class="section-title">Type</div>global variable</div>
-      ${affinitySection}
-      ${structSection}
-      <div class="section"><div class="section-title">Used by ${users.length} functions</div>
-        ${users.map(u => `<span class="tag">${u.fname} (${u.access})</span>`).join('')}
-      </div>`;
-    return;
+  }
+  // Also check currentLinks for edges not in precomputedEdges
+  if (currentLinks) {
+    for (const e of currentLinks) {
+      const src = typeof e.source === 'object' ? e.source.id : e.source;
+      const tgt = typeof e.target === 'object' ? e.target.id : e.target;
+      if (src === d.id || tgt === d.id) {
+        const other = src === d.id ? tgt : src;
+        const direction = src === d.id ? 'out' : 'in';
+        const list = edgesByType.get(e.type);
+        if (!list || !list.some(x => x.other === other && x.direction === direction)) {
+          if (!edgesByType.has(e.type)) edgesByType.set(e.type, []);
+          edgesByType.get(e.type).push({ other, direction });
+        }
+      }
+    }
   }
 
+  // Build edges HTML grouped by type
+  const edgeLayerMap = new Map(EDGE_LAYERS.map(l => [l.id, l]));
+  const edgesHTML = [...edgesByType.entries()]
+    .sort((a, b) => b[1].length - a[1].length)
+    .map(([type, edges]) => {
+      const layer = edgeLayerMap.get(type);
+      const color = layer ? layer.color : '#888';
+      const label = layer ? layer.label : type;
+      const tags = edges
+        .sort((a, b) => a.other.localeCompare(b.other))
+        .map(e => {
+          const arrow = e.direction === 'out' ? '->' : '<-';
+          return `<span class="tag" style="border-left:2px solid ${color}">${arrow} ${e.other}</span>`;
+        }).join('');
+      return `<div class="section"><div class="section-title">${label} (${edges.length})</div>${tags}</div>`;
+    }).join('');
+
+  // Type & system line
+  const typeLabel = d.type || 'unknown';
+  const systemLine = d.clusterName ? `<div class="section"><div class="section-title">System</div>${d.clusterName}</div>` : '';
   const info = d.info;
-  if (!info) {
-    // Non-function nodes (parameter, argument, value types, etc.)
-    document.getElementById('info-body').innerHTML = `
-      <div class="section"><div class="section-title">Type</div>${d.type || 'unknown'}</div>
-      <div class="section"><div class="section-title">System</div>${d.clusterName || 'misc'}</div>
-      ${affinitySection}
-      ${structSection}`;
-    return;
-  }
-  const reads = [...info.reads].sort();
-  const writes = [...info.writes].sort();
-  const rw = [...info.rw].sort();
-  const calls = [...info.calls].sort();
-  const calledBy = [];
-  for (const [fname, finfo] of analysis.functions) {
-    if (finfo.calls.has(d.id)) calledBy.push(fname);
-  }
-  calledBy.sort();
+  const locationLine = info ? `<div class="section"><div class="section-title">Location</div>Line ${info.line} -- ${info.endLine} (${info.lines} lines)</div>` : '';
 
   document.getElementById('info-body').innerHTML = `
-    <div class="section"><div class="section-title">Location</div>Line ${info.line} — ${info.endLine} (${info.lines} lines)</div>
-    <div class="section"><div class="section-title">System</div>${d.clusterName}</div>
+    <div class="section"><div class="section-title">Type</div>${typeLabel}</div>
+    ${locationLine}
+    ${systemLine}
     ${affinitySection}
-    ${reads.length ? `<div class="section"><div class="section-title">Reads (${reads.length})</div>${reads.map(r => `<span class="tag read">${r}</span>`).join('')}</div>` : ''}
-    ${writes.length ? `<div class="section"><div class="section-title">Writes (${writes.length})</div>${writes.map(w => `<span class="tag write">${w}</span>`).join('')}</div>` : ''}
-    ${rw.length ? `<div class="section"><div class="section-title">Read+Write (${rw.length})</div>${rw.map(v => `<span class="tag rw">${v}</span>`).join('')}</div>` : ''}
-    ${calls.length ? `<div class="section"><div class="section-title">Calls (${calls.length})</div>${calls.map(c => `<span class="tag call">${c}</span>`).join('')}</div>` : ''}
-    ${calledBy.length ? `<div class="section"><div class="section-title">Called by (${calledBy.length})</div>${calledBy.map(c => `<span class="tag called-by">${c}</span>`).join('')}</div>` : ''}
+    ${structSection}
+    ${edgesHTML}
   `;
 }
 
@@ -7030,7 +7037,7 @@ function connectStreamSSE(url) {
 
             const importance = importanceXi * 10;
             let clusterName = null;
-            let clusterIdx = 0;
+            let clusterIdx = -1; // -1 = unassigned, resolved below
 
             // If cluster column has a numeric value, use it for cluster assignment
             if (clusterCol !== '' && clusterCol !== undefined) {
@@ -7055,6 +7062,12 @@ function connectStreamSSE(url) {
                 csvClusterMap.set(nodeName, clusterName);
                 clusterIdx = cn;
               }
+            }
+
+            // No cluster assigned — leave unassigned (null cluster)
+            if (clusterIdx < 0) {
+              clusterIdx = null;
+              clusterName = null;
             }
 
             // Read node type from target column (enriched CSV) or fall back to importance heuristic
@@ -7082,11 +7095,11 @@ function connectStreamSSE(url) {
               id: nodeName,
               type: nodeType,
               cluster: clusterIdx,
-              clusterName: clusterName || 'misc',
-              affinities: new Map([[clusterIdx, 1.0]]),
+              clusterName: clusterName || null,
+              affinities: clusterIdx != null ? new Map([[clusterIdx, 1.0]]) : new Map(),
               info: null,
               radius: isValueNode ? (nodeType === 'parameter' ? 2.5 : 2) : Math.max(4, importance * 2),
-              color: isValueNode ? '#666' : (clusterName ? CLUSTER_COLORS[clusterIdx % CLUSTER_COLORS.length] : '#555'),
+              color: isValueNode ? '#666' : (clusterIdx != null ? CLUSTER_COLORS[clusterIdx % CLUSTER_COLORS.length] : '#555'),
               minZoom,
             };
 

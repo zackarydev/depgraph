@@ -38,3 +38,6 @@ I tried to implement this but got lost in the codegen/graphgen/historygen files,
 
 ---
 Need a way to hide certain node types, perhaps based on the edges. Ex: I odn't want to see func args, or func params. But I want to see globals. Or I don't want to see funcs, I want to see classes etc.
+
+---
+Now back to the issue of streaming new nodes positions them in a VERY bad place. They're not positioned where they should be.
