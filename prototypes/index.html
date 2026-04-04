@@ -225,6 +225,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: non
 <script src="https://cdn.jsdelivr.net/npm/acorn@8.14.1/dist/acorn.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/acorn-walk@8.3.4/dist/walk.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="/prototypes/stream-client.js"></script>
 <script>
 // ═══════════════════════════════════════════════════════
 // CONFIG
@@ -3305,12 +3306,51 @@ function moveInvisibleFollowers(nodeId, dx, dy) {
   }
 }
 
+// ── DISTANCE row emission on drag (Plan 2 Tier 2: position-as-distance) ──
+// When the user drags node d, emit DISTANCE rows to its K nearest visible
+// neighbors. These rows are the authoritative record of where the user put
+// this node — recoverable as spring rest-lengths later (Plan 2 Tier 3).
+const DISTANCE_THROTTLE_MS = 500;
+const DISTANCE_MAX_K = 8;
+
+function _isNodeVisibleForDistance(n) {
+  if (n.minZoom && currentK < n.minZoom) return false;
+  if (_hiddenNodes.has(n.id)) return false;
+  return true;
+}
+
+function emitDragDistances(d) {
+  if (!window.streamClient || !currentNodes) return;
+  const candidates = [];
+  for (const n of currentNodes) {
+    if (n.id === d.id) continue;
+    if (!_isNodeVisibleForDistance(n)) continue;
+    const dx = n.x - d.x, dy = n.y - d.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    candidates.push({ id: n.id, dist });
+  }
+  if (candidates.length === 0) return;
+  candidates.sort((a, b) => a.dist - b.dist);
+  const k = Math.min(DISTANCE_MAX_K, candidates.length);
+  for (let i = 0; i < k; i++) {
+    window.streamClient.emitDistance(d.id, candidates[i].id, candidates[i].dist);
+  }
+}
+
+function maybeEmitDragDistances(d) {
+  const now = performance.now();
+  if (d._lastDistanceEmit != null && now - d._lastDistanceEmit < DISTANCE_THROTTLE_MS) return;
+  d._lastDistanceEmit = now;
+  emitDragDistances(d);
+}
+
 // ── Node drag behavior (extracted to module level for reuse by streaming) ──
 const nodeDrag = d3.drag()
   .on('start', (e, d) => {
     d._dragStart = { x: d.x, y: d.y };
     d._dragStartTime = Date.now();
     d._isDragging = true;
+    d._lastDistanceEmit = null;
     forcePressDragNode = d;
     if (currentK > 3.5 && currentNodes) {
       let maxR = 0;
@@ -3364,6 +3404,7 @@ const nodeDrag = d3.drag()
         }
       }
     }
+    maybeEmitDragDistances(d);
     renderPositions();
   })
   .on('end', (e, d) => {
@@ -3380,10 +3421,18 @@ const nodeDrag = d3.drag()
           if (!selectedNodes.has(n.id)) continue;
           stickyNodes.add(n.id);
           savedPositions.set(n.id, { x: n.x, y: n.y });
+          if (window.streamClient) {
+            window.streamClient.emitAction('stick', n.id);
+            emitDragDistances(n);
+          }
         }
       } else {
         stickyNodes.add(d.id);
         savedPositions.set(d.id, { x: d.x, y: d.y });
+        if (window.streamClient) {
+          window.streamClient.emitAction('stick', d.id);
+          emitDragDistances(d);
+        }
       }
       trackDragProximity(d.id);
       pushArrangement('drag', [d.id]);
@@ -3407,24 +3456,40 @@ function setupNodeCircle(sel) {
           applyMetaLinkFocus();
         }
         if ((e.shiftKey && xKeyDown) || (e.ctrlKey || e.metaKey)) {
+          const wasSelected = selectedNodes.has(d.id);
+          const wasLocked = lockedNodes.has(d.id);
           selectedNodes.delete(d.id);
           lockedNodes.delete(d.id);
           d3.select(e.target).classed('selected-glow', false);
           updateLockUI();
           dismissNodeToT0(d);
+          if (window.streamClient) {
+            if (wasSelected) window.streamClient.emitAction('deselect', d.id);
+            if (wasLocked) window.streamClient.emitAction('unlock', d.id);
+          }
           return;
         }
         if (e.shiftKey) {
           if (selectedNodes.has(d.id)) {
+            const wasLocked = lockedNodes.has(d.id);
             selectedNodes.delete(d.id);
             lockedNodes.delete(d.id);
             d3.select(e.target).classed('selected-glow', false);
+            if (window.streamClient) {
+              window.streamClient.emitAction('deselect', d.id);
+              if (wasLocked) window.streamClient.emitAction('unlock', d.id);
+            }
           } else {
             selectedNodes.add(d.id);
             lockedNodes.add(d.id);
             stickyNodes.add(d.id);
             savedPositions.set(d.id, { x: d.x, y: d.y });
             d3.select(e.target).classed('selected-glow', true);
+            if (window.streamClient) {
+              window.streamClient.emitAction('select', d.id);
+              window.streamClient.emitAction('lock', d.id);
+              window.streamClient.emitAction('stick', d.id);
+            }
           }
           updateLockUI();
           return;
@@ -3435,10 +3500,16 @@ function setupNodeCircle(sel) {
     })
     .on('contextmenu', (e, d) => {
       e.preventDefault();
+      const wasSelected = selectedNodes.has(d.id);
+      const wasLocked = lockedNodes.has(d.id);
       selectedNodes.delete(d.id);
       lockedNodes.delete(d.id);
       gNodes.selectAll('.node').filter(n => n.id === d.id)
         .select('circle').classed('selected-glow', false);
+      if (window.streamClient) {
+        if (wasSelected) window.streamClient.emitAction('deselect', d.id);
+        if (wasLocked) window.streamClient.emitAction('unlock', d.id);
+      }
       updateLockUI();
       dismissNodeToT0(d);
     })
@@ -5166,15 +5237,23 @@ function releaseAttractor() {
 function lockSelectedNodes() {
   if (selectedNodes.size === 0) return;
   for (const id of selectedNodes) {
+    const wasLocked = lockedNodes.has(id);
     lockedNodes.add(id);
     stickyNodes.add(id);
     const n = currentGraph?.nodeMap.get(id);
     if (n) savedPositions.set(id, { x: n.x, y: n.y });
+    if (window.streamClient && !wasLocked) {
+      window.streamClient.emitAction('lock', id);
+      window.streamClient.emitAction('stick', id);
+    }
   }
   updateLockUI();
 }
 
 function unlockNodes() {
+  if (window.streamClient) {
+    for (const id of lockedNodes) window.streamClient.emitAction('unlock', id);
+  }
   lockedNodes.clear();
   updateLockUI();
 }
@@ -6829,6 +6908,10 @@ function connectGraphSSE() {
       if (data.type === 'graph-update') {
         console.log(`[graph-sse] update: ${data.nodes} nodes, ${data.edges} edges`);
         loadAndAnalyze(true);
+      } else if (data.type === 'rows-appended') {
+        // User-action rows from another tab — forwarded to stream-client,
+        // which filters own echoes before notifying listeners.
+        if (window.streamClient) window.streamClient._handleRebroadcast(data);
       }
     } catch { /* ignore */ }
   };
