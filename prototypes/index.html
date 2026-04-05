@@ -225,6 +225,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: non
 <script src="https://cdn.jsdelivr.net/npm/acorn@8.14.1/dist/acorn.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/acorn-walk@8.3.4/dist/walk.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="/prototypes/user-distances.js"></script>
 <script src="/prototypes/stream-client.js"></script>
 <script>
 // ═══════════════════════════════════════════════════════
@@ -254,6 +255,13 @@ let stickyNodes = new Set();
 let lockedNodes = new Set(); // explicitly locked nodes (pinned in place)
 let selectedNode = null;
 let currentK = 0.8;
+
+// ── User-authored distance springs (Plan 2 Option E) ─────────────────────
+// State + pure logic live in prototypes/user-distances.js (loaded above).
+// GraphPhysics reads these two bindings directly in its tick loop.
+const userDistances = window.userDistancesModule.userDistances;
+const updateUserDistance = window.userDistancesModule.updateUserDistance;
+let useUserDistances = true;   // toggle for debugging physics oscillation
 
 // ── Zoom breakpoints: dynamic edge layer presets by zoom level ──
 const ZOOM_BREAKPOINTS = [
@@ -2487,6 +2495,12 @@ const GraphPhysics = (function () {
   const ATTRACT_K = 0.015;
   const ATTRACT_REST = 20;
 
+  // Plan 2 Option E: user DISTANCE rows become springs with per-pair rest
+  // lengths. Slightly stronger than structural edge attraction so that user
+  // intent wins over the algorithmic layout when they conflict, but not so
+  // strong that over-constrained nodes oscillate.
+  const USER_DISTANCE_K = 0.025;
+
   const CLUSTER_PULL = 0.004;
   const CENTER_GRAVITY = 0.0005;
 
@@ -2746,6 +2760,41 @@ const GraphPhysics = (function () {
         const am = a.mass || 1;
         const bm = b.mass || 1;
 
+        if (!isDragged.has(a.id) && !lockedNodes.has(a.id)) {
+          a.vx = (a.vx || 0) + fx / am;
+          a.vy = (a.vy || 0) + fy / am;
+        }
+        if (!isDragged.has(b.id) && !lockedNodes.has(b.id)) {
+          b.vx = (b.vx || 0) - fx / bm;
+          b.vy = (b.vy || 0) - fy / bm;
+        }
+      }
+    }
+
+    // ── 2b. User-authored distance springs (Plan 2 Option E) ─
+    // Each entry in userDistances is a rest-length recorded when the user
+    // dragged one of the endpoints. Rest-lengths are raw Euclidean
+    // center-to-center distances, so no radius adjustment is applied here.
+    if (useUserDistances && userDistances.size > 0 && currentGraph) {
+      const nm = currentGraph.nodeMap;
+      for (const [key, entry] of userDistances) {
+        const sep = key.indexOf('\x00');
+        const aId = key.slice(0, sep);
+        const bId = key.slice(sep + 1);
+        const a = nm.get(aId);
+        const b = nm.get(bId);
+        if (!a || !b) continue;
+        if ((a.minZoom && currentK < a.minZoom) || (b.minZoom && currentK < b.minZoom)) continue;
+        if (_hiddenNodes.has(a.id) || _hiddenNodes.has(b.id)) continue;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const curr = Math.sqrt(dx * dx + dy * dy) || 0.01;
+        const displacement = curr - entry.dist;
+        const F = USER_DISTANCE_K * displacement * dt;
+        const fx = (dx / curr) * F;
+        const fy = (dy / curr) * F;
+        const am = a.mass || 1;
+        const bm = b.mass || 1;
         if (!isDragged.has(a.id) && !lockedNodes.has(a.id)) {
           a.vx = (a.vx || 0) + fx / am;
           a.vy = (a.vy || 0) + fy / am;
@@ -3320,7 +3369,7 @@ function _isNodeVisibleForDistance(n) {
 }
 
 function emitDragDistances(d) {
-  if (!window.streamClient || !currentNodes) return;
+  if (!currentNodes) return;
   const candidates = [];
   for (const n of currentNodes) {
     if (n.id === d.id) continue;
@@ -3332,8 +3381,14 @@ function emitDragDistances(d) {
   if (candidates.length === 0) return;
   candidates.sort((a, b) => a.dist - b.dist);
   const k = Math.min(DISTANCE_MAX_K, candidates.length);
+  const t = Date.now();
   for (let i = 0; i < k; i++) {
-    window.streamClient.emitDistance(d.id, candidates[i].id, candidates[i].dist);
+    const nid = candidates[i].id;
+    const dist = candidates[i].dist;
+    // Update local userDistances immediately so the physics sees the new
+    // rest-length this frame — no round-trip through the server needed.
+    updateUserDistance(d.id, nid, dist, t);
+    if (window.streamClient) window.streamClient.emitDistance(d.id, nid, dist);
   }
 }
 
@@ -6794,6 +6849,22 @@ function parseCSVLine(line) {
   return fields;
 }
 
+// ── Load user-actions.csv on startup (Plan 2 Option E) ───────────────────
+// Scans the user-action log and populates userDistances with the most-recent
+// rest-length for each pair. Called once on init; subsequent updates come
+// through local drag emission and the /graph-events SSE rebroadcast.
+async function loadUserActions() {
+  try {
+    const r = await fetch('/runtime/user-actions.csv');
+    if (!r.ok) return;
+    const text = await r.text();
+    const applied = window.userDistancesModule.ingestUserActionsCSV(text);
+    console.log(`[user-actions] loaded ${applied} DISTANCE rows → ${userDistances.size} unique pairs`);
+  } catch (e) {
+    console.warn('[user-actions] load failed:', e.message);
+  }
+}
+
 function parseHistoryCSV(text) {
   // Format: t,type,label,source,target,importance_xi,cluster
   //   NODE: t, NODE, <name>,     <idx>, ,       <importance>, <clusterIdx>
@@ -7714,6 +7785,20 @@ document.getElementById('live-reload').addEventListener('change', (e) => {
 
 connectFocusSSE();
 connectGraphSSE();
+loadUserActions();
+
+// Accept DISTANCE rows from other tabs via the SSE rebroadcast so multi-tab
+// drags converge to the same physics constraints. Own-tab echoes are already
+// filtered by stream-client before reaching this callback.
+if (window.streamClient) {
+  window.streamClient.onRemoteRows((msg) => {
+    for (const r of msg.rows) {
+      if (r.type === 'DISTANCE') {
+        updateUserDistance(r.source, r.target, Number(r.importance_xi), Number(r.t));
+      }
+    }
+  });
+}
 
 updateArrNav();
 

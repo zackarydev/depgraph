@@ -2,4 +2,5 @@ screenshots/archive
 runtime/archive
 runtime/nodes.csv
 runtime/edges.csv
+runtime/user-actions.csv
 node_modules/
