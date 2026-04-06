@@ -5,7 +5,9 @@
   "type": "module",
   "main": "src/main.js",
   "scripts": {
-    "test": "node --test --test-reporter=spec --test-concurrency=1 test/"
+    "test": "node --test --test-reporter=spec --test-concurrency=1 test/",
+    "test:visual": "npx playwright test",
+    "test:visual:show": "npx playwright test --headed"
   },
   "keywords": [],
   "author": "",
@@ -13,5 +15,9 @@
   "dependencies": {
     "acorn": "^8.16.0",
     "acorn-walk": "^8.3.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "playwright": "^1.59.1"
   }
 }

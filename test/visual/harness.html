@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Depgraph Visual Test Harness</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0a; color: #ccc; font-family: monospace; }
+    #viewport { width: 800px; height: 600px; position: relative; }
+    svg { width: 100%; height: 100%; }
+    #info {
+      position: absolute; top: 8px; left: 8px;
+      font-size: 11px; color: #888; pointer-events: none;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <div id="viewport">
+    <svg id="graph" viewBox="-400 -300 800 600" xmlns="http://www.w3.org/2000/svg">
+      <g id="root">
+        <g id="gHulls"></g>
+        <g id="gMetaLinks"></g>
+        <g id="gLinks"></g>
+        <g id="gNodes"></g>
+        <g id="gLabels"></g>
+        <g id="gClusterLabels"></g>
+      </g>
+    </svg>
+    <div id="info"></div>
+  </div>
+  <script type="module">
+    import { createPositionMap, ensurePosition, setSticky, setLocked, toPointArray } from '../../src/layout/positions.js';
+    import { descentStep, energy, gradNorm, gradEnergy } from '../../src/layout/gradient.js';
+    import { initialPlace, streamPlace } from '../../src/layout/placement.js';
+    import { warmRestart } from '../../src/layout/warm-restart.js';
+    import { computeHull, expandHull } from '../../src/render/hulls.js';
+    import { computeMetaEdges, clusterCentroid } from '../../src/render/meta-edges.js';
+    import { getLayer, ensureLayer } from '../../src/edges/layers.js';
+
+    // ─── State ───
+    const state = {
+      nodes: new Map(),
+      edges: new Map(),
+      posMap: createPositionMap(),
+    };
+
+    const svg = document.getElementById('graph');
+    const gNodes = document.getElementById('gNodes');
+    const gLinks = document.getElementById('gLinks');
+    const gLabels = document.getElementById('gLabels');
+    const gHulls = document.getElementById('gHulls');
+    const info = document.getElementById('info');
+
+    // ─── API exposed to Playwright ───
+    window.__harness = {
+      state,
+
+      addNode(id, x, y, opts = {}) {
+        state.nodes.set(id, {
+          id,
+          kind: opts.kind || 'function',
+          label: opts.label || id,
+          importance: opts.importance || 1,
+        });
+        if (x != null && y != null) {
+          ensurePosition(state.posMap, id, x, y);
+        }
+        this.render();
+        return { id, x, y };
+      },
+
+      addEdge(id, source, target, layer, weight) {
+        state.edges.set(id, {
+          id, source, target,
+          layer: layer || 'calls',
+          weight: weight || 1,
+          directed: true,
+        });
+        ensureLayer(layer || 'calls');
+        this.render();
+      },
+
+      removeNode(id) {
+        state.nodes.delete(id);
+        state.posMap.positions.delete(id);
+        // Remove incident edges
+        for (const [eid, edge] of state.edges) {
+          if (edge.source === id || edge.target === id) {
+            state.edges.delete(eid);
+          }
+        }
+        this.render();
+      },
+
+      runDescent(steps, eta) {
+        const results = [];
+        for (let i = 0; i < steps; i++) {
+          const { gradMag } = descentStep(state.posMap, state.edges, undefined, { eta: eta || 0.1 });
+          const e = energy(state.posMap, state.edges);
+          results.push({ step: i, energy: e, gradMag });
+        }
+        this.render();
+        return results;
+      },
+
+      runInitialPlace(maxSteps) {
+        const { posMap, steps, converged } = initialPlace(
+          state.nodes, state.edges, undefined,
+          { maxSteps: maxSteps || 200 }
+        );
+        state.posMap = posMap;
+        this.render();
+        return { steps, converged };
+      },
+
+      runStreamPlace(nodeId) {
+        const result = streamPlace(nodeId, state.edges, state.posMap);
+        this.render();
+        return result;
+      },
+
+      runWarmRestart() {
+        const result = warmRestart(state.posMap, state.nodes, state.edges);
+        this.render();
+        return result;
+      },
+
+      setNodeSticky(id, sticky) {
+        setSticky(state.posMap, id, sticky);
+      },
+
+      setNodeLocked(id, locked) {
+        setLocked(state.posMap, id, locked);
+      },
+
+      moveNode(id, x, y) {
+        const ps = state.posMap.positions.get(id);
+        if (ps) { ps.x = x; ps.y = y; }
+        this.render();
+      },
+
+      getPositions() {
+        const out = {};
+        for (const [id, ps] of state.posMap.positions) {
+          out[id] = { x: ps.x, y: ps.y, sticky: ps.sticky, locked: ps.locked };
+        }
+        return out;
+      },
+
+      getEnergy() {
+        return energy(state.posMap, state.edges);
+      },
+
+      getInfo() {
+        return {
+          nodes: state.nodes.size,
+          edges: state.edges.size,
+          energy: energy(state.posMap, state.edges),
+        };
+      },
+
+      clear() {
+        state.nodes.clear();
+        state.edges.clear();
+        state.posMap = createPositionMap();
+        this.render();
+      },
+
+      render() {
+        // ─── Edges ───
+        while (gLinks.firstChild) gLinks.removeChild(gLinks.firstChild);
+        for (const [, edge] of state.edges) {
+          const ps = state.posMap.positions.get(edge.source);
+          const pt = state.posMap.positions.get(edge.target);
+          if (!ps || !pt) continue;
+
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', ps.x);
+          line.setAttribute('y1', ps.y);
+          line.setAttribute('x2', pt.x);
+          line.setAttribute('y2', pt.y);
+          const layerDef = getLayer(edge.layer);
+          line.setAttribute('stroke', layerDef ? layerDef.color : '#666');
+          line.setAttribute('stroke-width', Math.max(0.5, Math.min(3, edge.weight)));
+          line.setAttribute('stroke-opacity', '0.6');
+          gLinks.appendChild(line);
+        }
+
+        // ─── Nodes ───
+        while (gNodes.firstChild) gNodes.removeChild(gNodes.firstChild);
+        for (const [id, node] of state.nodes) {
+          const ps = state.posMap.positions.get(id);
+          if (!ps) continue;
+
+          const r = 4 + (node.importance || 1) * 2;
+          const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          circle.setAttribute('cx', ps.x);
+          circle.setAttribute('cy', ps.y);
+          circle.setAttribute('r', r);
+          circle.setAttribute('fill', nodeColor(node, ps));
+          circle.setAttribute('stroke', ps.locked ? '#ff0' : ps.sticky ? '#f80' : '#fff');
+          circle.setAttribute('stroke-width', ps.locked || ps.sticky ? '2' : '1');
+          circle.setAttribute('stroke-opacity', '0.8');
+          gNodes.appendChild(circle);
+        }
+
+        // ─── Labels ───
+        while (gLabels.firstChild) gLabels.removeChild(gLabels.firstChild);
+        for (const [id, node] of state.nodes) {
+          const ps = state.posMap.positions.get(id);
+          if (!ps) continue;
+
+          const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          text.setAttribute('x', ps.x);
+          text.setAttribute('y', ps.y - 10);
+          text.setAttribute('text-anchor', 'middle');
+          text.setAttribute('font-size', '9');
+          text.setAttribute('fill', '#aaa');
+          text.textContent = node.label;
+          gLabels.appendChild(text);
+        }
+
+        // ─── Info overlay ───
+        const e = energy(state.posMap, state.edges);
+        info.textContent = `nodes: ${state.nodes.size}  edges: ${state.edges.size}  energy: ${e.toFixed(1)}`;
+      },
+    };
+
+    function nodeColor(node, ps) {
+      const colors = {
+        function: '#4a90d9', global: '#e74c3c', module: '#2ecc71',
+        cluster: '#9b59b6', parameter: '#f39c12',
+      };
+      return colors[node.kind] || '#95a5a6';
+    }
+
+    // Ready signal
+    window.__ready = true;
+  </script>
+</body>
+</html>
