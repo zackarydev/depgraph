@@ -2,7 +2,8 @@
   "name": "depgraph",
   "version": "1.0.0",
   "description": "[Videos](https://youtu.be/slwxspOzzK0)",
-  "main": "index.js",
+  "type": "module",
+  "main": "src/main.js",
   "scripts": {
     "test": "node --test test/"
   },
