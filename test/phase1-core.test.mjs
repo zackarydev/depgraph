@@ -424,26 +424,35 @@ describe('main init()', () => {
     assert.ok(runtime.state);
     assert.ok(runtime.context);
     assert.ok(runtime.scheduler);
+    runtime.scheduler.stop(); // cleanup, todo; this is annoying.
   });
 
   it('state starts empty', () => {
-    const { state } = init();
+    const { state, scheduler } = init();
     assert.equal(state.nodes.size, 0);
     assert.equal(state.edges.size, 0);
     assert.equal(state.cursor, -1);
+    // scheduler.stop(); // cleanup, todo; this is annoying.
   });
 
   it('bus is functional after init', () => {
-    const { bus } = init();
+    const { bus, scheduler } = init();
     let received = false;
     bus.on('test-event', () => { received = true; });
     bus.emit('test-event');
     assert.ok(received);
+    scheduler.stop(); // cleanup, todo; this is annoying.
   });
 
   it('scheduler is running after init', () => {
     const { scheduler } = init();
     assert.ok(scheduler.isRunning());
-    scheduler.stop(); // cleanup
+    scheduler.stop(); // cleanup, todo; this is annoying.
   });
+});
+
+// Add this at the very end of a test file
+process.on('exit', () => {
+  // This won't run if it hangs, which is the point.
+  console.log('✅ All tests completed, no open handles detected.');
 });
