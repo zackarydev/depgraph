@@ -3,6 +3,36 @@
 > This plan turns [SPEC.md](SPEC.md) into shipped code. Each phase produces a **testable artifact** before the next begins. Phases are sequential (each depends on the prior), but tasks within a phase can run in parallel.
 >
 > Reference: [SPEC.md §18](SPEC.md) for the high-level checklist; this plan adds concrete files, acceptance criteria, test strategies, and dependency ordering.
+>
+> **The old prototype (`depgraph-v0`) lives at `../depgraph-v0/` and is not part of this build.** Do not reference it during implementation — this plan and the SPEC are the only inputs. The old code exists on-demand if you're ever curious about how something *used to* work, but reading it risks importing the exact biases this rebuild is designed to escape.
+
+---
+
+## Testing Rule — The Only Rule
+
+A phase is **not done** until it ships a test file under `test/` that encodes its acceptance criteria as runnable assertions. `npm test` runs **all** test files from **all** completed phases. If any prior phase's tests break, the current phase is not shippable.
+
+```
+test/
+  phase1-core.test.mjs       ← bus, scheduler, state
+  phase2-history.test.mjs    ← cursor, branches, snapshot, round-trip
+  phase3-derive.test.mjs     ← hyperedges, affinities, dirty propagation, W-cascade
+  phase4-layout.test.mjs     ← gradient descent convergence, quadtree, sticky/locked
+  phase5-render.test.mjs     ← DOM element counts, viewport culling, visibility query
+  phase6-interact.test.mjs   ← each mode writes history, Z-undo reverses it
+  phase7-stream.test.mjs     ← offline works, SSE works, both-off works
+  phase8-context.test.mjs    ← W change shifts clusters, presets round-trip
+  phase9-scale.test.mjs      ← 10k nodes at 60fps, dirty recompute count < 50
+  phase10-produce.test.mjs   ← producers emit valid history rows
+  phase11-rules.test.mjs     ← match, apply, transaction undo, branch on multi-binding
+  phase12-agent.test.mjs     ← read/append/explain round-trip via HTTP
+```
+
+**Why this works:** each test file is small (50–200 lines), tests only that phase's contracts, and runs in < 5 seconds. The full suite runs in < 30 seconds. If Phase 6 introduces a regression in Phase 3's derivation, the build stops immediately — not 3 phases later when the bug becomes mysterious.
+
+**What counts as a test:** a `node --test` assertion that fails loudly. Not "open the browser and look." Browser-dependent tests (Phase 5 rendering, Phase 9 fps) use a headless check or a separate `test:visual` script, but the core contracts (history, derivation, layout convergence) are pure Node.js.
+
+**Gate rule:** before starting Phase N+1, run `npm test`. All green or no forward progress.
 
 ---
 

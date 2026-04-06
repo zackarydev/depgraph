@@ -2,7 +2,9 @@
 
 > This document is the **blueprint to recreate depgraph from scratch with a better structure**. It describes *what* the product is, *how* it is built, and the *architecture* it must have. It is not a history of the current code — it is the target.
 >
-> Companion docs (read first for motivation): [VISION.md](VISION.md), [README.md](README.md), [docs/controls.md](docs/controls.md), [docs/codegen.md](docs/codegen.md), [docs/reviews/REVIEW_2.md](docs/reviews/REVIEW_2.md) (lessons learned).
+> **The old prototype has been deleted from this directory.** A frozen copy lives at `../depgraph-v0/` for archaeological reference only. Do not read it before building — the point of this rebuild is to avoid inheriting its biases. If you need to understand a past decision, the reviews document the lessons without the coupling: [docs/reviews/REVIEW_2.md](docs/reviews/REVIEW_2.md).
+>
+> Companion docs: [VISION.md](VISION.md), [README.md](README.md), [docs/controls.md](docs/controls.md), [docs/codegen.md](docs/codegen.md), [docs/reviews/REVIEW_2.md](docs/reviews/REVIEW_2.md) (lessons learned).
 
 ---
 
