@@ -225,6 +225,7 @@ svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; user-select: non
 <script src="https://cdn.jsdelivr.net/npm/acorn@8.14.1/dist/acorn.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/acorn-walk@8.3.4/dist/walk.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="/prototypes/csv-parse.js"></script>
 <script src="/prototypes/user-distances.js"></script>
 <script src="/prototypes/stream-client.js"></script>
 <script>
@@ -258,9 +259,9 @@ let currentK = 0.8;
 
 // ── User-authored distance springs (Plan 2 Option E) ─────────────────────
 // State + pure logic live in prototypes/user-distances.js (loaded above).
-// GraphPhysics reads these two bindings directly in its tick loop.
-const userDistances = window.userDistancesModule.userDistances;
-const updateUserDistance = window.userDistancesModule.updateUserDistance;
+// The module stores Edge domain objects with type='distance'; we never
+// touch its internal storage — GraphPhysics iterates via forEachEdge.
+const userDistancesModule = window.userDistancesModule;
 let useUserDistances = true;   // toggle for debugging physics oscillation
 
 // ── Zoom breakpoints: dynamic edge layer presets by zoom level ──
@@ -2772,24 +2773,21 @@ const GraphPhysics = (function () {
     }
 
     // ── 2b. User-authored distance springs (Plan 2 Option E) ─
-    // Each entry in userDistances is a rest-length recorded when the user
-    // dragged one of the endpoints. Rest-lengths are raw Euclidean
-    // center-to-center distances, so no radius adjustment is applied here.
-    if (useUserDistances && userDistances.size > 0 && currentGraph) {
+    // Iterate the user-distances module's stored rest-lengths via its
+    // zero-allocation callback. Rest-lengths are raw Euclidean center-to-
+    // center distances, so no radius adjustment is applied here.
+    if (useUserDistances && userDistancesModule.edgeCount() > 0 && currentGraph) {
       const nm = currentGraph.nodeMap;
-      for (const [key, entry] of userDistances) {
-        const sep = key.indexOf('\x00');
-        const aId = key.slice(0, sep);
-        const bId = key.slice(sep + 1);
+      userDistancesModule.forEachEdge((aId, bId, rest) => {
         const a = nm.get(aId);
         const b = nm.get(bId);
-        if (!a || !b) continue;
-        if ((a.minZoom && currentK < a.minZoom) || (b.minZoom && currentK < b.minZoom)) continue;
-        if (_hiddenNodes.has(a.id) || _hiddenNodes.has(b.id)) continue;
+        if (!a || !b) return;
+        if ((a.minZoom && currentK < a.minZoom) || (b.minZoom && currentK < b.minZoom)) return;
+        if (_hiddenNodes.has(a.id) || _hiddenNodes.has(b.id)) return;
         const dx = b.x - a.x;
         const dy = b.y - a.y;
         const curr = Math.sqrt(dx * dx + dy * dy) || 0.01;
-        const displacement = curr - entry.dist;
+        const displacement = curr - rest;
         const F = USER_DISTANCE_K * displacement * dt;
         const fx = (dx / curr) * F;
         const fy = (dy / curr) * F;
@@ -2803,7 +2801,7 @@ const GraphPhysics = (function () {
           b.vx = (b.vx || 0) - fx / bm;
           b.vy = (b.vy || 0) - fy / bm;
         }
-      }
+      });
     }
 
     // ── 3. Cluster drift ────────────────────────────
@@ -3385,9 +3383,9 @@ function emitDragDistances(d) {
   for (let i = 0; i < k; i++) {
     const nid = candidates[i].id;
     const dist = candidates[i].dist;
-    // Update local userDistances immediately so the physics sees the new
-    // rest-length this frame — no round-trip through the server needed.
-    updateUserDistance(d.id, nid, dist, t);
+    // Apply locally immediately so the physics sees the new rest-length
+    // this frame — no round-trip through the server needed.
+    userDistancesModule.applyEdge({ source: d.id, target: nid, type: 'distance', weight: dist, t });
     if (window.streamClient) window.streamClient.emitDistance(d.id, nid, dist);
   }
 }
@@ -6829,114 +6827,41 @@ let currentFocus = null;
 // ═══════════════════════════════════════════════════════
 // CSV PARSING & GRAPH SSE
 // ═══════════════════════════════════════════════════════
-function parseCSVLine(line) {
-  const fields = [];
-  let current = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuotes) {
-      if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
-      else if (ch === '"') inQuotes = false;
-      else current += ch;
-    } else {
-      if (ch === '"') inQuotes = true;
-      else if (ch === ',') { fields.push(current); current = ''; }
-      else current += ch;
-    }
-  }
-  fields.push(current);
-  return fields;
-}
+// parseCSVLine + parseHistoryCSV live in prototypes/csv-parse.js
+const parseCSVLine = window.csvParse.parseCSVLine;
+const parseHistoryCSV = window.csvParse.parseHistoryCSV;
 
 // ── Load user-actions.csv on startup (Plan 2 Option E) ───────────────────
-// Scans the user-action log and populates userDistances with the most-recent
-// rest-length for each pair. Called once on init; subsequent updates come
-// through local drag emission and the /graph-events SSE rebroadcast.
+// Converts DISTANCE rows from the user-action log into distance-edge domain
+// objects and hands them to the user-distances module. This function is the
+// transport/domain boundary: CSV lives here, Edges flow downstream.
+// Subsequent updates arrive via local drag emission and the /graph-events
+// SSE rebroadcast, both of which also produce Edge objects.
 async function loadUserActions() {
   try {
     const r = await fetch('/runtime/user-actions.csv');
     if (!r.ok) return;
     const text = await r.text();
-    const applied = window.userDistancesModule.ingestUserActionsCSV(text);
-    console.log(`[user-actions] loaded ${applied} DISTANCE rows → ${userDistances.size} unique pairs`);
+    const edges = [];
+    const lines = text.trim().split('\n');
+    for (let i = 1; i < lines.length; i++) { // skip header
+      const line = lines[i];
+      if (!line) continue;
+      const f = parseCSVLine(line);
+      if (f[1] !== 'DISTANCE') continue;
+      edges.push({
+        source: f[3],
+        target: f[4],
+        type: 'distance',
+        weight: Number(f[5]),
+        t: Number(f[0]),
+      });
+    }
+    const applied = userDistancesModule.applyEdges(edges);
+    console.log(`[user-actions] applied ${applied} distance edges → ${userDistancesModule.edgeCount()} unique pairs`);
   } catch (e) {
     console.warn('[user-actions] load failed:', e.message);
   }
-}
-
-function parseHistoryCSV(text) {
-  // Format: t,type,label,source,target,importance_xi,cluster
-  //   NODE: t, NODE, <name>,     <idx>, ,       <importance>, <clusterIdx>
-  //   EDGE: t, EDGE, <edgeType>, <src>, <tgt>,  ,
-  const nodes = [];
-  const edges = [];
-  const idxToName = new Map();
-  const clusterIdxToName = new Map();
-  const clusterNodeNames = new Set();
-
-  const lines = text.trim().split('\n');
-  // Skip header row
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    const fields = parseCSVLine(line);
-    const rowType = fields[1];
-
-    if (rowType === 'NODE') {
-      const name = fields[2];
-      const idx = parseInt(fields[3]);
-      const importanceXi = parseFloat(fields[5]) || 0;
-      const clusterCol = fields[6];
-      const importance = importanceXi * 10;
-
-      idxToName.set(idx, name);
-
-      // Detect cluster-defining nodes: idx matches cluster column
-      if (clusterCol !== '' && clusterCol !== undefined) {
-        const cn = parseInt(clusterCol);
-        if (!isNaN(cn) && cn === idx) {
-          clusterIdxToName.set(cn, name);
-          clusterNodeNames.add(name);
-          nodes.push({ id: name, type: 'cluster', cluster: '', importance, line: 0 });
-          continue;
-        }
-      }
-
-      // Determine cluster name from cluster column
-      let clusterName = '';
-      if (clusterCol !== '' && clusterCol !== undefined) {
-        const cn = parseInt(clusterCol);
-        if (!isNaN(cn) && clusterIdxToName.has(cn)) {
-          clusterName = clusterIdxToName.get(cn);
-        }
-      }
-
-      // Column 5 (target) carries the node type for enriched CSVs; fall back to importance heuristic
-      const csvType = fields[4];
-      const nodeType = csvType && csvType !== '' ? csvType : (importanceXi <= 0.1 ? 'global' : 'function');
-      nodes.push({ id: name, type: nodeType, cluster: clusterName, importance, line: 0 });
-
-    } else if (rowType === 'EDGE') {
-      const srcIdx = parseInt(fields[3]);
-      const tgtIdx = parseInt(fields[4]);
-      const srcName = idxToName.get(srcIdx);
-      const tgtName = idxToName.get(tgtIdx);
-      const label = fields[2];
-
-      if (srcName && tgtName) {
-        if (label === 'memberOf') {
-          // Update the source node's cluster to the target name
-          const srcNode = nodes.find(n => n.id === srcName);
-          if (srcNode) srcNode.cluster = tgtName;
-        } else if (!clusterNodeNames.has(srcName) && !clusterNodeNames.has(tgtName)) {
-          edges.push({ source: srcName, target: tgtName, type: label, weight: 1 });
-        }
-      }
-    }
-  }
-
-  return { nodes, edges };
 }
 
 function buildAnalysisFromCSV(nodes, edges) {
@@ -7794,7 +7719,13 @@ if (window.streamClient) {
   window.streamClient.onRemoteRows((msg) => {
     for (const r of msg.rows) {
       if (r.type === 'DISTANCE') {
-        updateUserDistance(r.source, r.target, Number(r.importance_xi), Number(r.t));
+        userDistancesModule.applyEdge({
+          source: r.source,
+          target: r.target,
+          type: 'distance',
+          weight: Number(r.importance_xi),
+          t: Number(r.t),
+        });
       }
     }
   });

@@ -41,7 +41,7 @@ The primary tool is **"Gather"** -- `Pull` nodes towards selected node.
 
 The secondary tool is **"Rewind"** -- `X` time goes backwards [#time](#Time).
 
-There are many more [controls](./controls.md). You'll find your own style of navigation eventually I'm sure.
+There are many more [controls](./docs/controls.md). You'll find your own style of navigation eventually I'm sure.
 
 ## Time
 

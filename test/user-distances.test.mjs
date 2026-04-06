@@ -1,173 +1,171 @@
 // Tests for prototypes/user-distances.js
 // Run: node --test test/user-distances.test.mjs
 //
-// These cover the pure-logic core of Plan 2 Option E: canonical pair keying,
-// most-recent-wins semantics, CSV parsing of DISTANCE rows, and the end-to-end
-// ingest of a user-actions.csv payload.
+// Covers the Edge-based API: the module accepts Edge domain objects with
+// type='distance', keeps the most-recent entry per unordered {source,target}
+// pair, and exposes iteration via a zero-allocation callback. There is no
+// CSV knowledge here — callers do that conversion at the transport boundary.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
-// The module is a UMD-style IIFE; require() picks up the module.exports path.
-// We need a fresh instance per test because userDistances is shared state, so
-// re-require via decache-by-delete on module cache.
+// The module holds module-level state, so re-require a fresh copy per test.
 function freshModule() {
   const path = require.resolve('../prototypes/user-distances.js');
   delete require.cache[path];
   return require(path);
 }
 
-test('_pairKey is canonical (unordered)', () => {
-  const { _pairKey } = freshModule();
-  assert.equal(_pairKey('A', 'B'), _pairKey('B', 'A'));
-  assert.equal(_pairKey('zoo', 'ant'), _pairKey('ant', 'zoo'));
-  assert.notEqual(_pairKey('A', 'B'), _pairKey('A', 'C'));
+// Helper: build a distance edge with sane defaults.
+function dedge(source, target, weight, t, type = 'distance') {
+  return { source, target, type, weight, t };
+}
+
+test('applyEdge: happy path', () => {
+  const m = freshModule();
+  assert.equal(m.applyEdge(dedge('A', 'B', 100, 1)), true);
+  assert.equal(m.edgeCount(), 1);
 });
 
-test('updateUserDistance: happy path', () => {
-  const { userDistances, updateUserDistance } = freshModule();
-  assert.equal(updateUserDistance('A', 'B', 100, 1), true);
-  assert.equal(userDistances.size, 1);
-  const entry = userDistances.values().next().value;
-  assert.equal(entry.dist, 100);
-  assert.equal(entry.t, 1);
+test('applyEdge: symmetric (A,B) and (B,A) collapse to one entry', () => {
+  const m = freshModule();
+  m.applyEdge(dedge('A', 'B', 100, 1));
+  m.applyEdge(dedge('B', 'A', 150, 2));
+  assert.equal(m.edgeCount(), 1);
+  const seen = [];
+  m.forEachEdge((a, b, w) => seen.push({ a, b, w }));
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].w, 150, 'most recent wins even with reversed pair order');
 });
 
-test('updateUserDistance: symmetric (A,B) and (B,A) collapse to one entry', () => {
-  const { userDistances, updateUserDistance } = freshModule();
-  updateUserDistance('A', 'B', 100, 1);
-  updateUserDistance('B', 'A', 150, 2);
-  assert.equal(userDistances.size, 1);
-  const entry = userDistances.values().next().value;
-  assert.equal(entry.dist, 150, 'most recent wins even with reversed pair order');
-  assert.equal(entry.t, 2);
+test('applyEdge: older t is rejected', () => {
+  const m = freshModule();
+  m.applyEdge(dedge('A', 'B', 100, 10));
+  assert.equal(m.applyEdge(dedge('A', 'B', 200, 5)), false, 'older t rejected');
+  const seen = [];
+  m.forEachEdge((a, b, w) => seen.push(w));
+  assert.equal(seen[0], 100);
 });
 
-test('updateUserDistance: older t is rejected', () => {
-  const { userDistances, updateUserDistance } = freshModule();
-  updateUserDistance('A', 'B', 100, 10);
-  assert.equal(updateUserDistance('A', 'B', 200, 5), false, 'older t rejected');
-  assert.equal(userDistances.get(userDistances.keys().next().value).dist, 100);
+test('applyEdge: equal t is rejected (no update)', () => {
+  const m = freshModule();
+  m.applyEdge(dedge('A', 'B', 100, 10));
+  assert.equal(m.applyEdge(dedge('A', 'B', 200, 10)), false);
+  const seen = [];
+  m.forEachEdge((a, b, w) => seen.push(w));
+  assert.equal(seen[0], 100);
 });
 
-test('updateUserDistance: equal t is rejected (no update)', () => {
-  const { userDistances, updateUserDistance } = freshModule();
-  updateUserDistance('A', 'B', 100, 10);
-  assert.equal(updateUserDistance('A', 'B', 200, 10), false);
-  assert.equal(userDistances.get(userDistances.keys().next().value).dist, 100);
+test('applyEdge: rejects non-distance types', () => {
+  const m = freshModule();
+  assert.equal(m.applyEdge(dedge('A', 'B', 100, 1, 'calls')), false);
+  assert.equal(m.applyEdge(dedge('A', 'B', 100, 1, 'memberOf')), false);
+  assert.equal(m.applyEdge(dedge('A', 'B', 100, 1, '')), false);
+  assert.equal(m.edgeCount(), 0);
 });
 
-test('updateUserDistance: rejects invalid inputs', () => {
-  const { userDistances, updateUserDistance } = freshModule();
-  assert.equal(updateUserDistance('', 'B', 100, 1), false, 'empty a');
-  assert.equal(updateUserDistance('A', '', 100, 1), false, 'empty b');
-  assert.equal(updateUserDistance('A', 'A', 100, 1), false, 'self pair');
-  assert.equal(updateUserDistance('A', 'B', -5, 1), false, 'negative dist');
-  assert.equal(updateUserDistance('A', 'B', NaN, 1), false, 'NaN dist');
-  assert.equal(updateUserDistance('A', 'B', 'abc', 1), false, 'unparseable dist');
-  assert.equal(updateUserDistance('A', 'B', 100, 'bad'), false, 'unparseable t');
-  assert.equal(userDistances.size, 0);
+test('applyEdge: rejects invalid inputs', () => {
+  const m = freshModule();
+  assert.equal(m.applyEdge(null), false, 'null');
+  assert.equal(m.applyEdge(undefined), false, 'undefined');
+  assert.equal(m.applyEdge(dedge('', 'B', 100, 1)), false, 'empty source');
+  assert.equal(m.applyEdge(dedge('A', '', 100, 1)), false, 'empty target');
+  assert.equal(m.applyEdge(dedge('A', 'A', 100, 1)), false, 'self pair');
+  assert.equal(m.applyEdge(dedge('A', 'B', -5, 1)), false, 'negative weight');
+  assert.equal(m.applyEdge(dedge('A', 'B', NaN, 1)), false, 'NaN weight');
+  assert.equal(m.applyEdge(dedge('A', 'B', 'abc', 1)), false, 'unparseable weight');
+  assert.equal(m.applyEdge(dedge('A', 'B', 100, 'bad')), false, 'unparseable t');
+  assert.equal(m.edgeCount(), 0);
 });
 
-test('updateUserDistance: string inputs coerced numerically', () => {
-  const { userDistances, updateUserDistance } = freshModule();
-  assert.equal(updateUserDistance('A', 'B', '142.5', '1700'), true);
-  const entry = userDistances.values().next().value;
-  assert.equal(entry.dist, 142.5);
-  assert.equal(entry.t, 1700);
+test('applyEdge: string weight/t coerced numerically', () => {
+  const m = freshModule();
+  assert.equal(m.applyEdge(dedge('A', 'B', '142.5', '1700')), true);
+  const seen = [];
+  m.forEachEdge((a, b, w) => seen.push(w));
+  assert.equal(seen[0], 142.5);
 });
 
-test('parseCSVLine: plain fields', () => {
-  const { parseCSVLine } = freshModule();
-  assert.deepEqual(parseCSVLine('1,2,three,four'), ['1', '2', 'three', 'four']);
+test('applyEdges: batch returns count of edges stored', () => {
+  const m = freshModule();
+  const n = m.applyEdges([
+    dedge('A', 'B', 100, 1),
+    dedge('B', 'C', 50, 1),
+    dedge('A', 'B', 999, 0), // older, rejected
+    dedge('D', 'E', 75, 1, 'calls'), // wrong type
+    null,
+  ]);
+  assert.equal(n, 2);
+  assert.equal(m.edgeCount(), 2);
 });
 
-test('parseCSVLine: quoted field with comma', () => {
-  const { parseCSVLine } = freshModule();
-  assert.deepEqual(
-    parseCSVLine('1,NODE,"foo, bar",3,,0.5,0'),
-    ['1', 'NODE', 'foo, bar', '3', '', '0.5', '0'],
-  );
+test('applyEdges: null/undefined input returns 0', () => {
+  const m = freshModule();
+  assert.equal(m.applyEdges(null), 0);
+  assert.equal(m.applyEdges(undefined), 0);
+  assert.equal(m.applyEdges([]), 0);
 });
 
-test('parseCSVLine: escaped quote inside quoted field', () => {
-  const { parseCSVLine } = freshModule();
-  assert.deepEqual(parseCSVLine('a,"he said ""hi""",b'), ['a', 'he said "hi"', 'b']);
+test('applyEdges: most-recent-wins regardless of order', () => {
+  const m = freshModule();
+  m.applyEdges([
+    dedge('Foo', 'Bar', 100, 10),
+    dedge('Foo', 'Bar', 200, 20),
+    dedge('Foo', 'Bar', 999, 5),
+  ]);
+  assert.equal(m.edgeCount(), 1);
+  const seen = [];
+  m.forEachEdge((a, b, w) => seen.push(w));
+  assert.equal(seen[0], 200, 'highest-t wins');
 });
 
-test('ingestUserActionsCSV: applies DISTANCE rows, ignores others', () => {
-  const { userDistances, ingestUserActionsCSV } = freshModule();
-  const csv = [
-    't,type,label,source,target,importance_xi,cluster',
-    '1,ACTION,stick,Foo,,,',
-    '2,DISTANCE,spatial,Foo,Bar,100,',
-    '3,ACTION,select,Baz,,,',
-    '4,DISTANCE,spatial,Foo,Qux,50,',
-  ].join('\n');
-  const n = ingestUserActionsCSV(csv);
-  assert.equal(n, 2, 'two DISTANCE rows applied');
-  assert.equal(userDistances.size, 2);
+test('forEachEdge: invokes callback for each stored pair', () => {
+  const m = freshModule();
+  m.applyEdge(dedge('A', 'B', 100, 1));
+  m.applyEdge(dedge('C', 'D', 200, 1));
+  m.applyEdge(dedge('E', 'F', 300, 1));
+  const seen = new Set();
+  m.forEachEdge((a, b, w) => seen.add(`${a}|${b}|${w}`));
+  assert.equal(seen.size, 3);
 });
 
-test('ingestUserActionsCSV: most-recent-wins across the log', () => {
-  const { userDistances, ingestUserActionsCSV } = freshModule();
-  const csv = [
-    't,type,label,source,target,importance_xi,cluster',
-    '10,DISTANCE,spatial,Foo,Bar,100,',
-    '20,DISTANCE,spatial,Foo,Bar,200,',
-    '5,DISTANCE,spatial,Foo,Bar,999,',
-  ].join('\n');
-  ingestUserActionsCSV(csv);
-  assert.equal(userDistances.size, 1);
-  const entry = userDistances.values().next().value;
-  assert.equal(entry.dist, 200, 'highest-t wins regardless of row order');
-  assert.equal(entry.t, 20);
+test('forEachEdge: weights survive round-trip', () => {
+  const m = freshModule();
+  m.applyEdge(dedge('Foo', 'Bar', 95.25, 1));
+  const seen = [];
+  m.forEachEdge((a, b, w) => seen.push({ a, b, w }));
+  assert.equal(seen[0].w, 95.25);
 });
 
-test('ingestUserActionsCSV: handles quoted node names with commas', () => {
-  const { userDistances, ingestUserActionsCSV } = freshModule();
-  const csv = [
-    't,type,label,source,target,importance_xi,cluster',
-    '1,DISTANCE,spatial,"AST Analysis","Node, with comma",95.25,',
-  ].join('\n');
-  ingestUserActionsCSV(csv);
-  assert.equal(userDistances.size, 1);
-  const entry = userDistances.values().next().value;
-  assert.equal(entry.dist, 95.25);
+test('forEachEdge: surfaces t so Edge objects can be reconstituted', () => {
+  const m = freshModule();
+  m.applyEdge(dedge('A', 'B', 100, 1700));
+  m.applyEdge(dedge('C', 'D', 200, 1800));
+  const rebuilt = [];
+  m.forEachEdge((source, target, weight, t) => {
+    rebuilt.push({ source, target, type: 'distance', weight, t });
+  });
+  assert.equal(rebuilt.length, 2);
+  // Re-applying the reconstituted edges to a fresh store yields the same
+  // state — the round-trip is lossless.
+  const m2 = freshModule();
+  assert.equal(m2.applyEdges(rebuilt), 2);
+  assert.equal(m2.edgeCount(), 2);
+  const ts = new Set();
+  m2.forEachEdge((a, b, w, t) => ts.add(t));
+  assert.ok(ts.has(1700) && ts.has(1800));
 });
 
-test('ingestUserActionsCSV: tolerates blank lines and trailing whitespace', () => {
-  const { userDistances, ingestUserActionsCSV } = freshModule();
-  const csv =
-    't,type,label,source,target,importance_xi,cluster\n' +
-    '\n' +
-    '1,DISTANCE,spatial,Foo,Bar,100,\n' +
-    '  \n' +
-    '2,DISTANCE,spatial,Foo,Baz,50,\n';
-  // Note: the trimmed whitespace-only line is preserved as a non-empty line
-  // by trim().split('\n'), so it must be tolerated inside parseCSVLine/updateUserDistance.
-  ingestUserActionsCSV(csv);
-  assert.equal(userDistances.size, 2);
-});
-
-test('ingestUserActionsCSV: header-only CSV applies zero rows', () => {
-  const { userDistances, ingestUserActionsCSV } = freshModule();
-  const csv = 't,type,label,source,target,importance_xi,cluster';
-  assert.equal(ingestUserActionsCSV(csv), 0);
-  assert.equal(userDistances.size, 0);
-});
-
-test('ingestUserActionsCSV: rejects malformed DISTANCE rows silently', () => {
-  const { userDistances, ingestUserActionsCSV } = freshModule();
-  const csv = [
-    't,type,label,source,target,importance_xi,cluster',
-    '1,DISTANCE,spatial,,Bar,100,',       // empty source
-    '2,DISTANCE,spatial,Foo,,100,',       // empty target
-    '3,DISTANCE,spatial,Foo,Bar,-5,',     // negative distance
-    '4,DISTANCE,spatial,Foo,Bar,100,',    // valid
-  ].join('\n');
-  assert.equal(ingestUserActionsCSV(csv), 1);
-  assert.equal(userDistances.size, 1);
+test('clear: empties store', () => {
+  const m = freshModule();
+  m.applyEdge(dedge('A', 'B', 100, 1));
+  m.applyEdge(dedge('C', 'D', 200, 1));
+  assert.equal(m.edgeCount(), 2);
+  m.clear();
+  assert.equal(m.edgeCount(), 0);
+  let count = 0;
+  m.forEachEdge(() => count++);
+  assert.equal(count, 0);
 });
