@@ -324,3 +324,347 @@ test.describe('gradient descent visualization', () => {
   });
 
 });
+
+// ─────────────────────────────────────────────────────
+// Fractal rendering visual tests
+// ─────────────────────────────────────────────────────
+
+test.describe('fractal rendering', () => {
+  const HARNESS = () => `${baseUrl}/test/visual/harness.html`;
+
+  test('two clusters at low zoom — collapsed with meta-edges', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      for (let i = 0; i < 4; i++) {
+        h.addNode(`a${i}`, -150 + i * 30, -20 + (i % 2) * 40);
+      }
+      h.addEdge('a0->a1', 'a0', 'a1', 'calls', 2);
+      h.addEdge('a1->a2', 'a1', 'a2', 'calls', 2);
+      h.addEdge('a2->a3', 'a2', 'a3', 'calls', 2);
+      h.addCluster('cluster:alpha', ['a0', 'a1', 'a2', 'a3']);
+      h.state.posMap.positions.set('cluster:alpha',
+        { x: -120, y: 0, t0x: -120, t0y: 0, sticky: false, locked: false });
+
+      for (let i = 0; i < 3; i++) {
+        h.addNode(`b${i}`, 120 + i * 30, -10 + (i % 2) * 30);
+      }
+      h.addEdge('b0->b1', 'b0', 'b1', 'shared', 2);
+      h.addEdge('b1->b2', 'b1', 'b2', 'shared', 2);
+      h.addCluster('cluster:beta', ['b0', 'b1', 'b2']);
+      h.state.posMap.positions.set('cluster:beta',
+        { x: 150, y: 0, t0x: 150, t0y: 0, sticky: false, locked: false });
+
+      h.addEdge('a2->b0', 'a2', 'b0', 'calls', 1);
+    });
+
+    const plan = await page.evaluate(() => {
+      const p = window.__harness.computeRenderPlanAt(0.1);
+      window.__harness.renderPlan(p);
+      return { nodes: p.nodes.length, edges: p.edges.length, hulls: p.hulls.length, maxDepth: p.maxDepth };
+    });
+    await page.screenshot({ path: `${SHOTS}/20-fractal-low-zoom.png` });
+
+    expect(plan.hulls).toBe(0);
+    const clusterNodes = await page.evaluate(() =>
+      window.__harness.state.lastPlan.nodes.filter(n => n.isCluster).length);
+    expect(clusterNodes).toBe(2);
+  });
+
+  test('two clusters at high zoom — expanded with hulls', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      for (let i = 0; i < 4; i++) h.addNode(`a${i}`, -150 + i * 50, (i % 2) * 60 - 30);
+      h.addEdge('a0->a1', 'a0', 'a1', 'calls', 2);
+      h.addEdge('a1->a2', 'a1', 'a2', 'calls', 2);
+      h.addEdge('a2->a3', 'a2', 'a3', 'calls', 2);
+      h.addCluster('cluster:alpha', ['a0', 'a1', 'a2', 'a3']);
+      h.state.posMap.positions.set('cluster:alpha',
+        { x: -75, y: 0, t0x: -75, t0y: 0, sticky: false, locked: false });
+
+      for (let i = 0; i < 3; i++) h.addNode(`b${i}`, 100 + i * 50, (i % 2) * 60 - 30);
+      h.addEdge('b0->b1', 'b0', 'b1', 'shared', 2);
+      h.addEdge('b1->b2', 'b1', 'b2', 'shared', 2);
+      h.addCluster('cluster:beta', ['b0', 'b1', 'b2']);
+      h.state.posMap.positions.set('cluster:beta',
+        { x: 150, y: 0, t0x: 150, t0y: 0, sticky: false, locked: false });
+
+      h.addEdge('a2->b0', 'a2', 'b0', 'calls', 1);
+    });
+
+    const plan = await page.evaluate(() => {
+      const p = window.__harness.computeRenderPlanAt(5);
+      window.__harness.renderPlan(p);
+      return { nodes: p.nodes.length, edges: p.edges.length, hulls: p.hulls.length, maxDepth: p.maxDepth };
+    });
+    await page.screenshot({ path: `${SHOTS}/21-fractal-high-zoom.png` });
+
+    expect(plan.hulls).toBeGreaterThanOrEqual(1);
+    expect(plan.maxDepth).toBeGreaterThanOrEqual(1);
+  });
+
+  test('pinned cluster stays collapsed at high zoom', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      for (let i = 0; i < 5; i++) h.addNode(`n${i}`, -100 + i * 50, (i % 2) * 40);
+      for (let i = 0; i < 4; i++) h.addEdge(`n${i}->n${i+1}`, `n${i}`, `n${i+1}`, 'calls', 2);
+      h.addCluster('cluster:pinned', ['n0', 'n1', 'n2', 'n3', 'n4']);
+      h.state.posMap.positions.set('cluster:pinned',
+        { x: 0, y: 20, t0x: 0, t0y: 20, sticky: false, locked: false });
+      h.pinCluster('cluster:pinned');
+    });
+
+    const plan = await page.evaluate(() => {
+      const p = window.__harness.computeRenderPlanAt(10);
+      window.__harness.renderPlan(p);
+      return { nodes: p.nodes.length, hulls: p.hulls.length };
+    });
+    await page.screenshot({ path: `${SHOTS}/22-fractal-pinned-collapsed.png` });
+
+    expect(plan.nodes).toBe(1);
+    expect(plan.hulls).toBe(0);
+  });
+
+  test('budget limits expansion — large cluster stays collapsed', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      const members = [];
+      for (let i = 0; i < 50; i++) {
+        const id = `m${i}`;
+        h.addNode(id, Math.cos(i) * 200, Math.sin(i) * 200);
+        members.push(id);
+      }
+      h.addCluster('cluster:big', members);
+      h.state.posMap.positions.set('cluster:big',
+        { x: 0, y: 0, t0x: 0, t0y: 0, sticky: false, locked: false });
+    });
+
+    const plan = await page.evaluate(() => {
+      const p = window.__harness.computeRenderPlanAt(10, 5);
+      window.__harness.renderPlan(p);
+      return { totalPrimitives: p.totalPrimitives, hulls: p.hulls.length };
+    });
+    await page.screenshot({ path: `${SHOTS}/23-fractal-budget-limit.png` });
+
+    expect(plan.totalPrimitives).toBeLessThanOrEqual(5);
+  });
+
+  test('zoom transition: collapsed -> expanded -> collapsed', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      for (let i = 0; i < 4; i++) h.addNode(`x${i}`, -60 + i * 40, (i % 2) * 50);
+      for (let i = 0; i < 3; i++) h.addEdge(`x${i}->x${i+1}`, `x${i}`, `x${i+1}`, 'calls', 2);
+      h.addCluster('cluster:zoomable', ['x0', 'x1', 'x2', 'x3']);
+      h.state.posMap.positions.set('cluster:zoomable',
+        { x: 0, y: 25, t0x: 0, t0y: 25, sticky: false, locked: false });
+    });
+
+    await page.evaluate(() => {
+      window.__harness.renderPlan(window.__harness.computeRenderPlanAt(0.1));
+    });
+    await page.screenshot({ path: `${SHOTS}/24-zoom-transition-low.png` });
+
+    await page.evaluate(() => {
+      window.__harness.renderPlan(window.__harness.computeRenderPlanAt(2));
+    });
+    await page.screenshot({ path: `${SHOTS}/24-zoom-transition-mid.png` });
+
+    await page.evaluate(() => {
+      window.__harness.renderPlan(window.__harness.computeRenderPlanAt(8));
+    });
+    await page.screenshot({ path: `${SHOTS}/24-zoom-transition-high.png` });
+
+    await page.evaluate(() => {
+      window.__harness.renderPlan(window.__harness.computeRenderPlanAt(0.1));
+    });
+    await page.screenshot({ path: `${SHOTS}/24-zoom-transition-back-low.png` });
+  });
+});
+
+// ─────────────────────────────────────────────────────
+// Interaction visual tests
+// ─────────────────────────────────────────────────────
+
+test.describe('interactions', () => {
+  const HARNESS = () => `${baseUrl}/test/visual/harness.html`;
+
+  test('selection highlights node with ring', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      h.addNode('A', -50, 0);
+      h.addNode('B', 50, 0);
+      h.addNode('C', 0, 80);
+      h.addEdge('A->B', 'A', 'B', 'calls', 1);
+      h.addEdge('B->C', 'B', 'C', 'calls', 1);
+    });
+    await page.screenshot({ path: `${SHOTS}/30-select-before.png` });
+
+    await page.evaluate(() => window.__harness.select('A'));
+    await page.screenshot({ path: `${SHOTS}/30-select-single.png` });
+
+    await page.evaluate(() => {
+      window.__harness.toggleSelect('B');
+      window.__harness.toggleSelect('C');
+    });
+    await page.screenshot({ path: `${SHOTS}/30-select-multi.png` });
+
+    const sel = await page.evaluate(() => window.__harness.getSelection());
+    expect(sel.selected.length).toBe(3);
+
+    await page.evaluate(() => window.__harness.clearSel());
+    await page.screenshot({ path: `${SHOTS}/30-select-cleared.png` });
+  });
+
+  test('drag moves a node and makes it sticky', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      h.addNode('A', 0, 0);
+      h.addNode('B', 100, 0);
+      h.addEdge('A->B', 'A', 'B', 'calls', 2);
+    });
+    await page.screenshot({ path: `${SHOTS}/31-drag-before.png` });
+
+    const result = await page.evaluate(() => {
+      const rows = window.__harness.dragNode('A', 80, -60);
+      return { rows: rows.length, pos: window.__harness.getPositions() };
+    });
+    await page.screenshot({ path: `${SHOTS}/31-drag-after.png` });
+
+    expect(result.pos.A.x).toBe(80);
+    expect(result.pos.A.y).toBe(-60);
+    expect(result.pos.A.sticky).toBe(true);
+  });
+
+  test('gather pulls selected nodes toward centroid', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      h.addNode('A', -200, -100);
+      h.addNode('B', 200, -100);
+      h.addNode('C', 0, 200);
+      h.select('A');
+      h.toggleSelect('B');
+      h.toggleSelect('C');
+    });
+    await page.screenshot({ path: `${SHOTS}/32-gather-before.png` });
+
+    await page.evaluate(() => window.__harness.runGather(30));
+    await page.screenshot({ path: `${SHOTS}/32-gather-after.png` });
+
+    const pos = await page.evaluate(() => window.__harness.getPositions());
+    expect(Math.abs(pos.A.x)).toBeLessThan(200);
+    expect(Math.abs(pos.B.x)).toBeLessThan(200);
+  });
+
+  test('attractor pulls neighbors toward focal node', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      h.addNode('center', 0, 0);
+      h.addNode('far1', 200, 0);
+      h.addNode('far2', -200, 0);
+      h.addNode('far3', 0, 200);
+      h.addEdge('center->far1', 'center', 'far1', 'calls', 1);
+      h.addEdge('center->far2', 'center', 'far2', 'calls', 1);
+      h.addEdge('center->far3', 'center', 'far3', 'calls', 1);
+    });
+    await page.screenshot({ path: `${SHOTS}/33-attractor-before.png` });
+
+    await page.evaluate(() => window.__harness.runAttractor('center', 40));
+    await page.screenshot({ path: `${SHOTS}/33-attractor-after.png` });
+
+    const pos = await page.evaluate(() => window.__harness.getPositions());
+    expect(Math.abs(pos.far1.x)).toBeLessThan(200);
+    expect(pos.far1.locked).toBe(true);
+  });
+
+  test('flash trace highlights BFS wavefronts', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      h.addNode('start', -150, 0);
+      h.addNode('hop1a', -50, -50);
+      h.addNode('hop1b', -50, 50);
+      h.addNode('hop2', 50, 0);
+      h.addNode('hop3', 150, 0);
+      h.addEdge('start->hop1a', 'start', 'hop1a', 'calls', 1);
+      h.addEdge('start->hop1b', 'start', 'hop1b', 'calls', 1);
+      h.addEdge('hop1a->hop2', 'hop1a', 'hop2', 'calls', 1);
+      h.addEdge('hop1b->hop2', 'hop1b', 'hop2', 'calls', 1);
+      h.addEdge('hop2->hop3', 'hop2', 'hop3', 'calls', 1);
+    });
+    await page.screenshot({ path: `${SHOTS}/34-trace-before.png` });
+
+    const result = await page.evaluate(() => window.__harness.runFlashTrace('start'));
+    await page.screenshot({ path: `${SHOTS}/34-trace-flash.png` });
+
+    expect(result.nodes.length).toBe(5);
+    expect(result.wavefronts).toBe(4);
+  });
+
+  test('reset moves displaced nodes back toward T0', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      h.addNode('A', 0, 0);
+      h.addNode('B', 100, 0);
+      h.moveNode('A', 200, 200);
+      h.moveNode('B', -100, 150);
+    });
+    await page.screenshot({ path: `${SHOTS}/35-reset-displaced.png` });
+
+    await page.evaluate(() => window.__harness.runReset(60));
+    await page.screenshot({ path: `${SHOTS}/35-reset-after.png` });
+
+    const pos = await page.evaluate(() => window.__harness.getPositions());
+    expect(Math.abs(pos.A.x)).toBeLessThan(50);
+    expect(Math.abs(pos.A.y)).toBeLessThan(50);
+  });
+
+  test('single-node reset snaps exactly to T0', async ({ page }) => {
+    await page.goto(HARNESS());
+    await page.waitForFunction(() => window.__ready);
+
+    await page.evaluate(() => {
+      const h = window.__harness;
+      h.addNode('A', 0, 0);
+      h.moveNode('A', 300, 300);
+    });
+    await page.screenshot({ path: `${SHOTS}/36-reset-single-displaced.png` });
+
+    await page.evaluate(() => window.__harness.resetNode('A'));
+    await page.screenshot({ path: `${SHOTS}/36-reset-single-after.png` });
+
+    const pos = await page.evaluate(() => window.__harness.getPositions());
+    expect(pos.A.x).toBe(0);
+    expect(pos.A.y).toBe(0);
+  });
+});

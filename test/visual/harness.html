@@ -37,6 +37,18 @@
     import { computeHull, expandHull } from '../../src/render/hulls.js';
     import { computeMetaEdges, clusterCentroid } from '../../src/render/meta-edges.js';
     import { getLayer, ensureLayer } from '../../src/edges/layers.js';
+    // Phase 5: fractal rendering
+    import { computeRenderPlan, planStats } from '../../src/render/fractal.js';
+    import { screenRadius, lodLevel } from '../../src/render/viewport.js';
+    import { buildClusterIndex } from '../../src/data/derive.js';
+    import { createContext } from '../../src/core/context.js';
+    // Phase 6: interactions
+    import { createSelection, selectNode, toggleSelection, clearSelection } from '../../src/interact/select.js';
+    import { startDrag, onDrag, endDrag } from '../../src/interact/drag.js';
+    import { startReset, updateReset, resetSingleNode } from '../../src/interact/reset.js';
+    import { centroid, startGather, startStrangerGather, updateGather, stopGather } from '../../src/interact/gather.js';
+    import { startAttractor, updateAttractor, stopAttractor } from '../../src/interact/attractor.js';
+    import { startTrace, flashTrace, updateTrace, revealedNodes, revealedEdges } from '../../src/interact/trace.js';
 
     // ─── State ───
     const state = {
@@ -160,9 +172,267 @@
         };
       },
 
+      // ─── Fractal rendering ───
+
+      addCluster(id, memberIds) {
+        state.clusters = state.clusters || new Map();
+        state.clusters.set(id, {
+          id,
+          members: new Set(memberIds),
+          sourceHyperEdge: `he:${id}`,
+        });
+      },
+
+      computeRenderPlanAt(zoom, budget) {
+        const clusters = state.clusters || new Map();
+        const ctx = state.context || createContext();
+        const plan = computeRenderPlan({
+          nodes: state.nodes,
+          edges: state.edges,
+          clusters,
+          posMap: state.posMap,
+          context: ctx,
+          zoom: zoom || 1,
+          budget: budget || 5000,
+        });
+        state.lastPlan = plan;
+        return plan;
+      },
+
+      renderPlan(plan) {
+        plan = plan || state.lastPlan;
+        if (!plan) return;
+
+        // Hulls
+        while (gHulls.firstChild) gHulls.removeChild(gHulls.firstChild);
+        for (const h of plan.hulls) {
+          const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+          poly.setAttribute('points', h.hull.map(p => p.join(',')).join(' '));
+          poly.setAttribute('fill', `hsla(${h.depth * 60 + 200}, 50%, 30%, 0.25)`);
+          poly.setAttribute('stroke', `hsla(${h.depth * 60 + 200}, 60%, 50%, 0.5)`);
+          poly.setAttribute('stroke-width', '1.5');
+          gHulls.appendChild(poly);
+        }
+
+        // Edges
+        while (gLinks.firstChild) gLinks.removeChild(gLinks.firstChild);
+        for (const edge of plan.edges) {
+          const ps = state.posMap.positions.get(edge.source);
+          const pt = state.posMap.positions.get(edge.target);
+          if (!ps || !pt) continue;
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', ps.x); line.setAttribute('y1', ps.y);
+          line.setAttribute('x2', pt.x); line.setAttribute('y2', pt.y);
+          const layerDef = getLayer(edge.layer);
+          line.setAttribute('stroke', edge.isMeta ? '#ff0' : (layerDef ? layerDef.color : '#666'));
+          line.setAttribute('stroke-width', edge.isMeta ? '2' : Math.max(0.5, Math.min(3, edge.weight)));
+          line.setAttribute('stroke-opacity', edge.isMeta ? '0.8' : '0.5');
+          if (edge.isMeta) line.setAttribute('stroke-dasharray', '6,3');
+          gLinks.appendChild(line);
+        }
+
+        // Nodes
+        while (gNodes.firstChild) gNodes.removeChild(gNodes.firstChild);
+        for (const node of plan.nodes) {
+          const ps = state.posMap.positions.get(node.id);
+          if (!ps) continue;
+          const r = node.isCluster ? 8 + node.importance : 4 + (node.importance || 1) * 2;
+          const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          circle.setAttribute('cx', ps.x); circle.setAttribute('cy', ps.y);
+          circle.setAttribute('r', r);
+          circle.setAttribute('fill', node.isCluster ? '#9b59b6' : nodeColor(node, ps));
+          circle.setAttribute('stroke', '#fff');
+          circle.setAttribute('stroke-width', node.isCluster ? '2' : '1');
+          circle.setAttribute('stroke-opacity', '0.7');
+          gNodes.appendChild(circle);
+        }
+
+        // Labels
+        while (gLabels.firstChild) gLabels.removeChild(gLabels.firstChild);
+        for (const node of plan.nodes) {
+          const ps = state.posMap.positions.get(node.id);
+          if (!ps) continue;
+          const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          text.setAttribute('x', ps.x); text.setAttribute('y', ps.y - 10);
+          text.setAttribute('text-anchor', 'middle');
+          text.setAttribute('font-size', node.isCluster ? '11' : '9');
+          text.setAttribute('fill', node.isCluster ? '#c9a' : '#aaa');
+          text.setAttribute('font-weight', node.isCluster ? 'bold' : 'normal');
+          text.textContent = node.label;
+          gLabels.appendChild(text);
+        }
+
+        // Cluster labels at centroids
+        while (document.getElementById('gClusterLabels').firstChild)
+          document.getElementById('gClusterLabels').removeChild(document.getElementById('gClusterLabels').firstChild);
+        for (const cl of plan.clusterLabels) {
+          const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          text.setAttribute('x', cl.x); text.setAttribute('y', cl.y);
+          text.setAttribute('text-anchor', 'middle');
+          text.setAttribute('font-size', '13');
+          text.setAttribute('fill', '#e8e');
+          text.setAttribute('font-weight', 'bold');
+          text.textContent = cl.label;
+          document.getElementById('gClusterLabels').appendChild(text);
+        }
+
+        info.textContent = `nodes: ${plan.nodes.length}  edges: ${plan.edges.length}  hulls: ${plan.hulls.length}  maxDepth: ${plan.maxDepth}  primitives: ${plan.totalPrimitives}`;
+      },
+
+      // ─── Interaction helpers ───
+
+      selection: createSelection(),
+
+      select(nodeId) {
+        this.selection = selectNode(this.selection, nodeId);
+        this.renderSelection();
+      },
+
+      toggleSelect(nodeId) {
+        this.selection = toggleSelection(this.selection, nodeId);
+        this.renderSelection();
+      },
+
+      clearSel() {
+        this.selection = clearSelection();
+        this.renderSelection();
+      },
+
+      getSelection() {
+        return { primary: this.selection.primary, selected: [...this.selection.selected] };
+      },
+
+      renderSelection() {
+        // Highlight selected nodes with a ring
+        const rings = document.querySelectorAll('.sel-ring');
+        rings.forEach(r => r.remove());
+        for (const id of this.selection.selected) {
+          const ps = state.posMap.positions.get(id);
+          if (!ps) continue;
+          const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          circle.setAttribute('cx', ps.x); circle.setAttribute('cy', ps.y);
+          circle.setAttribute('r', '12');
+          circle.setAttribute('fill', 'none');
+          circle.setAttribute('stroke', '#0ff');
+          circle.setAttribute('stroke-width', '2');
+          circle.setAttribute('class', 'sel-ring');
+          gNodes.appendChild(circle);
+        }
+      },
+
+      dragNode(nodeId, toX, toY) {
+        const drag = startDrag(nodeId, state.posMap, this.selection, false);
+        if (!drag) return null;
+        onDrag(drag, toX, toY, state.posMap);
+        const rows = endDrag(drag, state.posMap);
+        this.render();
+        return rows;
+      },
+
+      runGather(steps) {
+        const g = startGather(this.selection, state.posMap);
+        if (!g) return null;
+        for (let i = 0; i < (steps || 10); i++) {
+          updateGather(g, 16, state.posMap);
+        }
+        stopGather(g);
+        this.render();
+        return { pulled: [...g.pulledIds] };
+      },
+
+      runAttractor(focalId, steps) {
+        const att = startAttractor(focalId, state.edges, state.posMap);
+        if (!att) return null;
+        for (let i = 0; i < (steps || 20); i++) {
+          updateAttractor(att, 50, state.edges, state.posMap);
+        }
+        stopAttractor(att, state.posMap);
+        this.render();
+        return { pulled: [...att.pulled.keys()] };
+      },
+
+      runFlashTrace(sourceId) {
+        const ctx = state.context || createContext();
+        const trace = flashTrace(sourceId, state.edges, ctx);
+        // Highlight traced nodes/edges
+        const revealed = revealedNodes(trace);
+        const revEdges = revealedEdges(trace);
+        this.renderTraceOverlay(revealed, revEdges);
+        return { nodes: [...revealed], edges: [...revEdges], wavefronts: trace.wavefronts.length };
+      },
+
+      renderTraceOverlay(nodeSet, edgeSet) {
+        // Glow rings on traced nodes
+        const existing = document.querySelectorAll('.trace-ring');
+        existing.forEach(r => r.remove());
+        for (const id of nodeSet) {
+          const ps = state.posMap.positions.get(id);
+          if (!ps) continue;
+          const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          circle.setAttribute('cx', ps.x); circle.setAttribute('cy', ps.y);
+          circle.setAttribute('r', '10');
+          circle.setAttribute('fill', 'none');
+          circle.setAttribute('stroke', '#0f0');
+          circle.setAttribute('stroke-width', '2');
+          circle.setAttribute('stroke-opacity', '0.8');
+          circle.setAttribute('class', 'trace-ring');
+          gNodes.appendChild(circle);
+        }
+        // Highlight traced edges
+        const edgeLines = document.querySelectorAll('.trace-edge');
+        edgeLines.forEach(r => r.remove());
+        for (const eid of edgeSet) {
+          const edge = state.edges.get(eid);
+          if (!edge) continue;
+          const ps = state.posMap.positions.get(edge.source);
+          const pt = state.posMap.positions.get(edge.target);
+          if (!ps || !pt) continue;
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', ps.x); line.setAttribute('y1', ps.y);
+          line.setAttribute('x2', pt.x); line.setAttribute('y2', pt.y);
+          line.setAttribute('stroke', '#0f0');
+          line.setAttribute('stroke-width', '3');
+          line.setAttribute('stroke-opacity', '0.7');
+          line.setAttribute('class', 'trace-edge');
+          gLinks.appendChild(line);
+        }
+      },
+
+      runReset(steps) {
+        const rs = startReset(false);
+        for (let i = 0; i < (steps || 30); i++) {
+          updateReset(rs, 16, state.posMap);
+        }
+        this.render();
+      },
+
+      resetNode(nodeId) {
+        resetSingleNode(nodeId, state.posMap);
+        this.render();
+      },
+
+      setContext(overrides) {
+        state.context = state.context || createContext();
+        if (overrides) Object.assign(state.context, overrides);
+      },
+
+      pinCluster(clusterId) {
+        state.context = state.context || createContext();
+        state.context.pinnedClusters.add(clusterId);
+      },
+
+      unpinCluster(clusterId) {
+        state.context = state.context || createContext();
+        state.context.pinnedClusters.delete(clusterId);
+      },
+
       clear() {
         state.nodes.clear();
         state.edges.clear();
+        state.clusters = new Map();
+        state.lastPlan = null;
+        state.context = createContext();
+        this.selection = createSelection();
         state.posMap = createPositionMap();
         this.render();
       },
