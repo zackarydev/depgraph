@@ -48,6 +48,10 @@ import {
 
 import { LAYER_ORDER } from '../src/render/svg.js';
 
+import { computeRenderPlan, planStats } from '../src/render/fractal.js';
+import { computeLOD, lodDiff } from '../src/navigation/semantic-zoom.js';
+import { expandCluster, collapseCluster, toggleCollapse, isPinnedCollapsed } from '../src/navigation/expand-collapse.js';
+
 import { createContext, applyPreset } from '../src/core/context.js';
 import { rebuild } from '../src/layout/quadtree.js';
 import { createPositionMap, ensurePosition } from '../src/layout/positions.js';
@@ -422,5 +426,226 @@ describe('render/svg', () => {
     assert.equal(LAYER_ORDER[0], 'gHulls');
     assert.equal(LAYER_ORDER[3], 'gNodes');
     assert.equal(LAYER_ORDER[5], 'gClusterLabels');
+  });
+});
+
+// ─────────────────────────────────────────────────
+// Fractal render plan
+// ─────────────────────────────────────────────────
+
+describe('render/fractal', () => {
+  function buildTwoClusterGraph() {
+    const nodes = new Map([
+      ['a', { id: 'a', kind: 'function', label: 'a', importance: 1 }],
+      ['b', { id: 'b', kind: 'function', label: 'b', importance: 1 }],
+      ['c', { id: 'c', kind: 'function', label: 'c', importance: 1 }],
+      ['x', { id: 'x', kind: 'function', label: 'x', importance: 1 }],
+      ['y', { id: 'y', kind: 'function', label: 'y', importance: 1 }],
+    ]);
+    const edges = new Map([
+      ['a->b', makeEdge('a->b', 'a', 'b', 'calls', 1)],
+      ['b->c', makeEdge('b->c', 'b', 'c', 'calls', 1)],
+      ['x->y', makeEdge('x->y', 'x', 'y', 'calls', 1)],
+      ['a->x', makeEdge('a->x', 'a', 'x', 'shared', 1)], // cross-cluster
+    ]);
+    const clusters = new Map([
+      ['cluster:alpha', { id: 'cluster:alpha', members: new Set(['a', 'b', 'c']), sourceHyperEdge: 'he1' }],
+      ['cluster:beta', { id: 'cluster:beta', members: new Set(['x', 'y']), sourceHyperEdge: 'he2' }],
+    ]);
+    const posMap = createPositionMap();
+    // Cluster alpha spread wide (will have large world radius)
+    ensurePosition(posMap, 'a', -200, 0);
+    ensurePosition(posMap, 'b', -100, 0);
+    ensurePosition(posMap, 'c', -150, 80);
+    // Cluster beta compact
+    ensurePosition(posMap, 'x', 150, 0);
+    ensurePosition(posMap, 'y', 170, 10);
+    // Cluster-as-node positions
+    ensurePosition(posMap, 'cluster:alpha', -150, 25);
+    ensurePosition(posMap, 'cluster:beta', 160, 5);
+
+    return { nodes, edges, clusters, posMap };
+  }
+
+  it('at low zoom, all clusters collapsed — plan has 2 cluster nodes', () => {
+    const { nodes, edges, clusters, posMap } = buildTwoClusterGraph();
+    const plan = computeRenderPlan({
+      nodes, edges, clusters, posMap,
+      context: createContext(),
+      zoom: 0.1,  // very zoomed out — small screen radius
+    });
+
+    const clusterNodes = plan.nodes.filter(n => n.isCluster);
+    assert.equal(clusterNodes.length, 2, `expected 2 collapsed clusters, got ${clusterNodes.length}`);
+    assert.ok(clusterNodes.some(n => n.id === 'cluster:alpha'));
+    assert.ok(clusterNodes.some(n => n.id === 'cluster:beta'));
+    // No hulls at low zoom
+    assert.equal(plan.hulls.length, 0);
+  });
+
+  it('at high zoom, clusters expand — plan has member nodes + hulls', () => {
+    const { nodes, edges, clusters, posMap } = buildTwoClusterGraph();
+    const plan = computeRenderPlan({
+      nodes, edges, clusters, posMap,
+      context: createContext(),
+      zoom: 5,  // high zoom — large screen radius
+    });
+
+    // Should have member nodes, not cluster nodes (at least for the wide cluster)
+    const memberNodes = plan.nodes.filter(n => !n.isCluster);
+    assert.ok(memberNodes.length >= 3, `expected member nodes, got ${memberNodes.length}`);
+    // Should have at least one hull
+    assert.ok(plan.hulls.length >= 1, `expected hulls, got ${plan.hulls.length}`);
+  });
+
+  it('pinned-collapsed cluster stays as dot even at high zoom', () => {
+    const { nodes, edges, clusters, posMap } = buildTwoClusterGraph();
+    const ctx = createContext();
+    ctx.pinnedClusters.add('cluster:alpha');
+
+    const plan = computeRenderPlan({
+      nodes, edges, clusters, posMap,
+      context: ctx,
+      zoom: 10,  // very high zoom
+    });
+
+    // Alpha should still be a single cluster node
+    const alpha = plan.nodes.find(n => n.id === 'cluster:alpha');
+    assert.ok(alpha, 'cluster:alpha should be in plan');
+    assert.equal(alpha.isCluster, true);
+    assert.equal(alpha.lod, 'dot');
+  });
+
+  it('budget limits expansion', () => {
+    const nodes = new Map();
+    const edges = new Map();
+    const posMap = createPositionMap();
+
+    // Create a cluster with 100 members
+    const members = new Set();
+    for (let i = 0; i < 100; i++) {
+      const id = `n${i}`;
+      nodes.set(id, { id, kind: 'function', label: id, importance: 1 });
+      members.add(id);
+      ensurePosition(posMap, id, Math.random() * 500, Math.random() * 500);
+    }
+
+    const clusters = new Map([
+      ['cluster:big', { id: 'cluster:big', members, sourceHyperEdge: 'he1' }],
+    ]);
+    ensurePosition(posMap, 'cluster:big', 250, 250);
+
+    // Budget of 10 — cluster can't expand
+    const plan = computeRenderPlan({
+      nodes, edges, clusters, posMap,
+      context: createContext(),
+      zoom: 10,
+      budget: 10,
+    });
+
+    // Should have the cluster as a single node, not 100 member nodes
+    assert.ok(plan.totalPrimitives <= 10, `budget exceeded: ${plan.totalPrimitives}`);
+  });
+
+  it('planStats counts per depth', () => {
+    const { nodes, edges, clusters, posMap } = buildTwoClusterGraph();
+    const plan = computeRenderPlan({
+      nodes, edges, clusters, posMap,
+      context: createContext(),
+      zoom: 5,
+    });
+
+    const stats = planStats(plan);
+    assert.ok(stats.size >= 1, 'should have at least one depth level');
+    // Depth 0 should have entries
+    const d0 = stats.get(0);
+    assert.ok(d0, 'depth 0 should exist');
+    assert.ok(d0.nodes >= 0);
+  });
+
+  it('meta-edges appear between collapsed clusters', () => {
+    const { nodes, edges, clusters, posMap } = buildTwoClusterGraph();
+    const plan = computeRenderPlan({
+      nodes, edges, clusters, posMap,
+      context: createContext(),
+      zoom: 0.1,  // both collapsed
+    });
+
+    const metaEdges = plan.edges.filter(e => e.isMeta);
+    assert.ok(metaEdges.length >= 1, `expected meta-edges between clusters, got ${metaEdges.length}`);
+  });
+});
+
+// ─────────────────────────────────────────────────
+// Semantic zoom
+// ─────────────────────────────────────────────────
+
+describe('navigation/semantic-zoom', () => {
+  it('computeLOD returns entries for all clusters', () => {
+    const posMap = createPositionMap();
+    ensurePosition(posMap, 'a', 0, 0);
+    ensurePosition(posMap, 'b', 100, 0);
+    const clusters = new Map([
+      ['cluster:X', { id: 'cluster:X', members: new Set(['a', 'b']), sourceHyperEdge: 'he1' }],
+    ]);
+
+    const lod = computeLOD(1.0, clusters, posMap, createContext());
+    assert.equal(lod.size, 1);
+    assert.ok(lod.has('cluster:X'));
+  });
+
+  it('higher zoom produces higher screen radius', () => {
+    const posMap = createPositionMap();
+    ensurePosition(posMap, 'a', 0, 0);
+    ensurePosition(posMap, 'b', 100, 0);
+    const clusters = new Map([
+      ['cluster:X', { id: 'cluster:X', members: new Set(['a', 'b']), sourceHyperEdge: 'he1' }],
+    ]);
+
+    const lod1 = computeLOD(0.5, clusters, posMap, createContext());
+    const lod2 = computeLOD(5.0, clusters, posMap, createContext());
+    assert.ok(lod2.get('cluster:X').screenRadius > lod1.get('cluster:X').screenRadius);
+  });
+
+  it('lodDiff detects expand/collapse transitions', () => {
+    const prev = new Map([
+      ['c1', { clusterId: 'c1', lod: 'circle', screenRadius: 30, worldRadius: 60 }],
+      ['c2', { clusterId: 'c2', lod: 'expanded', screenRadius: 100, worldRadius: 200 }],
+    ]);
+    const next = new Map([
+      ['c1', { clusterId: 'c1', lod: 'expanded', screenRadius: 100, worldRadius: 60 }],
+      ['c2', { clusterId: 'c2', lod: 'dot', screenRadius: 5, worldRadius: 200 }],
+    ]);
+
+    const diff = lodDiff(prev, next);
+    assert.deepEqual(diff.expanded, ['c1']);
+    assert.deepEqual(diff.collapsed, ['c2']);
+  });
+});
+
+// ─────────────────────────────────────────────────
+// Expand / collapse
+// ─────────────────────────────────────────────────
+
+describe('navigation/expand-collapse', () => {
+  it('collapseCluster adds to pinnedClusters', () => {
+    const ctx = createContext();
+    const next = collapseCluster('cluster:X', ctx);
+    assert.ok(next.pinnedClusters.has('cluster:X'));
+    assert.ok(!ctx.pinnedClusters.has('cluster:X'), 'original unchanged');
+  });
+
+  it('expandCluster removes from pinnedClusters', () => {
+    const ctx = collapseCluster('cluster:X', createContext());
+    const next = expandCluster('cluster:X', ctx);
+    assert.ok(!next.pinnedClusters.has('cluster:X'));
+  });
+
+  it('toggleCollapse toggles', () => {
+    const ctx = createContext();
+    const pinned = toggleCollapse('cluster:X', ctx);
+    assert.ok(isPinnedCollapsed('cluster:X', pinned));
+    const unpinned = toggleCollapse('cluster:X', pinned);
+    assert.ok(!isPinnedCollapsed('cluster:X', unpinned));
   });
 });
