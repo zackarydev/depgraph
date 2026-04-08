@@ -241,6 +241,49 @@ test/
 
 ---
 
+## Phase 6.5 — Integration (wiring the engine)
+
+**Goal:** main.js boots a working app. Load history, derive, place, render, interact — the full pipeline from static file to interactive graph. This is NOT new module work; it is connecting Phases 1–6 into a running whole.
+
+**Why this phase exists:** Phases 1–6 built excellent isolated modules with full test coverage, but main.js is still a Phase 1 skeleton. The visual test harness proves the modules compose, but the actual app does not boot. This phase closes that gap before any new feature work.
+
+### 6.5a. Boot pipeline in main.js
+- `main.js` loads `runtime/history.csv` (or a bundled static file), replays into state via `data/history.js`.
+- Derives clusters via `data/derive.js`. Runs `initialPlace()` or `warmRestart()`.
+- Creates SVG via `render/svg.js`. Wires `renderPositions()` as the scheduler's render callback.
+- Wires bus events: `row-appended` → derive + re-render, `context-changed` → re-derive.
+- **Test:** open `index.html` with a test history.csv. Graph appears. Zoom works.
+
+### 6.5b. Wire DOM events to interact modules
+- Click → `select.js`. Mousedown+move → `drag.js`. Keydown/up → `keyboard.js` dispatch.
+- Each interaction's output (history rows, position changes) flows through bus → history → state → re-render.
+- **Test:** click a node in browser → selection ring appears. Drag → node moves, sticky. Press T → trace wavefront visible.
+
+### 6.5c. Wire fractal render plan to DOM renderers
+- On zoom change: `computeRenderPlan()` → feed plan.nodes to `renderNodes()`, plan.edges to `renderEdges()`, plan.hulls to hull renderer, plan.clusterLabels to `renderClusterLabels()`.
+- LOD transitions animate: collapsed → expanded shows hull appearing, members fading in.
+- **Test:** zoom into a cluster → it expands, hull + member nodes visible. Zoom out → collapses back to dot.
+
+### 6.5d. Codemap parser
+- `data/codemap.js` — parse `runtime/depgraph.md` into cluster definitions + importance scores. Emit `memberOf` edges.
+- This is needed before the app can load a real codebase.
+- **Test:** parse test codemap string → correct clusters, member edges, importance values.
+
+### 6.5e. Pin-expanded (bidirectional pinning)
+- SPEC §5 says pinning is bidirectional: pin-collapsed AND pin-expanded. Currently only pin-collapsed works.
+- Add `pinnedExpanded` to WorkingContext. Update `lodLevel()` to respect it. Update `expand-collapse.js`.
+- **Test:** pin a cluster expanded. Zoom out. Assert it stays expanded even when screen radius < threshold.
+
+### 6.5f. Drag emits spatial edges
+- SPEC §10 says drag should write `EDGE add layer=spatial` rows capturing distance to K nearest neighbors (plan2 Option B).
+- `endDrag()` computes distances to adaptive K neighbors, emits DISTANCE/spatial edge rows alongside the NODE update.
+- These become spring rest-lengths in future physics passes, enabling position recovery from CSV alone.
+- **Test:** drag node A. Assert spatial EDGE rows in history with correct distances to neighbors.
+
+**Phase 6.5 acceptance:** open `index.html` → see a graph from a real history.csv. Click, drag, zoom, trace all work in the browser. Every interaction writes to history. The app is usable — not polished, but functional.
+
+---
+
 ## Phase 7 — Streaming & Server
 
 **Goal:** Both streaming types work independently. The app works with no server at all.
@@ -436,31 +479,32 @@ test/
 ## Dependency Graph (phases)
 
 ```
-Phase 0 (scaffold)
-  └─► Phase 1 (core runtime)
-       └─► Phase 2 (history)
-            └─► Phase 3 (derivation)
-                 ├─► Phase 4 (placement)
-                 │    └─► Phase 5 (rendering)
-                 │         └─► Phase 6 (interaction)
-                 │              ├─► Phase 7 (streaming/server)
-                 │              ├─► Phase 8 (context UI)
-                 │              └─► Phase 10 (producers)
+Phase 0 (scaffold)              ✅ DONE
+  └─► Phase 1 (core runtime)    ✅ DONE
+       └─► Phase 2 (history)    ✅ DONE
+            └─► Phase 3 (derivation)  ✅ DONE
+                 ├─► Phase 4 (placement)   ✅ DONE
+                 │    └─► Phase 5 (rendering)   ✅ DONE
+                 │         └─► Phase 6 (interaction)   ✅ DONE
+                 │              └─► Phase 6.5 (integration) ◄── YOU ARE HERE
+                 │                   ├─► Phase 7 (streaming/server)
+                 │                   ├─► Phase 8 (context UI)
+                 │                   └─► Phase 10 (producers)
                  │
-                 └─► Phase 9 (scaling) ◄── can start after Phase 5
-                      └─► Phase 11 (rules) ◄── needs Phase 6 + 9
+                 └─► Phase 9 (scaling) ◄── can start after Phase 6.5
+                      └─► Phase 11 (rules) ◄── needs Phase 6.5 + 9
                            └─► Phase 12 (agent) ◄── needs Phase 7 + 11
                                 └─► Phase 13 (polish)
 ```
 
-Phases 7, 8, 9, 10 can run in **parallel** after Phase 6 ships. Phase 11 needs Phase 9 (for large-graph matching perf) and Phase 6 (for interaction-based testing). Phase 12 needs Phase 7 (server) and Phase 11 (rules).
+**Phase 6.5 is the gate.** It produces the first bootable app. Phases 7, 8, 9, 10 can run in **parallel** after Phase 6.5 ships. Phase 11 needs Phase 9 (for large-graph matching perf) and Phase 6.5 (for browser-based testing). Phase 12 needs Phase 7 (server) and Phase 11 (rules).
 
 ---
 
 ## Critical Path
 
 ```
-0 → 1 → 2 → 3 → 4 → 5 → 6 → 9 → 11 → 12 → 13
+0 → 1 → 2 → 3 → 4 → 5 → 6 → 6.5 → 9 → 11 → 12 → 13
 ```
 
 Everything else (7, 8, 10) is off the critical path and can be parallelized by a second contributor.

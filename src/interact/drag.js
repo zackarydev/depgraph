@@ -83,16 +83,19 @@ export function onDrag(drag, worldX, worldY, posMap) {
 
 /**
  * End a drag. Makes the dragged node(s) sticky and returns history rows
- * to append (NODE update with new position in payload).
+ * to append (NODE update with new position in payload + spatial EDGE rows).
  *
  * @param {DragState} drag
  * @param {import('../layout/positions.js').PositionMap} posMap
+ * @param {Object} [opts]
+ * @param {number} [opts.spatialK=5] - number of nearest neighbors for spatial edges
  * @returns {import('../core/types.js').HistoryRow[]} rows to append to history
  */
-export function endDrag(drag, posMap) {
+export function endDrag(drag, posMap, opts) {
   if (!drag.moved) return [];
 
   const rows = [];
+  const spatialK = (opts && opts.spatialK) || 5;
 
   // Make dragged node sticky
   setSticky(posMap, drag.nodeId, true);
@@ -104,6 +107,10 @@ export function endDrag(drag, posMap) {
       id: drag.nodeId,
       payload: { x: ps.x, y: ps.y, author: 'user', action: 'drag' },
     });
+
+    // Emit spatial edges to K nearest neighbors
+    const spatialRows = computeSpatialEdges(drag.nodeId, posMap, spatialK);
+    rows.push(...spatialRows);
   }
 
   // Group drag: make all moved nodes sticky, record positions
@@ -118,11 +125,52 @@ export function endDrag(drag, posMap) {
           id,
           payload: { x: other.x, y: other.y, author: 'user', action: 'group-drag' },
         });
+        const spatialRows = computeSpatialEdges(id, posMap, spatialK);
+        rows.push(...spatialRows);
       }
     }
   }
 
   return rows;
+}
+
+/**
+ * Compute spatial EDGE rows for a node's K nearest neighbors.
+ * Distance becomes the edge weight (inverse: closer = higher weight).
+ *
+ * @param {string} nodeId
+ * @param {import('../layout/positions.js').PositionMap} posMap
+ * @param {number} k
+ * @returns {import('../core/types.js').HistoryRow[]}
+ */
+function computeSpatialEdges(nodeId, posMap, k) {
+  const ps = posMap.positions.get(nodeId);
+  if (!ps) return [];
+
+  // Find distances to all other nodes
+  const distances = [];
+  for (const [otherId, otherPs] of posMap.positions) {
+    if (otherId === nodeId) continue;
+    const dx = ps.x - otherPs.x;
+    const dy = ps.y - otherPs.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    distances.push({ id: otherId, dist });
+  }
+
+  // Sort by distance, take K nearest
+  distances.sort((a, b) => a.dist - b.dist);
+  const nearest = distances.slice(0, k);
+
+  return nearest.map(({ id: otherId, dist }) => ({
+    type: 'EDGE',
+    op: 'add',
+    id: `spatial:${nodeId}->${otherId}`,
+    source: nodeId,
+    target: otherId,
+    layer: 'spatial',
+    weight: Math.max(0.1, 1 / (1 + dist / 100)),
+    payload: { distance: Math.round(dist), author: 'user', action: 'drag-spatial' },
+  }));
 }
 
 /**

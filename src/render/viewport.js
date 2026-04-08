@@ -89,9 +89,7 @@ export function computeExpansion(clusters, posMap, zoom, context, budget = 5000)
     const sr = screenRadius(radius, zoom);
 
     const isPinnedCollapsed = context.pinnedClusters && context.pinnedClusters.has(clusterId);
-    // Pin-expanded: check if cluster id (without prefix) is in pinnedClusters with expand marker
-    // For v1: pinnedClusters = collapsed. We'll use focalNodes for expand hints.
-    const isPinnedExpanded = false; // TODO: Phase 8 will add pin-expanded via context
+    const isPinnedExpanded = context.pinnedExpanded && context.pinnedExpanded.has(clusterId);
 
     const lod = lodLevel(sr, isPinnedCollapsed, isPinnedExpanded);
 

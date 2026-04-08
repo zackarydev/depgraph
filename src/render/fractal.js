@@ -157,7 +157,7 @@ function renderGraphRecursive(
       const sr = screenRadius(worldRadius, zoom);
 
       const isPinnedCollapsed = context.pinnedClusters && context.pinnedClusters.has(cluster.id);
-      const isPinnedExpanded = false; // Phase 8 will add this
+      const isPinnedExpanded = context.pinnedExpanded && context.pinnedExpanded.has(cluster.id);
 
       const lod = lodLevel(sr, isPinnedCollapsed, isPinnedExpanded);
 

@@ -84,6 +84,7 @@ export function createContext(name = 'default') {
     },
     pinnedNodes: new Set(),
     pinnedClusters: new Set(),
+    pinnedExpanded: new Set(),
     focalNodes: new Set(),
     lensEdgeLayers: new Set(Object.keys(DEFAULT_WEIGHTS)),
     goal: '',
