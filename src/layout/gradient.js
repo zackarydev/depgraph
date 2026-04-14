@@ -24,6 +24,21 @@ const REPULSION_K = 500;
 const BH_THETA = 0.7;
 const MAX_DISPLACEMENT = 10; // clamp per-node step to prevent explosion
 
+// Global bias added to every edge's stretch at gradient time. Driven by the
+// zoom wiring in main.js so that zooming in amplifies the expand gesture and
+// zooming out damps it. Set via setStretchBias(); 0 means identity.
+let stretchBias = 0;
+export function setStretchBias(b) { stretchBias = b; }
+export function getStretchBias() { return stretchBias; }
+
+// target = BASE * exp(stretch + bias). Free scalar, 0 = identity, ±∞ asymptotes.
+function stretchedTarget(edge, w) {
+  const s = (edge.stretch || 0) + stretchBias;
+  // Coupling strength still modulates the base a little so importance edges
+  // stay tighter than structural ones, but stretch is the dominant knob.
+  return (DEFAULT_TARGET_DIST / Math.max(w, 0.1)) * Math.exp(s);
+}
+
 /**
  * Compute total energy of the current layout.
  *
@@ -47,7 +62,7 @@ export function energy(posMap, edges, W) {
     const dist = Math.sqrt(dx * dx + dy * dy);
     const layerW = (W && W[edge.layer] != null) ? W[edge.layer] : 1.0;
     const w = (edge.weight || 1) * layerW;
-    const target = DEFAULT_TARGET_DIST / Math.max(w, 0.1);
+    const target = stretchedTarget(edge, w);
     E += w * (dist - target) ** 2;
   }
 
@@ -104,7 +119,7 @@ export function gradEnergy(posMap, edges, W) {
     const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
     const layerW = (W && W[edge.layer] != null) ? W[edge.layer] : 1.0;
     const w = (edge.weight || 1) * layerW;
-    const target = DEFAULT_TARGET_DIST / Math.max(w, 0.1);
+    const target = stretchedTarget(edge, w);
 
     const factor = 2 * w * (1 - target / dist);
     const gx = factor * dx;
@@ -161,19 +176,32 @@ export function gradNorm(grad) {
  * Perform one gradient descent step.
  * Mutates posMap in place.
  *
+ * If `options.scope` is provided, the step runs in cluster-local mode: only
+ * edges with BOTH endpoints in scope contribute to the gradient, repulsion
+ * is computed only between scope pairs, and only scope nodes are moved.
+ * Everything outside the scope is frozen — bridge edges crossing the scope
+ * boundary are ignored for the duration of the step, so they cannot drag
+ * members back out during a collapse burst.
+ *
  * @param {import('./positions.js').PositionMap} posMap
  * @param {Map<string, import('../core/types.js').Edge>} edges
  * @param {import('../core/types.js').WeightVector} [W]
  * @param {Object} [options]
  * @param {number} [options.eta] - step size
+ * @param {Set<string>} [options.scope] - cluster-local mode
  * @returns {{ gradMag: number }} gradient magnitude after step
  */
 export function descentStep(posMap, edges, W, options) {
   const eta = (options && options.eta) || DEFAULT_ETA;
-  const grad = gradEnergy(posMap, edges, W);
+  const scope = options && options.scope;
+
+  const grad = scope
+    ? scopedGradEnergy(posMap, edges, W, scope)
+    : gradEnergy(posMap, edges, W);
 
   for (const [id, ps] of posMap.positions) {
     if (ps.locked) continue;
+    if (scope && !scope.has(id)) continue;
 
     const g = grad.get(id);
     if (!g) continue;
@@ -182,7 +210,6 @@ export function descentStep(posMap, edges, W, options) {
     let dx = stepScale * g.gx;
     let dy = stepScale * g.gy;
 
-    // Clamp displacement to prevent numerical explosion
     const mag = Math.sqrt(dx * dx + dy * dy);
     if (mag > MAX_DISPLACEMENT) {
       const scale = MAX_DISPLACEMENT / mag;
@@ -195,4 +222,64 @@ export function descentStep(posMap, edges, W, options) {
   }
 
   return { gradMag: gradNorm(grad) };
+}
+
+/**
+ * Scope-restricted gradient: edges count only when both endpoints ∈ scope,
+ * repulsion only between scope pairs. Used for cluster-local collapse/expand
+ * bursts so bridge edges to outside nodes cannot fight the rule.
+ */
+function scopedGradEnergy(posMap, edges, W, scope) {
+  const grad = new Map();
+  const positions = posMap.positions;
+
+  for (const id of scope) grad.set(id, { gx: 0, gy: 0 });
+
+  for (const [, edge] of edges) {
+    if (!scope.has(edge.source) || !scope.has(edge.target)) continue;
+    const ps = positions.get(edge.source);
+    const pt = positions.get(edge.target);
+    if (!ps || !pt) continue;
+
+    const dx = ps.x - pt.x;
+    const dy = ps.y - pt.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
+    const layerW = (W && W[edge.layer] != null) ? W[edge.layer] : 1.0;
+    const w = (edge.weight || 1) * layerW;
+    const target = stretchedTarget(edge, w);
+
+    const factor = 2 * w * (1 - target / dist);
+    const gx = factor * dx;
+    const gy = factor * dy;
+
+    const gs = grad.get(edge.source);
+    const gt = grad.get(edge.target);
+    if (gs) { gs.gx += gx; gs.gy += gy; }
+    if (gt) { gt.gx -= gx; gt.gy -= gy; }
+  }
+
+  // Brute-force pairwise repulsion among scope members — typical cluster
+  // sizes are small, so quadratic is fine and we skip the Barnes-Hut setup.
+  const ids = [...scope];
+  for (let i = 0; i < ids.length; i++) {
+    const pi = positions.get(ids[i]);
+    if (!pi) continue;
+    for (let j = i + 1; j < ids.length; j++) {
+      const pj = positions.get(ids[j]);
+      if (!pj) continue;
+      const dx = pi.x - pj.x;
+      const dy = pi.y - pj.y;
+      const distSq = dx * dx + dy * dy;
+      if (distSq < 0.01) continue;
+      const dist = Math.sqrt(distSq);
+      // Gradient of REPULSION_K / dist wrt position = -REPULSION_K * r / dist^3
+      const f = REPULSION_K / (dist * distSq);
+      const gi = grad.get(ids[i]);
+      const gj = grad.get(ids[j]);
+      if (gi) { gi.gx -= f * dx; gi.gy -= f * dy; }
+      if (gj) { gj.gx += f * dx; gj.gy += f * dy; }
+    }
+  }
+
+  return grad;
 }

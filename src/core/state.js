@@ -73,6 +73,7 @@ export function applyRow(state, row) {
         target: row.target,
         layer: row.layer || 'unknown',
         weight: row.weight != null ? row.weight : 1,
+        stretch: row.payload?.stretch != null ? row.payload.stretch : 0,
         directed: row.payload?.directed !== false,
         label: row.label || null,
       });
@@ -86,6 +87,7 @@ export function applyRow(state, row) {
         if (row.target != null) existing.target = row.target;
         if (row.payload != null) {
           if (row.payload.directed != null) existing.directed = row.payload.directed;
+          if (row.payload.stretch != null) existing.stretch = row.payload.stretch;
         }
       }
     } else if (op === 'remove') {

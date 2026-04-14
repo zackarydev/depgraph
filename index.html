@@ -12,24 +12,100 @@
       font-family: 'SF Mono', 'Fira Code', ui-monospace, Menlo, monospace;
       user-select: none; -webkit-user-select: none;
     }
-    #viewport { position: fixed; top: 36px; left: 0; right: 0; bottom: 0; }
-    svg { width: 100%; height: 100%; }
 
-    /* Top toolbar — matches old_versions/index.html styling */
-    #hud-bar {
+    /* Top toolbar — mirrors old_versions/index.html */
+    #toolbar {
+      overflow: hidden;
       position: fixed; top: 0; left: 0; right: 0; z-index: 10;
       background: #111118; border-bottom: 1px solid #2a2a35;
       padding: 8px 16px;
-      display: flex; align-items: center; gap: 16px;
-      font-size: 12px; height: 36px;
+      display: flex; align-items: center; gap: 12px;
+      font-size: 12px; height: 44px;
+      overflow-x: auto;
     }
-    #hud-bar strong { color: #e8e8f0; }
-    #hud-bar .sep { width: 1px; height: 20px; background: #333; }
-    #hud-bar .stat { color: #888; }
-    #hud-bar .stat span { color: #ccc; }
-    #hud-bar .hint { color: #555; margin-left: auto; font-size: 11px; }
+    #toolbar strong { color: #e8e8f0; }
+    #toolbar .sep { width: 1px; height: 20px; background: #333; flex-shrink: 0; }
+    #toolbar .stat { color: #888; }
+    #toolbar .stat span { color: #ccc; }
+    #toolbar label {
+      color: #888; cursor: pointer; user-select: none;
+      display: inline-flex; align-items: center; gap: 4px;
+      white-space: nowrap;
+    }
+    #toolbar input[type=text], #toolbar input[type=number] {
+      background: #1a1a25; color: #ccc; border: 1px solid #333;
+      border-radius: 4px; padding: 3px 6px;
+      font-family: inherit; font-size: 11px;
+    }
+    #toolbar input[type=range] { accent-color: #666; vertical-align: middle; }
+    #toolbar .val { color: #666; font-size: 10px; min-width: 28px; text-align: right; }
+    #toolbar button {
+      background: #1a1a25; color: #888;
+      border: 1px solid #333; border-radius: 4px;
+      padding: 3px 8px;
+      font-family: inherit; font-size: 11px; cursor: pointer;
+    }
+    #toolbar button:hover { color: #ccc; border-color: #555; }
+    #toolbar .hint { color: #555; margin-left: auto; font-size: 11px; white-space: nowrap; }
 
-    /* Arrangement navigation — bottom center */
+    #viewport { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
+    svg { width: 100%; height: 100%; }
+
+    /* SVG node classes */
+    .node circle.node-circle { cursor: pointer; stroke-width: 1.5; }
+    .node circle.affinity-ring { pointer-events: none; }
+    .label { pointer-events: none; user-select: none; }
+    .hull { transition: fill-opacity 0.2s, stroke-opacity 0.2s; }
+    .hull-label { pointer-events: none; user-select: none; }
+    .cluster-label { font-weight: 600; cursor: grab; }
+    .link { transition: none; }
+    .meta-link { transition: none; }
+    .node-circle.selected-glow {
+      filter: drop-shadow(0 0 6px #ff0) drop-shadow(0 0 12px #ff0);
+    }
+    .node-circle.trace-glow {
+      filter: drop-shadow(0 0 6px currentColor) drop-shadow(0 0 14px currentColor);
+    }
+
+    /* Right-side info panel */
+    #info-panel {
+      position: fixed; top: 44px; right: 0; width: 320px; bottom: 0; z-index: 5;
+      background: #111118ee; border-left: 1px solid #2a2a35;
+      padding: 16px; overflow-y: auto; font-size: 12px;
+      transform: translateX(100%); transition: transform 0.2s;
+    }
+    #info-panel.open { transform: translateX(0); }
+    #info-panel h3 { color: #e8e8f0; margin-bottom: 8px; font-size: 14px; word-break: break-all; }
+    #info-panel .section { margin-bottom: 12px; }
+    #info-panel .section-title { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+    #info-panel .tag {
+      display: inline-block; background: #222; border-radius: 3px;
+      padding: 2px 6px; margin: 2px; font-size: 11px;
+    }
+    #info-panel .affinity-row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+    #info-panel .affinity-bar { height: 6px; border-radius: 3px; min-width: 4px; }
+    #info-panel .close {
+      float: right; color: #666; cursor: pointer; font-size: 16px; padding: 0 4px;
+    }
+    #info-panel .close:hover { color: #ccc; }
+
+    /* Focus panel — top center */
+    #focus-panel {
+      position: fixed; top: 56px; left: 50%; transform: translateX(-50%); z-index: 15;
+      background: #111118ee; border: 1px solid #3a3a50; border-radius: 8px;
+      padding: 10px 18px; font-size: 12px; max-width: 600px;
+      opacity: 0; transition: opacity 0.4s; pointer-events: none;
+    }
+    #focus-panel.active { opacity: 1; pointer-events: auto; }
+    #focus-panel .focus-step { color: #7af; font-weight: 600; }
+    #focus-panel .focus-desc { color: #aab; margin-top: 4px; }
+    #focus-panel .focus-targets { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    #focus-panel .focus-tag {
+      display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px;
+      background: #1a1a2a; border: 1px solid #333;
+    }
+
+    /* Arrangement nav — bottom center */
     #arr-nav {
       position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
       z-index: 5;
@@ -48,28 +124,95 @@
     #arr-nav button:hover:not(:disabled) { color: #ccc; border-color: #555; }
     #arr-nav button:disabled { opacity: 0.3; cursor: default; }
     #arr-nav .arr-label { color: #888; min-width: 56px; text-align: center; }
+
+    /* Pull-layers panel — bottom left */
+    #pull-layers {
+      position: fixed; bottom: 16px; left: 16px; z-index: 5;
+      background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
+      padding: 10px 14px; font-size: 11px;
+      max-height: calc(100vh - 100px); overflow-y: auto;
+      min-width: 180px;
+    }
+    #pull-layers .pull-title {
+      color: #666; font-size: 10px; text-transform: uppercase;
+      letter-spacing: 1px; margin-bottom: 6px;
+    }
+    #pull-layers .layer-row {
+      display: flex; align-items: center; gap: 6px; margin: 4px 0;
+    }
+    #pull-layers .swatch {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      flex-shrink: 0; cursor: pointer;
+    }
+    #pull-layers .layer-name {
+      color: #aaa; font-size: 11px; min-width: 90px;
+      cursor: pointer; user-select: none;
+    }
+    #pull-layers .layer-row.disabled .swatch { opacity: 0.3; }
+    #pull-layers .layer-row.disabled .layer-name {
+      color: #444; text-decoration: line-through;
+    }
+    #pull-layers .pull-slider { width: 50px; height: 3px; accent-color: #666; cursor: pointer; }
+    #pull-layers .pull-val { color: #666; font-size: 10px; min-width: 24px; text-align: right; }
   </style>
 </head>
 <body>
-  <div id="hud-bar">
+  <div id="toolbar">
     <strong>depgraph</strong>
     <div class="sep"></div>
     <div class="stat">nodes: <span data-hud="nodes">0</span></div>
     <div class="stat">edges: <span data-hud="edges">0</span></div>
-    <div class="sep"></div>
     <div class="stat">cursor: <span data-hud="cursor">t0</span></div>
     <div class="stat">arr: <span data-hud="arr">0 / 0</span></div>
-    <div class="hint">hold Z to rewind layout · hold X to relax · drag to move</div>
+    <div class="sep"></div>
+    <label><input type="checkbox" id="show-labels" checked> Labels</label>
+    <label><input type="checkbox" id="show-hulls" checked> Hulls</label>
+    <label><input type="checkbox" id="show-cluster-labels" checked> Clusters</label>
+    <label><input type="checkbox" id="show-boundary-labels" checked> Boundary</label>
+    <label><input type="checkbox" id="show-meta-edges" checked> Meta</label>
+    <div class="sep"></div>
+    <label>Search: <input type="text" id="search" placeholder="node id..." style="width:140px"></label>
+    <div class="sep"></div>
+    <label title="X-key rewind speed (ms)">X
+      <input type="range" id="x-speed" min="200" max="5000" step="100" value="3000" style="width:56px">
+      <span class="val" id="x-speed-val">3.0s</span>
+    </label>
+    <label title="Z-key time-travel speed (ms)">Z
+      <input type="range" id="z-speed" min="200" max="5000" step="100" value="800" style="width:56px">
+      <span class="val" id="z-speed-val">0.8s</span>
+    </label>
+    <label title="T-key trace speed (ms/edge)">T
+      <input type="range" id="t-speed" min="100" max="3000" step="50" value="1000" style="width:56px">
+      <span class="val" id="t-speed-val">1.0s</span>
+    </label>
+    <div class="hint">hold Z · hold X · T = trace · Space = gather · drag</div>
   </div>
 
   <div id="viewport">
     <svg id="graph"></svg>
   </div>
 
+  <div id="info-panel">
+    <span class="close" id="info-close">&times;</span>
+    <h3 id="info-name">Select a node</h3>
+    <div id="info-body"></div>
+  </div>
+
+  <div id="focus-panel">
+    <div class="focus-step"></div>
+    <div class="focus-desc"></div>
+    <div class="focus-targets"></div>
+  </div>
+
   <div id="arr-nav">
     <button data-arr="back" title="Previous arrangement">&larr;</button>
     <span class="arr-label" data-arr="label">—</span>
     <button data-arr="fwd" title="Next arrangement">&rarr;</button>
+  </div>
+
+  <div id="pull-layers">
+    <div class="pull-title">Edge layers</div>
+    <!-- rows injected by main.js -->
   </div>
 
   <script src="https://d3js.org/d3.v7.min.js"></script>

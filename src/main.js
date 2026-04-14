@@ -8,38 +8,38 @@
  */
 
 import { createBus } from './core/bus.js';
-import { createState } from './core/state.js';
 import { createScheduler } from './core/animation.js';
 import { createContext } from './core/context.js';
 import { createHistory, load as loadHistory, append as historyAppend, effectiveRows } from './data/history.js';
-import { writeCSV } from './data/csv.js';
 import { buildFromHistory, applyRowToGraph, rederive } from './data/graph-builder.js';
-import { deriveAll } from './data/derive.js';
 import { initialPlace } from './layout/placement.js';
 import { warmRestart } from './layout/warm-restart.js';
-import { createPositionMap } from './layout/positions.js';
-import { computeRenderPlan } from './render/fractal.js';
 import { initSVG } from './render/svg.js';
-import { renderNodes } from './render/nodes.js';
-import { renderEdges } from './render/edges.js';
-import { renderLabels, renderClusterLabels } from './render/labels.js';
-import { renderHulls } from './render/hulls.js';
-import { renderPositions, createRenderFn } from './render/positions.js';
+import {
+  createLegacyRenderer,
+  renderFull as legacyRenderFull,
+  renderPositionsOnly as legacyRenderPositions,
+  applySemanticZoom as legacyApplySemanticZoom,
+  setShowFlag as legacySetShowFlag,
+  renderSelectionGlow as legacyRenderSelectionGlow,
+  clusterColor,
+} from './render/legacy.js';
 import { generateDemoHistory } from './data/demo-history.js';
+import { EDGE_LAYERS, setLayerVisible, getLayer } from './edges/layers.js';
 import { createSelection, selectNode, toggleSelection, clearSelection } from './interact/select.js';
 import { startDrag, onDrag, endDrag } from './interact/drag.js';
+import { toggleClusterStretchRule, clusterMembers as resolveClusterMembers } from './rules/cluster-rules.js';
+import { descentStep, setStretchBias } from './layout/gradient.js';
 import { createKeyState, keyDown, keyUp } from './interact/keyboard.js';
-import { startTrace, flashTrace, updateTrace, revealedNodes, releaseTrace, holdTrace, changeDirection } from './interact/trace.js';
+import { startTrace, updateTrace, revealedNodes, releaseTrace, holdTrace, changeDirection } from './interact/trace.js';
 import { startGather, startStrangerGather, updateGather, stopGather } from './interact/gather.js';
-import { startAttractor, updateAttractor, stopAttractor } from './interact/attractor.js';
 import { startReset, updateReset, stopReset } from './interact/reset.js';
 import { startTimeTravel, updateTimeTravel, stopTimeTravel, stepOnce, switchBranchByDirection } from './interact/time-travel.js';
 import { createArrangementStack, pushArrangement, startTravel as startArrangementTravel, updateTravel as updateArrangementTravel, stopTravel as stopArrangementTravel } from './interact/arrangements.js';
-import { getLayer } from './edges/layers.js';
-import { loadFromLocal, wirePersistence, isLocalStorageAvailable } from './stream/local-persistence.js';
+import { loadFromLocal, wirePersistence } from './stream/local-persistence.js';
 import { tryConnectSSE } from './stream/sse.js';
 import { toCSV } from './data/history.js';
-import { startCinematic, stopCinematic, isCinematicActive } from './stream/cinematic.js';
+import { startCinematic, stopCinematic } from './stream/cinematic.js';
 
 /**
  * Initialize the depgraph runtime.
@@ -90,14 +90,12 @@ export function init(opts = {}) {
 
   // --- SVG (browser only) ---
   let svgCtx = null;
-  let renderState = null;
+  let legacyState = null;
 
   if (typeof document !== 'undefined') {
     const container = opts.container || document.getElementById('viewport');
-    // Remove existing SVG if present (index.html has a static one)
     const existingSvg = container && container.querySelector('svg');
     if (existingSvg) existingSvg.remove();
-
     if (container) {
       svgCtx = initSVG(container);
     }
@@ -109,33 +107,16 @@ export function init(opts = {}) {
   let dragState = null;
   let traceState = null;
   let gatherState = null;
-  let attractorState = null;
   let resetState = null;
   let timeTravelState = null;
   let arrangementTravelState = null;
   const arrangements = createArrangementStack();
   let currentZoom = 1;
+  let highlightedSearchIds = new Set();
 
-  // --- Render state for the pump ---
-  // Persistent DOM keyed by id so fullRender() can diff rather than
-  // tear down every frame. The Z-key complaint ("removed one at a time",
-  // "lerp back to original locations") was caused by blowing away the
-  // entire layer on every step — now elements persist and only the
-  // genuinely changed ones are added or removed.
+  // --- Legacy render state (port of old_versions/index.html visuals) ---
   if (svgCtx) {
-    renderState = {
-      posMap,
-      svgCtx,
-      nodeElements: new Map(),   // id -> <circle>
-      labelElements: new Map(),  // id -> <text>
-      edgeElements: new Map(),   // id -> <line>
-      // id -> { grad: <linearGradient>, stops: [<stop>*5], color, source, target }
-      // Proximity gradients: solid at endpoints, fading mid when far.
-      gradientElements: new Map(),
-      // Lerp display positions toward posMap each frame during smooth modes.
-      displayPositions: new Map(), // id -> {x, y}
-      smoothMotion: false,
-    };
+    legacyState = createLegacyRenderer(svgCtx);
   }
 
   // --- HUD: populated lazily if the page has #hud-bar / #arr-nav elements ---
@@ -173,176 +154,35 @@ export function init(opts = {}) {
     }
   }
 
-  // --- Full re-render from render plan (diff-based) ---
+  // --- Full re-render: delegate to the legacy renderer ---
+  // Visuals mirror old_versions/index.html (cluster hulls with textPath,
+  // proximity gradient edges, affinity rings, meta-edges) but the data
+  // shapes are the new modular ones (graph.state, posMap, derivation).
   function fullRender() {
-    if (!svgCtx) return;
-
-    const plan = computeRenderPlan({
-      nodes: graph.state.nodes,
-      edges: graph.state.edges,
-      clusters: graph.derivation.clusters,
+    if (!svgCtx || !legacyState) return;
+    legacyRenderFull(legacyState, {
+      graph,
       posMap,
+      derivation: graph.derivation,
       context,
-      zoom: currentZoom,
+      selection,
     });
+    applySearchHighlight();
+  }
 
-    // Hulls & cluster labels: small counts, no stable id — rebuild each time.
-    const gHulls = svgCtx.layers.gHulls;
-    while (gHulls.firstChild) gHulls.removeChild(gHulls.firstChild);
-    for (const h of plan.hulls) {
-      const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-      poly.setAttribute('points', h.hull.map(p => p.join(',')).join(' '));
-      poly.setAttribute('fill', `hsla(${h.depth * 60 + 200}, 50%, 30%, 0.15)`);
-      poly.setAttribute('stroke', `hsla(${h.depth * 60 + 200}, 60%, 50%, 0.4)`);
-      poly.setAttribute('stroke-width', '1.5');
-      gHulls.appendChild(poly);
+  // Recolors search matches + dims everything else. Called by fullRender
+  // and the search input handler.
+  function applySearchHighlight() {
+    if (!legacyState) return;
+    const any = highlightedSearchIds.size > 0;
+    for (const [id, g] of legacyState.nodeElements) {
+      const hit = highlightedSearchIds.has(id);
+      g.setAttribute('opacity', any && !hit ? '0.15' : '1');
     }
-
-    const gClusterLabels = svgCtx.layers.gClusterLabels;
-    while (gClusterLabels.firstChild) gClusterLabels.removeChild(gClusterLabels.firstChild);
-    for (const cl of plan.clusterLabels) {
-      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      text.setAttribute('x', cl.x);
-      text.setAttribute('y', cl.y);
-      text.setAttribute('text-anchor', 'middle');
-      text.setAttribute('font-size', '13');
-      text.setAttribute('fill', '#e8e');
-      text.setAttribute('font-weight', 'bold');
-      text.textContent = cl.label;
-      gClusterLabels.appendChild(text);
+    for (const [id, t] of legacyState.labelElements) {
+      const hit = highlightedSearchIds.has(id);
+      t.setAttribute('opacity', any && !hit ? '0.1' : t.getAttribute('opacity') || '1');
     }
-
-    // --- Diff edges ---
-    const gLinks = svgCtx.layers.gLinks;
-    const defs = svgCtx.defs;
-    const edgeElements = renderState.edgeElements;
-    const gradientElements = renderState.gradientElements;
-    const seenEdges = new Set();
-    for (const edge of plan.edges) {
-      const ps = posMap.positions.get(edge.source);
-      const pt = posMap.positions.get(edge.target);
-      if (!ps || !pt) continue;
-      seenEdges.add(edge.id);
-      const layerDef = getLayer(edge.layer);
-      const color = edge.isMeta ? '#ffee66' : (layerDef ? layerDef.color : '#4a9eff');
-
-      // Proximity gradient: 5 stops, solid at ends, fading mid by distance.
-      let grad = gradientElements.get(edge.id);
-      if (!grad) {
-        const gradEl = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
-        gradEl.setAttribute('id', `edge-grad-${cssId(edge.id)}`);
-        gradEl.setAttribute('gradientUnits', 'userSpaceOnUse');
-        const stops = [];
-        for (const offset of ['0%', '25%', '50%', '75%', '100%']) {
-          const s = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-          s.setAttribute('offset', offset);
-          gradEl.appendChild(s);
-          stops.push(s);
-        }
-        defs.appendChild(gradEl);
-        grad = { grad: gradEl, stops, color, source: edge.source, target: edge.target };
-        gradientElements.set(edge.id, grad);
-      }
-      grad.color = color;
-      grad.source = edge.source;
-      grad.target = edge.target;
-      for (const s of grad.stops) s.setAttribute('stop-color', color);
-      // Endpoints + mid-opacity get updated by the render pump each frame;
-      // still do a first-frame pass here so the initial paint is correct.
-      updateGradientStops(grad, ps.x, ps.y, pt.x, pt.y);
-
-      let line = edgeElements.get(edge.id);
-      if (!line) {
-        line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('data-id', edge.id);
-        gLinks.appendChild(line);
-        edgeElements.set(edge.id, line);
-      }
-      line.setAttribute('data-source', edge.source);
-      line.setAttribute('data-target', edge.target);
-      line.setAttribute('x1', ps.x);
-      line.setAttribute('y1', ps.y);
-      line.setAttribute('x2', pt.x);
-      line.setAttribute('y2', pt.y);
-      line.setAttribute('stroke', `url(#${grad.grad.getAttribute('id')})`);
-      line.setAttribute('stroke-width', edge.isMeta ? '2' : String(Math.max(0.5, Math.min(3, edge.weight))));
-      line.setAttribute('stroke-opacity', edge.isMeta ? '0.75' : '0.85');
-      if (edge.isMeta) line.setAttribute('stroke-dasharray', '6,3');
-      else if (layerDef && layerDef.dash) line.setAttribute('stroke-dasharray', layerDef.dash);
-    }
-    for (const [id, el] of edgeElements) {
-      if (!seenEdges.has(id)) {
-        el.remove();
-        edgeElements.delete(id);
-        const g = gradientElements.get(id);
-        if (g) { g.grad.remove(); gradientElements.delete(id); }
-      }
-    }
-
-    // --- Diff nodes ---
-    const gNodes = svgCtx.layers.gNodes;
-    const nodeElements = renderState.nodeElements;
-    const seenNodes = new Set();
-    for (const node of plan.nodes) {
-      const ps = posMap.positions.get(node.id);
-      if (!ps) continue;
-      seenNodes.add(node.id);
-      const r = node.isCluster ? 8 + node.importance : 4 + (node.importance || 1) * 2;
-      let circle = nodeElements.get(node.id);
-      if (!circle) {
-        circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        circle.setAttribute('data-id', node.id);
-        gNodes.appendChild(circle);
-        nodeElements.set(node.id, circle);
-      }
-      circle.setAttribute('cx', ps.x);
-      circle.setAttribute('cy', ps.y);
-      circle.setAttribute('r', Math.min(r, 20));
-      circle.setAttribute('fill', nodeColor(node.kind));
-      circle.setAttribute('stroke', node.isCluster ? '#c9a' : '#fff');
-      circle.setAttribute('stroke-width', node.isCluster ? '2' : '1');
-      circle.setAttribute('stroke-opacity', '0.7');
-      circle.setAttribute('class', `node node-${node.kind}`);
-    }
-    for (const [id, el] of nodeElements) {
-      if (!seenNodes.has(id)) {
-        el.remove();
-        nodeElements.delete(id);
-        renderState.displayPositions.delete(id);
-      }
-    }
-
-    // --- Diff labels ---
-    const gLabels = svgCtx.layers.gLabels;
-    const labelElements = renderState.labelElements;
-    const seenLabels = new Set();
-    for (const node of plan.nodes) {
-      const ps = posMap.positions.get(node.id);
-      if (!ps) continue;
-      seenLabels.add(node.id);
-      let text = labelElements.get(node.id);
-      if (!text) {
-        text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        text.setAttribute('text-anchor', 'middle');
-        gLabels.appendChild(text);
-        labelElements.set(node.id, text);
-      }
-      text.setAttribute('x', ps.x);
-      text.setAttribute('y', ps.y - 12);
-      text.setAttribute('font-size', node.isCluster ? '11' : '9');
-      text.setAttribute('fill', node.isCluster ? '#c9a' : '#aaa');
-      text.setAttribute('font-weight', node.isCluster ? 'bold' : 'normal');
-      if (text.textContent !== node.label) text.textContent = node.label;
-    }
-    for (const [id, el] of labelElements) {
-      if (!seenLabels.has(id)) {
-        el.remove();
-        labelElements.delete(id);
-      }
-    }
-
-    // Render selection rings (they depend on current selection, not plan)
-    renderSelectionRings();
   }
 
   // --- Selection ring rendering ---
@@ -422,6 +262,10 @@ export function init(opts = {}) {
 
   bus.on('selection-changed', () => {
     renderSelectionRings();
+    if (legacyState) {
+      legacyRenderSelectionGlow(legacyState, selection);
+    }
+    updateInfoPanel();
   });
 
   // --- Convert screen coords to world coords ---
@@ -449,6 +293,45 @@ export function init(opts = {}) {
     return closest;
   }
 
+  // --- Cluster label hit-test: walks DOM from the event target up to the
+  // svg root, returns the clusterId (from data-cluster) if found. This is
+  // cheaper and more reliable than geometric hit-testing against the
+  // rendered <text> bbox, because we piggyback on SVG's own pointer routing.
+  function clusterLabelFromEvent(event) {
+    const t = event && event.target;
+    if (!t || typeof t.closest !== 'function') return null;
+    const el = t.closest('.cluster-label');
+    if (!el) return null;
+    return el.getAttribute('data-cluster');
+  }
+
+  // --- Descent burst: run N frames of gradient descent so stretch changes
+  // (or any weight mutation) propagate visibly. Scoped bursts freeze everything
+  // outside the scope — cluster-local collapse/expand must not pull bridge
+  // nodes around. The global X-reset key is what drives global descent; this
+  // burst is intentionally narrower.
+  let descentBurstFrames = 0;
+  /** @type {Set<string> | null} */
+  let descentBurstScope = null;
+  function kickDescentBurst(frames = 60, scope = null) {
+    descentBurstFrames = Math.max(descentBurstFrames, frames);
+    descentBurstScope = scope;
+    if (scheduler.tickNames.includes('descent-burst')) return;
+    scheduler.register('descent-burst', () => {
+      if (descentBurstFrames <= 0) {
+        scheduler.unregister('descent-burst');
+        descentBurstScope = null;
+        return;
+      }
+      const zoomEta = 0.25 / Math.max(0.5, Math.min(2, currentZoom));
+      descentStep(posMap, graph.state.edges, context.weights.physics, {
+        eta: zoomEta,
+        scope: descentBurstScope || undefined,
+      });
+      descentBurstFrames--;
+    });
+  }
+
   // --- Wire DOM events (6.5b) ---
   if (svgCtx) {
     const svg = svgCtx.svg;
@@ -457,15 +340,24 @@ export function init(opts = {}) {
     let mouseDownTarget = null;
     let mouseDownPos = null;
     let isDragging = false;
+    // Active cluster-label drag, if any. Distinct from dragState (node drag)
+    // because it moves all members as a rigid group with no history rows per
+    // node — one summary row is written on release.
+    /** @type {null | { clusterId: string, startWx: number, startWy: number, offsets: Map<string,{dx:number,dy:number}>, moved: boolean }} */
+    let clusterDragState = null;
 
     // Track zoom changes for fractal LOD
     if (typeof d3 !== 'undefined' && d3.zoom) {
       const zoom = d3.zoom()
         .scaleExtent([0.1, 12])
         // Skip zoom/pan when the gesture starts on a node or cluster label —
-        // those clicks belong to selection / drag, not to panning.
+        // those clicks belong to selection / drag / cluster toggle, not pan.
+        // Wheel events always pass through, even over a label, so scrolling
+        // still zooms the canvas regardless of cursor position.
         .filter((event) => {
+          if (event.type === 'wheel') return true;
           if (event.type === 'mousedown' && event.button !== 0) return false;
+          if (clusterLabelFromEvent(event)) return false;
           const rect = svg.getBoundingClientRect();
           const sx = event.clientX - rect.left;
           const sy = event.clientY - rect.top;
@@ -478,7 +370,16 @@ export function init(opts = {}) {
           svgCtx.transform = { x: t.x, y: t.y, k: t.k };
           const prevZoom = currentZoom;
           currentZoom = t.k;
-          if (Math.abs(currentZoom - prevZoom) / prevZoom > 0.1) {
+          // Zoom-coupled stretch bias: log2(k) scaled down so moderate zoom
+          // nudges layout distances without runaway expansion. Zoomed in →
+          // positive bias (things spread); zoomed out → negative (things pack).
+          setStretchBias(Math.log2(currentZoom) * 0.25);
+          if (legacyState) {
+            legacyApplySemanticZoom(legacyState, {
+              graph, posMap, derivation: graph.derivation, context, selection,
+            }, currentZoom);
+          }
+          if (Math.abs(currentZoom - prevZoom) / prevZoom > 0.25) {
             fullRender();
           }
         });
@@ -493,6 +394,34 @@ export function init(opts = {}) {
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
       const world = screenToWorld(sx, sy);
+
+      // Cluster label takes priority over node hit-test — labels are
+      // rendered above nodes and the user explicitly grabbed the text.
+      const clusterId = clusterLabelFromEvent(e);
+      if (clusterId) {
+        const members = legacyState && legacyState.clusterMembers.get(clusterId);
+        const offsets = new Map();
+        if (members) {
+          for (const mid of members) {
+            const mp = posMap.positions.get(mid);
+            if (mp && !mp.locked) {
+              offsets.set(mid, { dx: mp.x - world.x, dy: mp.y - world.y });
+            }
+          }
+        }
+        clusterDragState = {
+          clusterId,
+          startWx: world.x,
+          startWy: world.y,
+          offsets,
+          moved: false,
+        };
+        mouseDownTarget = clusterId;
+        mouseDownPos = { sx, sy, wx: world.x, wy: world.y };
+        isDragging = false;
+        return;
+      }
+
       const nodeId = hitTest(world.x, world.y);
 
       mouseDownTarget = nodeId;
@@ -520,6 +449,15 @@ export function init(opts = {}) {
 
       if (dragState && isDragging) {
         onDrag(dragState, world.x, world.y, posMap);
+      } else if (clusterDragState && isDragging) {
+        clusterDragState.moved = true;
+        for (const [id, off] of clusterDragState.offsets) {
+          const p = posMap.positions.get(id);
+          if (p && !p.locked) {
+            p.x = world.x + off.dx;
+            p.y = world.y + off.dy;
+          }
+        }
       }
     });
 
@@ -534,7 +472,25 @@ export function init(opts = {}) {
           pushArrangement(arrangements, 'drag', posMap);
           updateHud();
         }
-      } else if (mouseDownTarget && !isDragging) {
+      } else if (clusterDragState && isDragging) {
+        // Persist the new positions of each moved member as history rows so
+        // time-travel and rebuild can restore them. One row per member.
+        if (clusterDragState.moved) {
+          for (const [id] of clusterDragState.offsets) {
+            const p = posMap.positions.get(id);
+            if (p) {
+              appendRow({
+                type: 'NODE',
+                op: 'update',
+                id,
+                payload: { x: p.x, y: p.y, author: 'user', action: 'cluster-drag', cluster: clusterDragState.clusterId },
+              });
+            }
+          }
+          pushArrangement(arrangements, 'cluster-drag', posMap);
+          updateHud();
+        }
+      } else if (mouseDownTarget && !isDragging && !clusterDragState) {
         if (e.shiftKey) {
           selection = toggleSelection(selection, mouseDownTarget);
         } else {
@@ -550,7 +506,33 @@ export function init(opts = {}) {
       mouseDownTarget = null;
       isDragging = false;
       dragState = null;
+      clusterDragState = null;
     });
+
+    // Double-click: on a cluster label → cycle stretch (collapse/default/expand)
+    // and fire a descent burst so the physics animates the transition.
+    svg.addEventListener('dblclick', (e) => {
+      const clusterId = clusterLabelFromEvent(e);
+      if (!clusterId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Resolve members BEFORE applying the rule so the scope is captured
+      // from the pre-mutation derivation — safer against any rederive side
+      // effects that might touch cluster membership.
+      const memberScope = resolveClusterMembers(clusterId, graph);
+      const { rows } = toggleClusterStretchRule(clusterId, graph);
+      for (const row of rows) appendRow(row);
+      if (rows.length > 0) {
+        // If X is held the global descent is already running; the cluster
+        // edges just got a heavier stretch so they'll dominate naturally.
+        // In the normal case, we fire a scoped burst so outside nodes stay
+        // put while members coalesce/spread.
+        const scope = resetState ? null : memberScope;
+        kickDescentBurst(90, scope);
+        pushArrangement(arrangements, 'cluster-toggle', posMap);
+        updateHud();
+      }
+    }, true);
 
     // Keyboard events
     document.addEventListener('keydown', (e) => {
@@ -622,7 +604,7 @@ export function init(opts = {}) {
 
         case 'reset-start':
           resetState = startReset(action.ctrl);
-          if (renderState) renderState.smoothMotion = true;
+          if (legacyState) legacyState.smoothMotion = true;
           scheduler.register('reset', (dt) => {
             if (resetState) updateReset(resetState, dt, posMap, graph.state.edges, context.weights.physics);
           });
@@ -633,7 +615,7 @@ export function init(opts = {}) {
             stopReset(resetState, posMap);
             scheduler.unregister('reset');
             resetState = null;
-            if (renderState) renderState.smoothMotion = false;
+            if (legacyState) legacyState.smoothMotion = false;
             pushArrangement(arrangements, 'x-relax', posMap);
             updateHud();
             fullRender();
@@ -643,7 +625,7 @@ export function init(opts = {}) {
         case 'arrangement-back-start':
           arrangementTravelState = startArrangementTravel(arrangements, posMap, 'back', 600);
           if (arrangementTravelState) {
-            if (renderState) renderState.smoothMotion = true;
+            if (legacyState) legacyState.smoothMotion = true;
             updateHud();
             scheduler.register('arrangement-travel', (dt) => {
               if (!arrangementTravelState) return;
@@ -659,7 +641,7 @@ export function init(opts = {}) {
             stopArrangementTravel(arrangementTravelState, arrangements, posMap);
             scheduler.unregister('arrangement-travel');
             arrangementTravelState = null;
-            if (renderState) renderState.smoothMotion = false;
+            if (legacyState) legacyState.smoothMotion = false;
             updateHud();
             fullRender();
           }
@@ -667,7 +649,7 @@ export function init(opts = {}) {
 
         case 'time-travel-start':
           timeTravelState = startTimeTravel(action.shift);
-          if (renderState) renderState.smoothMotion = true;
+          if (legacyState) legacyState.smoothMotion = true;
           scheduler.register('time-travel', (dt) => {
             if (!timeTravelState) return;
             const prevCursor = history.cursor;
@@ -684,7 +666,7 @@ export function init(opts = {}) {
             stopTimeTravel(timeTravelState);
             scheduler.unregister('time-travel');
             timeTravelState = null;
-            if (renderState) renderState.smoothMotion = false;
+            if (legacyState) legacyState.smoothMotion = false;
           }
           break;
 
@@ -734,7 +716,7 @@ export function init(opts = {}) {
             stopReset(resetState, posMap);
             scheduler.unregister('reset');
             resetState = null;
-            if (renderState) renderState.smoothMotion = false;
+            if (legacyState) legacyState.smoothMotion = false;
             pushArrangement(arrangements, 'x-relax', posMap);
             updateHud();
             fullRender();
@@ -746,7 +728,7 @@ export function init(opts = {}) {
             stopArrangementTravel(arrangementTravelState, arrangements, posMap);
             scheduler.unregister('arrangement-travel');
             arrangementTravelState = null;
-            if (renderState) renderState.smoothMotion = false;
+            if (legacyState) legacyState.smoothMotion = false;
             updateHud();
             fullRender();
           }
@@ -839,11 +821,173 @@ export function init(opts = {}) {
   }
 
   // --- Set up render pump ---
-  if (renderState) {
+  if (legacyState) {
     scheduler.setRender(() => {
-      renderPositions(renderState);
+      legacyRenderPositions(legacyState, { posMap });
+      renderSelectionRings();
     });
   }
+
+  // --- Info panel: populated on selection-changed ---
+  function updateInfoPanel() {
+    if (typeof document === 'undefined') return;
+    const panel = document.getElementById('info-panel');
+    if (!panel) return;
+    const nameEl = document.getElementById('info-name');
+    const bodyEl = document.getElementById('info-body');
+    const primary = selection.primary;
+    if (!primary) {
+      panel.classList.remove('open');
+      if (nameEl) nameEl.textContent = 'Select a node';
+      if (bodyEl) bodyEl.innerHTML = '';
+      return;
+    }
+    const node = graph.state.nodes.get(primary);
+    if (!node) { panel.classList.remove('open'); return; }
+    panel.classList.add('open');
+    if (nameEl) nameEl.textContent = node.label || node.id;
+
+    const parts = [];
+    parts.push(`<div class="section"><div class="section-title">Kind</div><span class="tag">${escapeHtml(node.kind || 'unknown')}</span></div>`);
+
+    const affs = graph.derivation && graph.derivation.affinities && graph.derivation.affinities.get(primary);
+    if (affs && affs.size) {
+      const sorted = [...affs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+      let rows = '';
+      for (const [gid, w] of sorted) {
+        const pct = Math.round(w * 100);
+        const col = clusterColor(gid);
+        rows += `<div class="affinity-row"><div class="affinity-bar" style="width:${Math.max(4, pct)}px;background:${col}"></div><span style="color:#aaa">${escapeHtml(String(gid)).slice(0, 28)}</span><span style="color:#555;margin-left:auto">${pct}%</span></div>`;
+      }
+      parts.push(`<div class="section"><div class="section-title">Affinities</div>${rows}</div>`);
+    }
+
+    const outgoing = [];
+    const incoming = [];
+    for (const edge of graph.state.edges.values()) {
+      if (edge.source === primary) outgoing.push(edge);
+      else if (edge.target === primary) incoming.push(edge);
+    }
+    if (outgoing.length) {
+      const list = outgoing.slice(0, 12).map(e => `<span class="tag">→ ${escapeHtml(e.target)} <span style="color:#555">[${escapeHtml(e.layer)}]</span></span>`).join('');
+      parts.push(`<div class="section"><div class="section-title">Outgoing (${outgoing.length})</div>${list}</div>`);
+    }
+    if (incoming.length) {
+      const list = incoming.slice(0, 12).map(e => `<span class="tag">${escapeHtml(e.source)} → <span style="color:#555">[${escapeHtml(e.layer)}]</span></span>`).join('');
+      parts.push(`<div class="section"><div class="section-title">Incoming (${incoming.length})</div>${list}</div>`);
+    }
+
+    if (bodyEl) bodyEl.innerHTML = parts.join('');
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // --- Chrome wiring: toolbar checkboxes, search, speed sliders, layer panel ---
+  function setupChrome() {
+    if (typeof document === 'undefined') return;
+
+    const flagMap = [
+      ['show-labels', 'labels'],
+      ['show-hulls', 'hulls'],
+      ['show-cluster-labels', 'clusterLabels'],
+      ['show-boundary-labels', 'boundaryLabels'],
+      ['show-meta-edges', 'metaEdges'],
+    ];
+    for (const [id, flag] of flagMap) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.addEventListener('change', () => {
+        if (legacyState) legacySetShowFlag(legacyState, flag, el.checked);
+        fullRender();
+      });
+    }
+
+    const search = document.getElementById('search');
+    if (search) {
+      search.addEventListener('input', () => {
+        const q = search.value.trim().toLowerCase();
+        highlightedSearchIds = new Set();
+        if (q) {
+          for (const [id, node] of graph.state.nodes) {
+            const label = (node.label || '').toLowerCase();
+            if (id.toLowerCase().includes(q) || label.includes(q)) {
+              highlightedSearchIds.add(id);
+            }
+          }
+        }
+        applySearchHighlight();
+      });
+    }
+
+    const speedSliders = [
+      ['x-speed', 'x-speed-val'],
+      ['z-speed', 'z-speed-val'],
+      ['t-speed', 't-speed-val'],
+    ];
+    for (const [sId, vId] of speedSliders) {
+      const slider = document.getElementById(sId);
+      const valEl = document.getElementById(vId);
+      if (!slider || !valEl) continue;
+      const update = () => {
+        const ms = parseInt(slider.value, 10);
+        valEl.textContent = (ms / 1000).toFixed(1) + 's';
+      };
+      slider.addEventListener('input', update);
+      update();
+    }
+
+    // Populate bottom-left layer panel.
+    const pullPanel = document.getElementById('pull-layers');
+    if (pullPanel) {
+      let html = '<div class="pull-title">Edge layers</div>';
+      for (const [id, layer] of EDGE_LAYERS) {
+        const op = (context.weights.opacity && context.weights.opacity[id] != null)
+          ? context.weights.opacity[id] : 1.0;
+        html += `<div class="layer-row${layer.visible ? '' : ' disabled'}" data-layer="${escapeHtml(id)}">
+          <span class="swatch" style="background:${layer.color}"></span>
+          <span class="layer-name">${escapeHtml(id)}</span>
+          <input type="range" class="pull-slider" min="0" max="100" value="${Math.round(op * 100)}">
+          <span class="pull-val">${Math.round(op * 100)}</span>
+        </div>`;
+      }
+      pullPanel.innerHTML = html;
+      pullPanel.querySelectorAll('.layer-row').forEach(row => {
+        const id = row.getAttribute('data-layer');
+        const swatch = row.querySelector('.swatch');
+        const name = row.querySelector('.layer-name');
+        const slider = row.querySelector('.pull-slider');
+        const valEl = row.querySelector('.pull-val');
+        const toggle = () => {
+          const layer = getLayer(id);
+          if (!layer) return;
+          setLayerVisible(id, !layer.visible);
+          row.classList.toggle('disabled', !layer.visible);
+          fullRender();
+        };
+        swatch.addEventListener('click', toggle);
+        name.addEventListener('click', toggle);
+        slider.addEventListener('input', () => {
+          const v = parseInt(slider.value, 10);
+          valEl.textContent = String(v);
+          if (!context.weights.opacity) context.weights.opacity = {};
+          context.weights.opacity[id] = v / 100;
+          fullRender();
+        });
+      });
+    }
+
+    const infoClose = document.getElementById('info-close');
+    if (infoClose) {
+      infoClose.addEventListener('click', () => {
+        selection = clearSelection();
+        bus.emit('selection-changed', { selected: selection.selected, primary: selection.primary });
+      });
+    }
+  }
+
+  setupChrome();
 
   // Wire arrangement nav buttons (if present in the DOM).
   if (typeof document !== 'undefined') {
@@ -960,49 +1104,6 @@ export function init(opts = {}) {
   };
 
   return runtime;
-}
-
-// Proximity-based edge mid-stop opacity: solid when close, fades when far.
-// Lifted from old_versions/index.html:3304 — the old "solid near ends, faded
-// middle" look that made dense graphs legible.
-export function edgeMidOpacity(dist) {
-  const CLOSE = 60, FAR = 250;
-  if (dist <= CLOSE) return 1.0;
-  if (dist >= FAR) return 0.08;
-  const t = (dist - CLOSE) / (FAR - CLOSE);
-  return 1.0 - t * 0.92;
-}
-
-// Update gradient endpoints + mid-stop opacity in place.
-export function updateGradientStops(grad, sx, sy, tx, ty) {
-  grad.grad.setAttribute('x1', sx);
-  grad.grad.setAttribute('y1', sy);
-  grad.grad.setAttribute('x2', tx);
-  grad.grad.setAttribute('y2', ty);
-  const dx = tx - sx, dy = ty - sy;
-  const midOp = edgeMidOpacity(Math.sqrt(dx * dx + dy * dy));
-  grad.stops[0].setAttribute('stop-opacity', '1');
-  grad.stops[1].setAttribute('stop-opacity', String(midOp));
-  grad.stops[2].setAttribute('stop-opacity', String(midOp * 0.7));
-  grad.stops[3].setAttribute('stop-opacity', String(midOp));
-  grad.stops[4].setAttribute('stop-opacity', '1');
-}
-
-// Sanitize edge ids for use inside a CSS/SVG url(#...) reference.
-function cssId(id) {
-  return String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
-}
-
-function nodeColor(kind) {
-  const colors = {
-    function: '#4a90d9',
-    global: '#e74c3c',
-    module: '#2ecc71',
-    cluster: '#9b59b6',
-    parameter: '#f39c12',
-    value: '#1abc9c',
-  };
-  return colors[kind] || '#95a5a6';
 }
 
 // Auto-init when loaded in the browser

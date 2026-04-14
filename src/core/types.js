@@ -25,6 +25,9 @@
  * @property {number} weight
  * @property {boolean} directed
  * @property {string} [label]
+ * @property {number} [stretch] - free scalar in ℝ, default 0. Target edge length
+ *   is BASE_DIST * exp(stretch). Positive stretches the spring (expand);
+ *   negative contracts it (collapse). Engine accepts any value; UI caps for sanity.
  */
 
 // ─── History ───
