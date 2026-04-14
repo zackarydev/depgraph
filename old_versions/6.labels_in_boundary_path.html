@@ -1,0 +1,3553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Equinox — Dependency Graph</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #ccc; font-family: 'SF Mono', 'Fira Code', monospace; overflow: hidden; }
+
+#toolbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+  background: #111118; border-bottom: 1px solid #2a2a35;
+  padding: 8px 16px; display: flex; align-items: center; gap: 16px;
+  font-size: 12px;
+}
+#toolbar select, #toolbar input { background: #1a1a25; color: #ccc; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 12px; }
+#toolbar label { color: #888; cursor: pointer; user-select: none; }
+#toolbar .sep { width: 1px; height: 20px; background: #333; }
+#status { color: #555; margin-left: auto; }
+#status.live { color: #4a4; }
+
+#info-panel {
+  position: fixed; top: 44px; right: 0; width: 320px; bottom: 0; z-index: 5;
+  background: #111118ee; border-left: 1px solid #2a2a35;
+  padding: 16px; overflow-y: auto; font-size: 12px;
+  transform: translateX(100%); transition: transform 0.2s;
+}
+#info-panel.open { transform: translateX(0); }
+#info-panel h3 { color: #e8e8f0; margin-bottom: 8px; font-size: 14px; }
+#info-panel .section { margin-bottom: 12px; }
+#info-panel .section-title { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+#info-panel .tag { display: inline-block; background: #222; border-radius: 3px; padding: 2px 6px; margin: 2px; font-size: 11px; }
+#info-panel .tag.read { border-left: 2px solid #6af; }
+#info-panel .tag.write { border-left: 2px solid #f66; }
+#info-panel .tag.call { border-left: 2px solid #af6; }
+#info-panel .tag.rw { border-left: 2px solid #fa6; }
+
+#legend {
+  position: fixed; bottom: 16px; left: 16px; z-index: 5;
+  background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
+  padding: 12px; font-size: 11px;
+}
+#legend .item { display: flex; align-items: center; gap: 8px; margin: 4px 0; cursor: pointer; }
+#legend .item:hover { color: #fff; }
+#legend .dot { width: 10px; height: 10px; border-radius: 50%; }
+
+#stats {
+  position: fixed; bottom: 16px; right: 16px; z-index: 5;
+  background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
+  padding: 12px; font-size: 11px; text-align: right;
+}
+
+#focus-panel {
+  position: fixed; top: 50px; left: 50%; transform: translateX(-50%); z-index: 15;
+  background: #111118ee; border: 1px solid #3a3a50; border-radius: 8px;
+  padding: 10px 18px; font-size: 12px; max-width: 600px;
+  opacity: 0; transition: opacity 0.4s; pointer-events: none;
+}
+#focus-panel.active { opacity: 1; pointer-events: auto; }
+#focus-panel .focus-desc { color: #aab; margin-bottom: 6px; }
+#focus-panel .focus-step { color: #7af; font-weight: 600; }
+#focus-panel .focus-targets { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+#focus-panel .focus-tag {
+  display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px;
+  background: #1a1a2a; border: 1px solid #333;
+}
+#focus-panel .focus-tag.high { border-color: #7af; color: #7af; }
+#focus-panel .focus-tag.med { border-color: #5a8; color: #5a8; }
+#focus-panel .focus-tag.low { border-color: #555; color: #888; }
+
+#arr-nav {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 5;
+  background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
+  padding: 6px 14px; font-size: 11px; display: flex; align-items: center; gap: 10px;
+  opacity: 0; transition: opacity 0.3s; pointer-events: none;
+}
+#arr-nav.visible { opacity: 1; pointer-events: auto; }
+#arr-nav button {
+  background: #1a1a25; color: #888; border: 1px solid #333; border-radius: 4px;
+  padding: 3px 10px; font-family: inherit; font-size: 11px; cursor: pointer;
+}
+#arr-nav button:hover { color: #ccc; border-color: #555; }
+#arr-nav button:disabled { opacity: 0.3; cursor: default; }
+#arr-nav .arr-label { color: #666; }
+
+#lock-btn {
+  background: #1a1a25; color: #888; border: 1px solid #333; border-radius: 4px;
+  padding: 2px 8px; font-family: inherit; font-size: 11px; cursor: pointer;
+}
+#lock-btn:hover { color: #ccc; border-color: #555; }
+#lock-btn.active { color: #ff0; border-color: #ff0; }
+
+#comparison-badge {
+  position: fixed; top: 50px; right: 16px; z-index: 15;
+  background: #2a1a3a; border: 1px solid #7a4af0; border-radius: 6px;
+  padding: 6px 14px; font-size: 11px; color: #b088f0;
+  opacity: 0; transition: opacity 0.3s; pointer-events: none;
+}
+#comparison-badge.visible { opacity: 1; pointer-events: auto; }
+
+svg { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
+.link { transition: none; }
+.node circle { cursor: pointer; stroke-width: 1.5; }
+.node text { fill: #999; font-size: 10px; pointer-events: none; user-select: none; }
+.label { pointer-events: none; user-select: none; }
+.node.highlighted circle { stroke-width: 3; }
+.hull { fill-opacity: 0.04; stroke-opacity: 0.15; stroke-width: 1.5; }
+.cluster-label { font-size: 11px; font-weight: 600; fill-opacity: 0.6; text-anchor: middle; dominant-baseline: central; cursor: grab; }
+.cluster-label:active { cursor: grabbing; }
+.hull-label { font-weight: 600; letter-spacing: 2px; cursor: grab; }
+.hull-label:active { cursor: grabbing; }
+.node circle.focus-glow { filter: drop-shadow(0 0 6px currentColor); }
+.node circle.attractor-glow { filter: drop-shadow(0 0 8px #fff) drop-shadow(0 0 20px currentColor); stroke-width: 3; }
+.node circle.selected-glow { filter: drop-shadow(0 0 6px #ff0) drop-shadow(0 0 12px #ff0); stroke: #ff0 !important; stroke-width: 2.5; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <strong style="color:#e8e8f0">depgraph</strong>
+  <div class="sep"></div>
+  <label>View:
+    <select id="view-mode">
+      <option value="systems">Systems (clustered)</option>
+      <option value="functions">All functions</option>
+      <option value="hypergraph" selected>Hypergraph (funcs + globals)</option>
+    </select>
+  </label>
+  <div class="sep"></div>
+  <label>Edge:
+    <select id="edge-mode">
+      <option value="shared-state">Shared state</option>
+      <option value="calls">Function calls</option>
+      <option value="both">Both</option>
+    </select>
+  </label>
+  <div class="sep"></div>
+  <label><input type="checkbox" id="show-labels" checked> Labels</label>
+  <label><input type="checkbox" id="show-hulls" checked> Clusters</label>
+  <label><input type="checkbox" id="show-edges"> Edges</label>
+  <button id="lock-btn" title="Lock selected nodes (Space to unlock)">Lock</button>
+  <span id="lock-indicator" style="display:none; color:#ff0; font-size:11px">Locked</span>
+  <label><input type="checkbox" id="live-reload" checked> Live</label>
+  <label><input type="range" id="min-shared" min="1" max="15" value="3" style="width:80px"> Min shared: <span id="min-shared-val">3</span></label>
+  <div class="sep"></div>
+  <label>Search: <input type="text" id="search" placeholder="function name..." style="width:140px"></label>
+  <span id="status">waiting...</span>
+</div>
+
+<div id="info-panel">
+  <h3 id="info-name">Select a function</h3>
+  <div id="info-body"></div>
+</div>
+
+<div id="focus-panel">
+  <div class="focus-step"></div>
+  <div class="focus-desc"></div>
+  <div class="focus-targets"></div>
+</div>
+
+<div id="arr-nav">
+  <button id="arr-reset" title="Reset to initial layout">Reset</button>
+  <button id="arr-first" disabled>T0</button>
+  <button id="arr-back" disabled>&larr;</button>
+  <span class="arr-label" id="arr-label">1 / 1</span>
+  <button id="arr-fwd" disabled>&rarr;</button>
+  <button id="arr-last" disabled>Last</button>
+</div>
+
+<div id="comparison-badge">COMPARISON MODE — click or navigate to exit</div>
+
+<div id="legend"></div>
+<div id="stats"></div>
+
+<svg id="graph"></svg>
+
+<script src="https://cdn.jsdelivr.net/npm/acorn@8.14.1/dist/acorn.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/acorn-walk@8.3.4/dist/walk.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script>
+// ═══════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════
+const _base = location.pathname.substring(0, location.pathname.lastIndexOf('/'));
+const SRC = _base + '/../../../Equinox/prototype/index.html';
+const CODEMAP_SRC = '/runtime/project_codemap.md';
+const REFRESH_MS = 3000;
+const CLUSTER_GAP = 40;
+const LAYOUT_ITERS = 180;
+const CLUSTER_PACK_ITERS = 120;
+const ARRANGEMENT_CAP = 50;
+const SPATIAL_DECAY_MS = 7 * 24 * 3600 * 1000; // 1 week half-life
+
+// ═══════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════
+let lastHash = null;
+let codemapSections = null;
+let codemapImportance = new Map();
+let analysisResult = null;
+let savedPositions = new Map();
+let stickyNodes = new Set();
+let lockedNodes = new Set(); // explicitly locked nodes (pinned in place)
+let selectedNode = null;
+let currentK = 0.8;
+let currentGraph = null;
+let currentClusterNames = new Map();
+let currentNodes = null;
+let initialLayoutPositions = new Map(); // immutable T0 positions from layout
+let currentLinks = null;
+let currentHullClusterIds = null;
+
+// Attractor
+let attractorNode = null;
+let attractorStartTime = 0;
+let attractorRAF = null;
+let attractorHoldStrength = 0;
+let lastAttractorDuration = 0;
+let forcePressDragNode = null; // node being dragged when force press activates
+let hasForceTouch = false; // webkit force events detected (Safari)
+let hasPressure = false; // pointer events pressure detected (Chrome)
+let pressureActive = false; // currently above pressure threshold
+const PRESSURE_THRESHOLD = 0.75; // above default 0.5 that mice report
+let shiftAttractorTimer = null; // fallback shift-hold delay for non-Force Touch/pressure
+
+// Animation
+let animationRAF = null;
+
+// Multi-select
+let selectedNodes = new Set();
+
+// Click-pull animation
+let clickPullRAF = null;
+
+// X-key spread forces
+let xKeyHeld = false;
+let xKeyDown = false; // tracks physical X key state
+let xKeyRAF = null;
+let xDismissRAFs = new Map(); // per-node dismiss animations
+
+// Z-key time travel (backwards through arrangement history)
+let zKeyHeld = false;
+let zKeyDown = false;
+let zKeyRAF = null;
+let zTravelStartIndex = -1; // arrangement index when Z was pressed
+
+// Group move (shift+drag) — disables all gather while active
+let groupMoveActive = false;
+
+// Space-pull (pull selected nodes together)
+let spacePullRAF = null;
+let spacePullHeld = false;
+
+// Neighbor-gather (pull neighbors toward a clicked node)
+let neighborGatherRAF = null;
+let neighborGatherHeld = false;
+
+// User-defined clusters (parsed from codemap <!-- user-cluster --> sections)
+let userClusterSections = []; // [{name, nodeIds: [...]}] — derived from codemap
+
+// Cluster label placement caches
+let clusterMemberCache = new Map(); // cid -> Node[]
+let clusterLabelPlacement = new Map(); // cid -> { dx, dy, angle }
+let labelPlacementTimer = null;
+
+async function createUserCluster(nodeIds) {
+  const existingClusters = currentClusterNames ? [...currentClusterNames.values()] : [];
+
+  const nodeDetails = {};
+  for (const id of nodeIds) {
+    const node = currentGraph?.nodeMap?.get(id);
+    if (node && node.info) {
+      nodeDetails[id] = {
+        system: node.clusterName || 'unknown',
+        reads: [...(node.info.reads || [])].join(', ') || 'none',
+        writes: [...(node.info.writes || [])].join(', ') || 'none',
+        calls: [...(node.info.calls || [])].join(', ') || 'none',
+      };
+    }
+  }
+
+  // Ask server — it writes placeholder to codemap immediately, names via Claude in background
+  try {
+    const resp = await fetch('/cluster', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeIds, existingClusters, nodeDetails }),
+    });
+    const data = await resp.json();
+    if (data.name) {
+      console.log(`[cluster] placeholder created: ${data.name}`);
+      // Force reload to show the new section immediately
+      lastHash = null;
+      await loadAndAnalyze(true);
+    }
+  } catch (e) {
+    console.warn('[user-cluster] creation failed:', e);
+  }
+}
+
+async function deleteUserCluster(sectionName) {
+  try {
+    const resp = await fetch('/cluster', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sectionName }),
+    });
+    const data = await resp.json();
+    if (data.deleted) {
+      console.log(`[cluster] deleted: ${sectionName}`);
+      lastHash = null;
+      loadAndAnalyze(true);
+    }
+  } catch (e) {
+    console.warn('[user-cluster] deletion failed:', e);
+  }
+}
+
+// SVG layers
+let svg, gLinks, gNodes, gHulls, gLabels, gClusterLabels, svgDefs;
+let width, height;
+
+// ═══════════════════════════════════════════════════════
+// SPATIAL MEMORY
+// ═══════════════════════════════════════════════════════
+const SPATIAL_KEY = 'equinox-depgraph-spatial';
+
+let spatialMemory = {
+  arrangements: [],
+  spatialEdges: {},
+  clickLog: [],
+};
+let arrangementIndex = -1;
+let comparisonMode = false;
+let comparisonA = null, comparisonB = null;
+let navTimestamps = []; // for oscillation detection
+
+function loadSpatialMemory() {
+  try {
+    const raw = localStorage.getItem(SPATIAL_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      spatialMemory = data;
+      // Decay old spatial edges
+      const now = Date.now();
+      for (const key in spatialMemory.spatialEdges) {
+        const edge = spatialMemory.spatialEdges[key];
+        const age = now - new Date(edge.lastSeen).getTime();
+        const decay = Math.pow(0.5, age / SPATIAL_DECAY_MS);
+        edge.weight *= decay;
+        if (edge.weight < 0.05) delete spatialMemory.spatialEdges[key];
+      }
+      // Trim click log
+      if (spatialMemory.clickLog.length > 500) {
+        spatialMemory.clickLog = spatialMemory.clickLog.slice(-500);
+      }
+      // Trim arrangements
+      if (spatialMemory.arrangements.length > ARRANGEMENT_CAP) {
+        spatialMemory.arrangements = spatialMemory.arrangements.slice(-ARRANGEMENT_CAP);
+      }
+      arrangementIndex = spatialMemory.arrangements.length - 1;
+    }
+  } catch (e) {
+    console.warn('[spatial] Failed to load:', e);
+  }
+}
+
+function saveSpatialMemory() {
+  try {
+    localStorage.setItem(SPATIAL_KEY, JSON.stringify(spatialMemory));
+  } catch (e) {
+    console.warn('[spatial] Failed to save:', e);
+  }
+}
+
+function pushArrangement(trigger, focalNodes) {
+  if (!currentNodes) return;
+  const positions = {};
+  for (const n of currentNodes) {
+    if (n.x != null && n.y != null) positions[n.id] = [Math.round(n.x), Math.round(n.y)];
+  }
+  const focal = focalNodes || (selectedNode ? [selectedNode.id] : []);
+  const label = generateArrangementLabel(focal, trigger);
+  const arr = {
+    id: Math.random().toString(36).slice(2, 8),
+    timestamp: new Date().toISOString(),
+    positions,
+    focal,
+    label,
+    trigger,
+  };
+  // If we navigated back and then make a new arrangement, truncate forward history
+  if (arrangementIndex < spatialMemory.arrangements.length - 1) {
+    spatialMemory.arrangements = spatialMemory.arrangements.slice(0, arrangementIndex + 1);
+  }
+  spatialMemory.arrangements.push(arr);
+  if (spatialMemory.arrangements.length > ARRANGEMENT_CAP) {
+    spatialMemory.arrangements.shift();
+  }
+  arrangementIndex = spatialMemory.arrangements.length - 1;
+  updateArrNav();
+  saveSpatialMemory();
+}
+
+function generateArrangementLabel(focal, trigger) {
+  if (focal.length > 0) {
+    const names = focal.slice(0, 3).join(', ');
+    return `${trigger}: ${names}`;
+  }
+  return trigger || 'layout';
+}
+
+function navigateArrangement(delta) {
+  const newIdx = arrangementIndex + delta;
+  if (newIdx < 0 || newIdx >= spatialMemory.arrangements.length) return;
+
+  // Oscillation detection for comparison mode
+  const now = Date.now();
+  navTimestamps.push({ time: now, idx: newIdx });
+  if (navTimestamps.length > 4) navTimestamps.shift();
+
+  if (!comparisonMode && navTimestamps.length >= 3) {
+    const recent = navTimestamps.slice(-3);
+    const span = recent[2].time - recent[0].time;
+    if (span < 3000 && recent[0].idx === recent[2].idx && recent[0].idx !== recent[1].idx) {
+      enterComparisonMode(recent[0].idx, recent[1].idx);
+      return;
+    }
+  }
+
+  if (comparisonMode) {
+    exitComparisonMode();
+  }
+
+  arrangementIndex = newIdx;
+  const arr = spatialMemory.arrangements[arrangementIndex];
+  const targetPositions = new Map();
+  for (const [id, pos] of Object.entries(arr.positions)) {
+    targetPositions.set(id, { x: pos[0], y: pos[1] });
+  }
+  animateToPositions(targetPositions, 300);
+  updateArrNav();
+}
+
+function enterComparisonMode(idxA, idxB) {
+  comparisonMode = true;
+  comparisonA = spatialMemory.arrangements[idxA];
+  comparisonB = spatialMemory.arrangements[idxB];
+  document.getElementById('comparison-badge').classList.add('visible');
+
+  const merged = computeComparisonPositions(comparisonA, comparisonB);
+  animateToPositions(merged, 400);
+}
+
+function exitComparisonMode() {
+  comparisonMode = false;
+  comparisonA = null;
+  comparisonB = null;
+  document.getElementById('comparison-badge').classList.remove('visible');
+}
+
+function computeComparisonPositions(arrA, arrB) {
+  const result = new Map();
+  const allIds = new Set([...Object.keys(arrA.positions), ...Object.keys(arrB.positions)]);
+  for (const id of allIds) {
+    const a = arrA.positions[id];
+    const b = arrB.positions[id];
+    if (a && b) {
+      const mx = (a[0] + b[0]) / 2;
+      const my = (a[1] + b[1]) / 2;
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 5) {
+        result.set(id, { x: mx, y: my });
+      } else {
+        result.set(id, { x: mx + dx * 0.75, y: my + dy * 0.75 });
+      }
+    } else if (a) {
+      result.set(id, { x: a[0], y: a[1] });
+    } else if (b) {
+      result.set(id, { x: b[0], y: b[1] });
+    }
+  }
+  return result;
+}
+
+function trackClickCoOccurrence(nodeId) {
+  const now = Date.now();
+  spatialMemory.clickLog.push({ node: nodeId, t: now });
+
+  // Check co-occurrence: previous click within 30s
+  const log = spatialMemory.clickLog;
+  if (log.length >= 2) {
+    const prev = log[log.length - 2];
+    if (now - prev.t < 30000 && prev.node !== nodeId) {
+      const key = [prev.node, nodeId].sort().join('\0');
+      const edge = spatialMemory.spatialEdges[key] || { weight: 0, lastSeen: '' };
+      edge.weight = Math.min(1.0, edge.weight + 0.1);
+      edge.lastSeen = new Date().toISOString();
+      spatialMemory.spatialEdges[key] = edge;
+    }
+  }
+  saveSpatialMemory();
+}
+
+function trackDragProximity(draggedId) {
+  if (!currentNodes) return;
+  const dragged = currentNodes.find(n => n.id === draggedId);
+  if (!dragged) return;
+  for (const n of currentNodes) {
+    if (n.id === draggedId) continue;
+    const dx = n.x - dragged.x, dy = n.y - dragged.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 60) {
+      const key = [draggedId, n.id].sort().join('\0');
+      const edge = spatialMemory.spatialEdges[key] || { weight: 0, lastSeen: '' };
+      edge.weight = Math.min(1.0, edge.weight + 0.15);
+      edge.lastSeen = new Date().toISOString();
+      spatialMemory.spatialEdges[key] = edge;
+    }
+  }
+  saveSpatialMemory();
+}
+
+function updateArrNav() {
+  const nav = document.getElementById('arr-nav');
+  const total = spatialMemory.arrangements.length;
+  if (total <= 1) { nav.classList.remove('visible'); return; }
+  nav.classList.add('visible');
+  document.getElementById('arr-first').disabled = arrangementIndex <= 0;
+  document.getElementById('arr-back').disabled = arrangementIndex <= 0;
+  document.getElementById('arr-fwd').disabled = arrangementIndex >= total - 1;
+  document.getElementById('arr-last').disabled = arrangementIndex >= total - 1;
+  document.getElementById('arr-label').textContent = `${arrangementIndex + 1} / ${total}`;
+}
+
+function navigateToArrangement(targetIdx) {
+  if (targetIdx < 0 || targetIdx >= spatialMemory.arrangements.length) return;
+  if (targetIdx === arrangementIndex) return;
+  if (comparisonMode) exitComparisonMode();
+  arrangementIndex = targetIdx;
+  const arr = spatialMemory.arrangements[arrangementIndex];
+  const targetPositions = new Map();
+  for (const [id, pos] of Object.entries(arr.positions)) {
+    targetPositions.set(id, { x: pos[0], y: pos[1] });
+  }
+  animateToPositions(targetPositions, 300);
+  updateArrNav();
+}
+
+// ═══════════════════════════════════════════════════════
+// UTILITY
+// ═══════════════════════════════════════════════════════
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+// ═══════════════════════════════════════════════════════
+// CODEMAP PARSING
+// ═══════════════════════════════════════════════════════
+function parseCodemap(md) {
+  const sections = new Map();
+  codemapImportance = new Map();
+  userClusterSections = [];
+  let currentSection = null;
+  let isUserCluster = false;
+  const lines = md.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const secMatch = line.match(/^## (.+)/);
+    if (secMatch) {
+      currentSection = secMatch[1].trim();
+      if (currentSection === 'Controls' || currentSection === 'Constants') { currentSection = null; continue; }
+      // Check if next line marks this as a user cluster
+      isUserCluster = (lines[i + 1] || '').trim() === '<!-- user-cluster -->';
+      if (isUserCluster) {
+        userClusterSections.push({ name: currentSection, nodeIds: [] });
+        i++; // skip the marker line
+      } else {
+        if (!sections.has(currentSection)) sections.set(currentSection, []);
+      }
+      continue;
+    }
+    if (!currentSection) continue;
+    const funcMatch = line.match(/^- `(\w+)`/);
+    if (funcMatch) {
+      const name = funcMatch[1];
+      if (isUserCluster) {
+        userClusterSections[userClusterSections.length - 1].nodeIds.push(name);
+      } else if (sections.has(currentSection)) {
+        sections.get(currentSection).push(name);
+      }
+      const impMatch = line.match(/importance:(\d+)/);
+      if (impMatch) codemapImportance.set(name, parseInt(impMatch[1]));
+    }
+  }
+  return sections;
+}
+
+// ═══════════════════════════════════════════════════════
+// AST ANALYSIS
+// ═══════════════════════════════════════════════════════
+function extractJS(html) {
+  const match = html.match(/<script\s+type="module">([\s\S]*)<\/script>/);
+  if (!match) return { code: '', lineOffset: 0 };
+  const tagStart = html.indexOf('<script type="module">');
+  const lineOffset = html.substring(0, tagStart).split('\n').length;
+  const code = match[1]
+    .replace(/^\s*import\s+.*$/gm, '/* import */')
+    .replace(/^\s*export\s+.*$/gm, '/* export */');
+  return { code, lineOffset };
+}
+
+function analyzeCode(code, lineOffset) {
+  let ast;
+  try {
+    ast = acorn.parse(code, {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      locations: true,
+      allowImportExportEverywhere: true,
+    });
+  } catch (e) {
+    console.error('Parse error:', e.message);
+    return null;
+  }
+
+  const globals = new Map();
+  const functions = new Map();
+
+  // Pass 1: collect top-level declarations
+  for (const node of ast.body) {
+    if (node.type === 'VariableDeclaration') {
+      for (const decl of node.declarations) {
+        collectDeclNames(decl.id).forEach(name => {
+          globals.set(name, { kind: node.kind, line: node.loc.start.line + lineOffset });
+        });
+      }
+    }
+    if (node.type === 'FunctionDeclaration' && node.id) {
+      globals.set(node.id.name, { kind: 'function', line: node.loc.start.line + lineOffset });
+    }
+  }
+
+  // Pass 2: analyze each function
+  for (const node of ast.body) {
+    if (node.type === 'FunctionDeclaration' && node.id) {
+      const info = analyzeFunction(node, globals);
+      info.line = node.loc.start.line + lineOffset;
+      info.endLine = node.loc.end.line + lineOffset;
+      info.lines = info.endLine - info.line + 1;
+      functions.set(node.id.name, info);
+    }
+  }
+
+  return { globals, functions };
+}
+
+function collectDeclNames(pattern) {
+  const names = [];
+  if (pattern.type === 'Identifier') names.push(pattern.name);
+  else if (pattern.type === 'ObjectPattern') {
+    pattern.properties.forEach(p => names.push(...collectDeclNames(p.value || p.key)));
+  } else if (pattern.type === 'ArrayPattern') {
+    pattern.elements.forEach(e => e && names.push(...collectDeclNames(e)));
+  }
+  return names;
+}
+
+function analyzeFunction(funcNode, globals) {
+  const params = new Set();
+  funcNode.params.forEach(p => collectDeclNames(p).forEach(n => params.add(n)));
+  const locals = new Set(params);
+  const reads = new Set();
+  const writes = new Set();
+  const calls = new Set();
+
+  acorn.walk.simple(funcNode.body, {
+    VariableDeclaration(node) {
+      for (const decl of node.declarations) {
+        collectDeclNames(decl.id).forEach(n => locals.add(n));
+      }
+    },
+    FunctionDeclaration(node) { if (node.id) locals.add(node.id.name); },
+  });
+
+  acorn.walk.ancestor(funcNode.body, {
+    Identifier(node, ancestors) {
+      const name = node.name;
+      if (locals.has(name) || !globals.has(name)) return;
+      const parent = ancestors[ancestors.length - 2];
+      if (parent && parent.type === 'AssignmentExpression' && parent.left === node) {
+        writes.add(name);
+      } else if (parent && parent.type === 'UpdateExpression') {
+        writes.add(name);
+      } else {
+        reads.add(name);
+      }
+    },
+    CallExpression(node) {
+      if (node.callee.type === 'Identifier' && globals.has(node.callee.name)) {
+        calls.add(node.callee.name);
+      } else if (node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier') {
+        const name = node.callee.object.name;
+        if (!locals.has(name) && globals.has(name)) reads.add(name);
+      }
+    },
+    MemberExpression(node, ancestors) {
+      if (node.object.type === 'Identifier') {
+        const name = node.object.name;
+        if (locals.has(name) || !globals.has(name)) return;
+        const parent = ancestors[ancestors.length - 2];
+        if (parent && parent.type === 'AssignmentExpression' && parent.left === node) {
+          writes.add(name);
+        } else {
+          reads.add(name);
+        }
+      }
+    },
+  });
+
+  const rw = new Set();
+  for (const n of reads) { if (writes.has(n)) rw.add(n); }
+  for (const n of rw) { reads.delete(n); writes.delete(n); }
+
+  return { params, locals, reads, writes, rw, calls, line: 0, endLine: 0, lines: 0 };
+}
+
+// ═══════════════════════════════════════════════════════
+// CLUSTERING & AFFINITIES
+// ═══════════════════════════════════════════════════════
+const CLUSTER_COLORS = [
+  '#4a9eff', '#ff6b6b', '#51cf66', '#ffd43b', '#cc5de8',
+  '#ff922b', '#22b8cf', '#ff6b9d', '#a9e34b', '#748ffc',
+  '#f06595', '#20c997', '#fd7e14', '#845ef7', '#12b886',
+  '#e64980', '#7950f2', '#15aabf', '#fab005', '#82c91e',
+];
+
+const SYSTEM_KEYWORDS = new Map([
+  ['terrain', 'Math / Noise / Terrain'], ['height', 'Math / Noise / Terrain'],
+  ['noise', 'Math / Noise / Terrain'], ['fbm', 'Math / Noise / Terrain'],
+  ['simplex', 'Math / Noise / Terrain'], ['ridged', 'Math / Noise / Terrain'],
+  ['tree', 'World Generation'], ['rock', 'World Generation'],
+  ['building', 'World Generation'], ['settlement', 'World Generation'],
+  ['wall', 'World Generation'], ['kingdom', 'World Generation'],
+  ['deferred', 'Rendering / Lighting'], ['light', 'Rendering / Lighting'],
+  ['moon', 'Rendering / Lighting'], ['shadow', 'Rendering / Lighting'],
+  ['lighting', 'Rendering / Lighting'], ['sun', 'Rendering / Lighting'],
+  ['camera', 'Camera & HUD'], ['hud', 'Camera & HUD'], ['project', 'Camera & HUD'],
+  ['trample', 'Path / Trampling'], ['path', 'Path / Trampling'], ['trail', 'Path / Trampling'],
+  ['wind', 'Wind & Smoke'], ['smoke', 'Wind & Smoke'], ['chimney', 'Wind & Smoke'],
+  ['player', 'Player'],
+  ['npc', 'NPCs'], ['villager', 'NPCs'], ['corn', 'NPCs'], ['farm', 'NPCs'],
+  ['sq', 'Squirrels'], ['squirrel', 'Squirrels'], ['acorn', 'Squirrels'], ['canopy', 'Squirrels'],
+  ['ghost', 'Night / Combat'], ['wraith', 'Night / Combat'], ['night', 'Night / Combat'],
+  ['ashen', 'Night / Combat'], ['combat', 'Night / Combat'], ['nm', 'Night / Combat'],
+  ['contam', 'Contamination'], ['vine', 'Contamination'], ['cleanse', 'Contamination'],
+  ['turret', 'Turrets'], ['zap', 'Turrets'],
+  ['touch', 'Controls / Touch'], ['joystick', 'Controls / Touch'],
+  ['animate', 'Main Loop'], ['clock', 'Main Loop'], ['dt', 'Main Loop'],
+]);
+
+const AFFINITY_STOPWORDS = new Set([
+  'get', 'set', 'update', 'draw', 'create', 'is', 'has', 'find',
+  'init', 'spawn', 'apply', 'handle', 'resolve', 'remove', 'rebuild',
+  'pick', 'move', 'check', 'clear', 'start', 'stop', 'push', 'pop',
+  'nearest', 'current', 'effective', 'smooth', 'exact', 'idx', 'key',
+]);
+
+function tokenizeName(name) {
+  return name
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .split(/[_\d]+/)
+    .map(t => t.toLowerCase())
+    .filter(t => t.length > 1 && !AFFINITY_STOPWORDS.has(t));
+}
+
+function clusterFunctions(analysis) {
+  const { functions } = analysis;
+  const result = new Map();
+
+  if (codemapSections && codemapSections.size > 0) {
+    let clusterId = 0;
+    for (const [, funcs] of codemapSections) {
+      for (const fname of funcs) {
+        if (functions.has(fname)) result.set(fname, clusterId);
+      }
+      clusterId++;
+    }
+    for (const fname of functions.keys()) {
+      if (!result.has(fname)) result.set(fname, clusterId);
+    }
+    return result;
+  }
+
+  // Fallback: shared-state affinity clustering
+  const names = [...functions.keys()];
+  const n = names.length;
+  if (n === 0) return result;
+  function stateSet(info) {
+    const s = new Set();
+    info.reads.forEach(v => s.add(v));
+    info.writes.forEach(v => s.add(v));
+    info.rw.forEach(v => s.add(v));
+    return s;
+  }
+  const states = names.map(name => stateSet(functions.get(name)));
+  const cluster = new Array(n);
+  for (let i = 0; i < n; i++) cluster[i] = i;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      let shared = 0;
+      for (const v of states[i]) { if (states[j].has(v)) shared++; }
+      const fi = functions.get(names[i]), fj = functions.get(names[j]);
+      if (fi.calls.has(names[j])) shared += 2;
+      if (fj.calls.has(names[i])) shared += 2;
+      if (shared >= 3) {
+        const ci = cluster[i], cj = cluster[j];
+        if (ci !== cj) { for (let k = 0; k < n; k++) { if (cluster[k] === cj) cluster[k] = ci; } }
+      }
+    }
+  }
+  const clusterMap = new Map();
+  let nextId = 0;
+  for (let i = 0; i < n; i++) {
+    if (!clusterMap.has(cluster[i])) clusterMap.set(cluster[i], nextId++);
+    result.set(names[i], clusterMap.get(cluster[i]));
+  }
+  return result;
+}
+
+function nameClusters(analysis, clusters) {
+  const clusterNames = new Map();
+  if (codemapSections && codemapSections.size > 0) {
+    let clusterId = 0;
+    for (const [section] of codemapSections) {
+      clusterNames.set(clusterId, section);
+      clusterId++;
+    }
+    const maxId = Math.max(...clusters.values());
+    if (!clusterNames.has(maxId)) clusterNames.set(maxId, 'Other');
+    return clusterNames;
+  }
+  const systemHints = [
+    [/npc|villager|corn|farm/i, 'NPCs'],
+    [/squirrel|plant|acorn/i, 'Squirrels'],
+    [/wraith|ghost|night|combat|ashen|contam/i, 'Night/Combat'],
+    [/terrain|height|noise|fbm/i, 'Terrain'],
+    [/tree|rock|building|settlement|wall/i, 'World Gen'],
+    [/camera|hud|project|axis/i, 'Camera/HUD'],
+    [/wind|smoke|chimney/i, 'Wind/Smoke'],
+    [/light|moon|sun|shadow|deferred/i, 'Lighting'],
+    [/path|tramp|trail/i, 'Paths'],
+    [/turret|zap|stone/i, 'Turrets'],
+    [/player/i, 'Player'],
+    [/animate|clock|dt/i, 'Main Loop'],
+  ];
+  for (const [cid] of new Set(clusters.values())) {
+    const members = [...clusters.entries()].filter(([, c]) => c === cid).map(([f]) => f);
+    const allText = members.join(' ');
+    let name = null;
+    for (const [re, label] of systemHints) {
+      if (re.test(allText)) { name = label; break; }
+    }
+    clusterNames.set(cid, name || `system_${cid}`);
+  }
+  return clusterNames;
+}
+
+function computeAffinities(analysis, clusters, clusterNames) {
+  const { functions } = analysis;
+  const sectionToId = new Map();
+  for (const [cid, name] of clusterNames) sectionToId.set(name, cid);
+
+  const calledBy = new Map();
+  for (const [fname, info] of functions) {
+    for (const callee of info.calls) {
+      if (!calledBy.has(callee)) calledBy.set(callee, new Set());
+      calledBy.get(callee).add(fname);
+    }
+  }
+
+  function tokenToCluster(token) {
+    const section = SYSTEM_KEYWORDS.get(token);
+    if (!section) return null;
+    return sectionToId.get(section) ?? null;
+  }
+
+  const allAffinities = new Map();
+  for (const [fname, info] of functions) {
+    const scores = new Map();
+    const addScore = (cid, w) => scores.set(cid, (scores.get(cid) || 0) + w);
+
+    const primary = clusters.get(fname);
+    if (primary != null) addScore(primary, 5.0);
+    for (const token of tokenizeName(fname)) {
+      const cid = tokenToCluster(token);
+      if (cid != null) addScore(cid, 1.5);
+    }
+    for (const globals of [info.reads, info.writes, info.rw]) {
+      for (const g of globals) {
+        for (const token of tokenizeName(g)) {
+          const cid = tokenToCluster(token);
+          if (cid != null) addScore(cid, 0.5);
+        }
+      }
+    }
+    for (const callee of info.calls) {
+      const cid = clusters.get(callee);
+      if (cid != null) addScore(cid, 0.3);
+    }
+    const callers = calledBy.get(fname);
+    if (callers) {
+      for (const caller of callers) {
+        const cid = clusters.get(caller);
+        if (cid != null) addScore(cid, 0.2);
+      }
+    }
+
+    const total = [...scores.values()].reduce((a, b) => a + b, 0);
+    if (total > 0) {
+      const normalized = new Map();
+      for (const [cid, w] of scores) {
+        const nw = w / total;
+        if (nw >= 0.05) normalized.set(cid, nw);
+      }
+      allAffinities.set(fname, normalized);
+    }
+  }
+  return allAffinities;
+}
+
+// ═══════════════════════════════════════════════════════
+// GRAPH BUILDING
+// ═══════════════════════════════════════════════════════
+function buildGraph(analysis, clusters, clusterNames, affinities, opts) {
+  const { functions } = analysis;
+  const nodes = [];
+  const links = [];
+  const nodeMap = new Map();
+  const { viewMode, edgeMode, minShared } = opts;
+  const sectionToId = new Map();
+  for (const [cid, name] of clusterNames) sectionToId.set(name, cid);
+
+  // Function nodes
+  for (const [name, info] of functions) {
+    const clusterId = clusters.get(name) ?? 0;
+    const nodeAffinities = affinities.get(name) || new Map([[clusterId, 1.0]]);
+    nodes.push({
+      id: name,
+      type: 'function',
+      cluster: clusterId,
+      clusterName: clusterNames.get(clusterId) || 'misc',
+      affinities: nodeAffinities,
+      info,
+      radius: Math.max(4, (codemapImportance.get(name) || 3) * 2),
+      color: CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length],
+    });
+    nodeMap.set(name, nodes[nodes.length - 1]);
+  }
+
+  if (viewMode === 'hypergraph') {
+    // Add global variable nodes
+    const globalUsage = new Map();
+    for (const [fname, info] of functions) {
+      for (const s of [info.reads, info.writes, info.rw]) {
+        for (const g of s) {
+          if (!globalUsage.has(g)) globalUsage.set(g, new Set());
+          globalUsage.get(g).add(fname);
+        }
+      }
+    }
+    for (const [gname, users] of globalUsage) {
+      if (users.size < 2 || nodeMap.has(gname)) continue;
+      const gScores = new Map();
+      const addGScore = (cid, w) => gScores.set(cid, (gScores.get(cid) || 0) + w);
+      for (const token of tokenizeName(gname)) {
+        const section = SYSTEM_KEYWORDS.get(token);
+        if (section) {
+          const cid = sectionToId.get(section);
+          if (cid != null) addGScore(cid, 2.0);
+        }
+      }
+      for (const fname of users) {
+        addGScore(clusters.get(fname) ?? 0, 1.0);
+      }
+      const gTotal = [...gScores.values()].reduce((a, b) => a + b, 0);
+      const gAffinities = new Map();
+      let bestCluster = 0, bestWeight = 0;
+      if (gTotal > 0) {
+        for (const [cid, w] of gScores) {
+          const nw = w / gTotal;
+          if (nw >= 0.05) gAffinities.set(cid, nw);
+          if (nw > bestWeight) { bestCluster = cid; bestWeight = nw; }
+        }
+      }
+      const node = {
+        id: gname, type: 'global', cluster: bestCluster,
+        clusterName: clusterNames.get(bestCluster) || 'misc',
+        affinities: gAffinities,
+        radius: Math.max(3, Math.sqrt(users.size) * 2),
+        color: '#555',
+      };
+      nodes.push(node);
+      nodeMap.set(gname, node);
+      for (const fname of users) {
+        links.push({ source: fname, target: gname, type: 'uses', weight: 1 });
+      }
+    }
+  } else {
+    // Function-to-function edges
+    const names = [...functions.keys()];
+    for (let i = 0; i < names.length; i++) {
+      for (let j = i + 1; j < names.length; j++) {
+        const a = functions.get(names[i]);
+        const b = functions.get(names[j]);
+        let sharedWeight = 0, callWeight = 0;
+
+        const aState = new Set([...a.reads, ...a.writes, ...a.rw]);
+        const bState = new Set([...b.reads, ...b.writes, ...b.rw]);
+        for (const v of aState) { if (bState.has(v)) sharedWeight++; }
+        if (a.calls.has(names[j])) callWeight += 3;
+        if (b.calls.has(names[i])) callWeight += 3;
+
+        let weight = 0, type = 'shared';
+        if (edgeMode === 'shared-state') { weight = sharedWeight; type = 'shared'; }
+        else if (edgeMode === 'calls') {
+          if (callWeight === 0) continue;
+          weight = callWeight; type = 'call';
+        } else { weight = sharedWeight + callWeight; type = callWeight > 0 ? 'call' : 'shared'; }
+
+        const threshold = edgeMode === 'calls' ? 1 : minShared;
+        if (weight >= threshold) {
+          links.push({ source: names[i], target: names[j], type, weight });
+        }
+      }
+    }
+  }
+
+  // Build adjacency
+  const adjacency = new Map();
+  const nodeDegree = new Map();
+  for (const n of nodes) { adjacency.set(n.id, new Set()); nodeDegree.set(n.id, 0); }
+  const edgeWeights = new Map();
+  for (const l of links) {
+    adjacency.get(l.source)?.add(l.target);
+    adjacency.get(l.target)?.add(l.source);
+    nodeDegree.set(l.source, (nodeDegree.get(l.source) || 0) + 1);
+    nodeDegree.set(l.target, (nodeDegree.get(l.target) || 0) + 1);
+    edgeWeights.set(l.source + '\0' + l.target, l.weight || 1);
+    edgeWeights.set(l.target + '\0' + l.source, l.weight || 1);
+  }
+
+  return { nodes, links, nodeMap, adjacency, nodeDegree, edgeWeights };
+}
+
+// ═══════════════════════════════════════════════════════
+// LAYOUT ENGINE
+// ═══════════════════════════════════════════════════════
+function computeLayout(nodes, links, opts = {}) {
+  const { isWarmRestart, spatialEdgesMap } = opts;
+
+  if (isWarmRestart) {
+    warmRestart(nodes, links);
+    return;
+  }
+
+  // Group nodes by cluster
+  const clusterGroups = new Map();
+  for (const n of nodes) {
+    const cid = n.cluster ?? -1;
+    if (!clusterGroups.has(cid)) clusterGroups.set(cid, []);
+    clusterGroups.get(cid).push(n);
+  }
+
+  const nodeMap = new Map(nodes.map(n => [n.id, n]));
+
+  // Phase 1: Intra-cluster layout
+  for (const [cid, members] of clusterGroups) {
+    layoutClusterInternal(members, links, nodeMap);
+  }
+
+  // Phase 2: Compute cluster bounding circles
+  const clusterBounds = new Map();
+  for (const [cid, members] of clusterGroups) {
+    let maxR = 0;
+    for (const n of members) {
+      const d = Math.sqrt(n.x * n.x + n.y * n.y) + (n.radius || 4);
+      if (d > maxR) maxR = d;
+    }
+    clusterBounds.set(cid, { radius: maxR + 25, cx: 0, cy: 0 });
+  }
+
+  // Phase 3: Pack clusters
+  packClusters(clusterBounds, links, nodeMap, clusterGroups);
+
+  // Phase 4: Apply cluster offsets to all nodes
+  for (const [cid, bounds] of clusterBounds) {
+    const members = clusterGroups.get(cid);
+    if (!members) continue;
+    for (const n of members) {
+      n.x += bounds.cx;
+      n.y += bounds.cy;
+    }
+  }
+
+  // Phase 5: Apply spatial affinity nudges
+  if (spatialEdgesMap) {
+    for (let iter = 0; iter < 10; iter++) {
+      for (const [key, edge] of Object.entries(spatialEdgesMap)) {
+        const [idA, idB] = key.split('\0');
+        const a = nodeMap.get(idA), b = nodeMap.get(idB);
+        if (!a || !b) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const pull = edge.weight * 0.5;
+        if (dist > 50) {
+          a.x += (dx / dist) * pull;
+          a.y += (dy / dist) * pull;
+          b.x -= (dx / dist) * pull;
+          b.y -= (dy / dist) * pull;
+        }
+      }
+    }
+  }
+
+  // Zero velocities
+  for (const n of nodes) { n.vx = 0; n.vy = 0; }
+}
+
+function layoutClusterInternal(members, allLinks, nodeMap) {
+  if (members.length === 0) return;
+  if (members.length === 1) { members[0].x = 0; members[0].y = 0; return; }
+  if (members.length === 2) {
+    members[0].x = -20; members[0].y = 0;
+    members[1].x = 20; members[1].y = 0;
+    return;
+  }
+
+  // Extract intra-cluster links
+  const memberSet = new Set(members.map(n => n.id));
+  const intraLinks = allLinks.filter(l => memberSet.has(l.source) && memberSet.has(l.target));
+
+  // Sort by importance (large nodes first, near center)
+  const sorted = [...members].sort((a, b) => (b.radius || 4) - (a.radius || 4));
+
+  // Initialize in a circle
+  const spacing = Math.max(25, Math.sqrt(members.length) * 15);
+  for (let i = 0; i < sorted.length; i++) {
+    const angle = (2 * Math.PI * i) / sorted.length;
+    const r = spacing * (0.2 + 0.8 * (i / sorted.length));
+    sorted[i].x = Math.cos(angle) * r;
+    sorted[i].y = Math.sin(angle) * r;
+    sorted[i].vx = 0;
+    sorted[i].vy = 0;
+  }
+
+  const localMap = new Map(members.map(n => [n.id, n]));
+
+  // Mini force simulation
+  for (let iter = 0; iter < LAYOUT_ITERS; iter++) {
+    const alpha = 1 - iter / LAYOUT_ITERS;
+    const a2 = alpha * alpha;
+
+    // Node-node repulsion
+    for (let i = 0; i < members.length; i++) {
+      for (let j = i + 1; j < members.length; j++) {
+        const a = members[i], b = members[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = (a.radius || 4) + (b.radius || 4) + 10;
+        if (dist < minDist * 2.5) {
+          const force = -a2 * 3 / (dist * dist + 1);
+          a.vx += dx * force;
+          a.vy += dy * force;
+          b.vx -= dx * force;
+          b.vy -= dy * force;
+        }
+      }
+    }
+
+    // Link attraction
+    for (const link of intraLinks) {
+      const s = localMap.get(link.source);
+      const t = localMap.get(link.target);
+      if (!s || !t) continue;
+      const dx = t.x - s.x, dy = t.y - s.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const targetDist = (s.radius || 4) + (t.radius || 4) + 15;
+      const force = (dist - targetDist) * a2 * 0.04 * Math.min(3, (link.weight || 1));
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      s.vx += fx; s.vy += fy;
+      t.vx -= fx; t.vy -= fy;
+    }
+
+    // Center gravity (importance-weighted: important nodes pulled more toward center)
+    for (const n of members) {
+      const imp = (n.radius || 4) / 20;
+      n.vx -= n.x * a2 * 0.02 * (1 + imp);
+      n.vy -= n.y * a2 * 0.02 * (1 + imp);
+    }
+
+    // Update positions
+    for (const n of members) {
+      n.x += n.vx;
+      n.y += n.vy;
+      n.vx *= 0.5;
+      n.vy *= 0.5;
+    }
+
+    // Hard collision resolution
+    for (let i = 0; i < members.length; i++) {
+      for (let j = i + 1; j < members.length; j++) {
+        const a = members[i], b = members[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = (a.radius || 4) + (b.radius || 4) + 6;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.5;
+          const nx = (dx / dist) * push;
+          const ny = (dy / dist) * push;
+          a.x -= nx; a.y -= ny;
+          b.x += nx; b.y += ny;
+        }
+      }
+    }
+  }
+
+  // Center the cluster at origin
+  let cx = 0, cy = 0;
+  for (const n of members) { cx += n.x; cy += n.y; }
+  cx /= members.length; cy /= members.length;
+  for (const n of members) { n.x -= cx; n.y -= cy; }
+}
+
+function packClusters(clusterBounds, links, nodeMap, clusterGroups) {
+  const clusters = [...clusterBounds.entries()].map(([cid, info]) => ({
+    cid, radius: info.radius, x: 0, y: 0,
+  }));
+
+  if (clusters.length <= 1) {
+    if (clusters.length === 1) clusterBounds.get(clusters[0].cid).cx = 0;
+    return;
+  }
+
+  // Sort by size descending
+  clusters.sort((a, b) => b.radius - a.radius);
+
+  // Compute inter-cluster link weights (which clusters should be near each other)
+  const clusterLinkWeights = new Map();
+  for (const l of links) {
+    const sNode = nodeMap.get(l.source);
+    const tNode = nodeMap.get(l.target);
+    if (!sNode || !tNode || sNode.cluster === tNode.cluster) continue;
+    const key = [sNode.cluster, tNode.cluster].sort().join(',');
+    clusterLinkWeights.set(key, (clusterLinkWeights.get(key) || 0) + (l.weight || 1));
+  }
+
+  // Golden angle spiral initial placement
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < clusters.length; i++) {
+    const angle = i * goldenAngle;
+    const r = clusters[0].radius + clusters[i].radius + i * 25;
+    clusters[i].x = Math.cos(angle) * r;
+    clusters[i].y = Math.sin(angle) * r;
+  }
+
+  // Iterative: overlap resolution + inter-cluster link attraction + center pull
+  for (let iter = 0; iter < CLUSTER_PACK_ITERS; iter++) {
+    const alpha = 1 - iter / CLUSTER_PACK_ITERS;
+
+    // Overlap resolution (hard constraint)
+    for (let i = 0; i < clusters.length; i++) {
+      for (let j = i + 1; j < clusters.length; j++) {
+        const a = clusters[i], b = clusters[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = a.radius + b.radius + CLUSTER_GAP;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.5;
+          const nx = (dx / dist) * push;
+          const ny = (dy / dist) * push;
+          a.x -= nx; a.y -= ny;
+          b.x += nx; b.y += ny;
+        }
+      }
+    }
+
+    // Inter-cluster link attraction
+    for (const [key, weight] of clusterLinkWeights) {
+      const [cidA, cidB] = key.split(',').map(Number);
+      const ca = clusters.find(c => c.cid === cidA);
+      const cb = clusters.find(c => c.cid === cidB);
+      if (!ca || !cb) continue;
+      const dx = cb.x - ca.x, dy = cb.y - ca.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const targetDist = ca.radius + cb.radius + CLUSTER_GAP + 10;
+      if (dist > targetDist) {
+        const pull = Math.min(weight * 0.02, 3) * alpha;
+        ca.x += (dx / dist) * pull;
+        ca.y += (dy / dist) * pull;
+        cb.x -= (dx / dist) * pull;
+        cb.y -= (dy / dist) * pull;
+      }
+    }
+
+    // Center attraction
+    for (const c of clusters) {
+      c.x *= 0.997;
+      c.y *= 0.997;
+    }
+  }
+
+  // Store results
+  for (const c of clusters) {
+    const b = clusterBounds.get(c.cid);
+    b.cx = c.x;
+    b.cy = c.y;
+  }
+}
+
+function warmRestart(nodes, links) {
+  const newNodes = [];
+  for (const n of nodes) {
+    if (savedPositions.has(n.id)) {
+      const p = savedPositions.get(n.id);
+      n.x = p.x;
+      n.y = p.y;
+    } else {
+      newNodes.push(n);
+    }
+  }
+
+  if (newNodes.length === 0) return;
+
+  // Place new nodes near their cluster center
+  for (const n of newNodes) {
+    const siblings = nodes.filter(m => m.cluster === n.cluster && m !== n && m.x != null);
+    if (siblings.length > 0) {
+      let cx = 0, cy = 0;
+      for (const m of siblings) { cx += m.x; cy += m.y; }
+      cx /= siblings.length; cy /= siblings.length;
+      n.x = cx + (Math.random() - 0.5) * 50;
+      n.y = cy + (Math.random() - 0.5) * 50;
+    } else {
+      n.x = (Math.random() - 0.5) * 300;
+      n.y = (Math.random() - 0.5) * 300;
+    }
+  }
+
+  // Brief collision resolution
+  for (let iter = 0; iter < 20; iter++) {
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        if (a.x == null || b.x == null) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = (a.radius || 4) + (b.radius || 4) + 6;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.4;
+          const nx = (dx / dist) * push;
+          const ny = (dy / dist) * push;
+          // Only move new nodes
+          if (newNodes.includes(a) && newNodes.includes(b)) {
+            a.x -= nx; a.y -= ny;
+            b.x += nx; b.y += ny;
+          } else if (newNodes.includes(a)) {
+            a.x -= nx * 2; a.y -= ny * 2;
+          } else if (newNodes.includes(b)) {
+            b.x += nx * 2; b.y += ny * 2;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// ANIMATION
+// ═══════════════════════════════════════════════════════
+function animateToPositions(targetPositions, duration = 300) {
+  if (animationRAF) cancelAnimationFrame(animationRAF);
+  if (!currentNodes) return;
+
+  const startPositions = new Map();
+  for (const n of currentNodes) {
+    startPositions.set(n.id, { x: n.x, y: n.y });
+  }
+
+  const startTime = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - startTime) / duration);
+    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // ease-in-out
+
+    for (const n of currentNodes) {
+      const from = startPositions.get(n.id);
+      const to = targetPositions.get(n.id);
+      if (from && to) {
+        n.x = from.x + (to.x - from.x) * ease;
+        n.y = from.y + (to.y - from.y) * ease;
+      }
+    }
+    renderPositions();
+    if (t < 1) {
+      animationRAF = requestAnimationFrame(step);
+    } else {
+      animationRAF = null;
+      // Save final positions
+      for (const n of currentNodes) {
+        if (n.x != null) savedPositions.set(n.id, { x: n.x, y: n.y });
+      }
+    }
+  }
+  animationRAF = requestAnimationFrame(step);
+}
+
+// ═══════════════════════════════════════════════════════
+// SVG INIT & RENDERING
+// ═══════════════════════════════════════════════════════
+function initSVG() {
+  svg = d3.select('#graph');
+  width = window.innerWidth;
+  height = window.innerHeight - 44;
+  svg.attr('width', width).attr('height', height);
+
+  svgDefs = svg.append('defs');
+  gHulls = svg.append('g').attr('class', 'hulls');
+  gLinks = svg.append('g').attr('class', 'links');
+  gNodes = svg.append('g').attr('class', 'nodes');
+  gLabels = svg.append('g').attr('class', 'labels');
+  gClusterLabels = svg.append('g').attr('class', 'cluster-labels');
+
+  const zoom = d3.zoom()
+    .scaleExtent([0.1, 12])
+    .on('zoom', e => {
+      gHulls.attr('transform', e.transform);
+      gLinks.attr('transform', e.transform);
+      gNodes.attr('transform', e.transform);
+      gLabels.attr('transform', e.transform);
+      gClusterLabels.attr('transform', e.transform);
+      currentK = e.transform.k;
+      applySemanticZoom();
+    });
+  svg.call(zoom);
+  svg.call(zoom.transform, d3.zoomIdentity.translate(width / 2, height / 2).scale(0.8));
+}
+
+function expandHull(hull, pad) {
+  let cx = 0, cy = 0;
+  for (const [x, y] of hull) { cx += x; cy += y; }
+  cx /= hull.length; cy /= hull.length;
+  return hull.map(([x, y]) => {
+    const dx = x - cx, dy = y - cy;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    return [x + (dx / dist) * pad, y + (dy / dist) * pad];
+  });
+}
+
+function applySemanticZoom() {
+  const k = currentK;
+
+  gLabels.selectAll('text').each(function(d) {
+    const el = d3.select(this);
+    const r = d.radius || 4;
+    const screenRadius = r * k;
+    if (screenRadius < 8) { el.attr('opacity', 0); return; }
+    const opacity = Math.min(1, (screenRadius - 8) / 10);
+    const maxFontForWidth = (r * 1.8) / Math.max(1, d.id.length * 0.55);
+    const maxFontForHeight = r * 0.9;
+    const fontSize = Math.max(2, Math.min(maxFontForWidth, maxFontForHeight));
+    el.attr('opacity', opacity)
+      .attr('font-size', fontSize)
+      .attr('dominant-baseline', 'central')
+      .attr('dy', 0)
+      .attr('fill', '#fff');
+  });
+
+  // Floating cluster labels: fade out as textPath labels fade in (k 0.8→1.5)
+  const floatingLabelOpacity = k < 0.2 ? 0.4 : k < 0.8 ? 0.7 : Math.max(0, 0.7 - (k - 0.8) * 1.0);
+  gClusterLabels.selectAll('text').each(function() {
+    const fontSize = Math.max(8, Math.min(18, 13 / k));
+    d3.select(this).attr('font-size', fontSize).attr('opacity', floatingLabelOpacity);
+  });
+
+  // TextPath boundary labels: fade in from k=0.8, full at k=1.5
+  const textPathOpacity = Math.min(0.55, Math.max(0, (k - 0.8) * 0.8));
+  const hullFontSize = Math.max(4, Math.min(12, 10 / k));
+  gHulls.selectAll('.hull-label')
+    .attr('fill-opacity', textPathOpacity)
+    .attr('font-size', hullFontSize);
+
+  const showEdges = document.getElementById('show-edges').checked;
+  const zoomedIn = k > 3.5;
+  // When zoomed in enough, show edges regardless of toggle
+  if (zoomedIn && !showEdges) {
+    gLinks.selectAll('.link').style('display', null);
+  } else if (!showEdges) {
+    gLinks.selectAll('.link').style('display', 'none');
+  }
+  const edgeOpacity = k < 0.3 ? 0.02 : k < 0.6 ? 0.1 : k < 2.5 ? 1 : Math.min(1, 0.3 + (k - 2.5) * 0.2);
+  gLinks.attr('opacity', edgeOpacity);
+
+  const hullOpacity = k < 0.5 ? 0.15 : k < 1.5 ? 0.08 : 0.04;
+  gHulls.selectAll('.hull').attr('fill-opacity', hullOpacity);
+}
+
+function renderGraph(graph, analysis, clusters, clusterNames) {
+  const { nodes, links, nodeDegree } = graph;
+  const showHulls = document.getElementById('show-hulls').checked;
+
+  // Save current positions before clearing (unless just reset)
+  if (currentNodes && savedPositions.size > 0) {
+    for (const n of currentNodes) {
+      if (n.x != null && n.y != null) savedPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+
+  // Compute layout
+  const isWarmRestart = savedPositions.size > nodes.length * 0.3;
+  computeLayout(nodes, links, {
+    isWarmRestart,
+    spatialEdgesMap: spatialMemory.spatialEdges,
+  });
+
+  // Snapshot T0 layout positions BEFORE sticky overrides (only for new nodes)
+  // Existing T0 positions are preserved across reloads so X always returns to the original layout
+  for (const n of nodes) {
+    if (n.x != null && !initialLayoutPositions.has(n.id)) {
+      initialLayoutPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+
+  // Apply sticky positions (user-dragged nodes override layout)
+  for (const n of nodes) {
+    if (stickyNodes.has(n.id) && savedPositions.has(n.id)) {
+      const p = savedPositions.get(n.id);
+      n.x = p.x;
+      n.y = p.y;
+    }
+  }
+
+  // Save computed positions
+  for (const n of nodes) {
+    if (n.x != null) savedPositions.set(n.id, { x: n.x, y: n.y });
+  }
+
+  // Store references
+  currentNodes = nodes;
+  currentLinks = links;
+  currentGraph = graph;
+
+  // Clear SVG
+  gLinks.selectAll('*').remove();
+  gNodes.selectAll('*').remove();
+  gClusterLabels.selectAll('*').remove();
+  gHulls.selectAll('*').remove();
+  gLabels.selectAll('*').remove();
+
+  // Density-adaptive edge styling helpers
+  function baseEdgeOpacity(l) {
+    const maxDeg = Math.max(nodeDegree.get(l.source) || 1, nodeDegree.get(l.target) || 1);
+    return Math.max(0.03, 0.15 / Math.sqrt(maxDeg));
+  }
+  function baseEdgeWidth(l) {
+    const maxDeg = Math.max(nodeDegree.get(l.source) || 1, nodeDegree.get(l.target) || 1);
+    const w = 0.5 + (l.weight || 1) * 0.3;
+    return Math.min(3, w / Math.max(1, Math.sqrt(maxDeg) * 0.4));
+  }
+
+  // Render links (using source/target as IDs since we don't use d3-force)
+  const nodeMap = graph.nodeMap;
+  gLinks.selectAll('line')
+    .data(links)
+    .join('line')
+    .attr('class', 'link')
+    .attr('stroke', d => d.type === 'call' ? '#af6' : d.type === 'uses' ? '#4a9eff' : '#4a9eff')
+    .attr('stroke-width', d => baseEdgeWidth(d))
+    .attr('stroke-opacity', d => baseEdgeOpacity(d))
+    .attr('stroke-dasharray', d => d.type === 'uses' ? '3,3' : null)
+    .style('display', document.getElementById('show-edges').checked ? null : 'none')
+    .attr('x1', d => nodeMap.get(d.source)?.x || 0)
+    .attr('y1', d => nodeMap.get(d.source)?.y || 0)
+    .attr('x2', d => nodeMap.get(d.target)?.x || 0)
+    .attr('y2', d => nodeMap.get(d.target)?.y || 0);
+
+  // Render nodes
+  const node = gNodes.selectAll('g')
+    .data(nodes)
+    .join('g')
+    .attr('class', 'node')
+    .attr('transform', d => `translate(${d.x},${d.y})`)
+    .call(d3.drag()
+      .on('start', (e, d) => {
+        d._dragStart = { x: d.x, y: d.y };
+        d._dragStartTime = Date.now();
+        d._isDragging = true;
+        forcePressDragNode = d;
+        // Stop centroid pull if dragging a selected node while space is held
+        if (spacePullRAF && selectedNodes.has(d.id)) {
+          cancelAnimationFrame(spacePullRAF);
+          spacePullRAF = null;
+        }
+        // Shift-hold fallback for non-pressure devices: start attractor after 550ms delay
+        if (!hasForceTouch && !hasPressure && e.sourceEvent && e.sourceEvent.shiftKey) {
+          if (shiftAttractorTimer) clearTimeout(shiftAttractorTimer);
+          shiftAttractorTimer = setTimeout(() => {
+            shiftAttractorTimer = null;
+            if (d._isDragging && !attractorNode && !groupMoveActive) {
+              startAttractor(d);
+            }
+          }, 550);
+        }
+      })
+      .on('drag', (e, d) => {
+        if (xKeyRAF) return; // X step animation controls position
+        if (e.sourceEvent && e.sourceEvent.shiftKey && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
+          // Shift+drag selected node: move all selected nodes together
+          if (!groupMoveActive) {
+            groupMoveActive = true;
+            // Cancel attractor timer — group move takes priority
+            if (shiftAttractorTimer) { clearTimeout(shiftAttractorTimer); shiftAttractorTimer = null; }
+            if (attractorNode) lockAttractor();
+          }
+          const dx = e.x - d.x, dy = e.y - d.y;
+          for (const n of currentNodes) {
+            if (!selectedNodes.has(n.id)) continue;
+            n.x += dx;
+            n.y += dy;
+          }
+        } else if (e.sourceEvent && e.sourceEvent.shiftKey) {
+          return; // shift-drag on unselected node, don't move
+        } else {
+          d.x = e.x; d.y = e.y;
+        }
+        renderPositions();
+      })
+      .on('end', (e, d) => {
+        d._isDragging = false;
+        forcePressDragNode = null;
+        groupMoveActive = false;
+        if (shiftAttractorTimer) { clearTimeout(shiftAttractorTimer); shiftAttractorTimer = null; }
+        if (xKeyHeld) stopXForces(); // release during X relaxation — stop and keep position
+        const dx = d.x - d._dragStart.x, dy = d.y - d._dragStart.y;
+        const moved = Math.sqrt(dx * dx + dy * dy) > 5;
+        if (moved) {
+          // If shift+drag moved all selected nodes, save all their positions
+          if (e.sourceEvent && e.sourceEvent.shiftKey && selectedNodes.has(d.id) && selectedNodes.size >= 2) {
+            for (const n of currentNodes) {
+              if (!selectedNodes.has(n.id)) continue;
+              stickyNodes.add(n.id);
+              savedPositions.set(n.id, { x: n.x, y: n.y });
+            }
+          } else {
+            stickyNodes.add(d.id);
+            savedPositions.set(d.id, { x: d.x, y: d.y });
+          }
+          trackDragProximity(d.id);
+          pushArrangement('drag', [d.id]);
+        }
+        if (attractorNode) lockAttractor();
+      })
+    );
+
+  node.append('circle')
+    .attr('r', d => d.radius)
+    .attr('fill', d => d.type === 'global' ? '#333' : d.color)
+    .attr('stroke', d => d.type === 'global' ? '#666' : d3.color(d.color).brighter(0.8))
+    .on('click', (e, d) => {
+      e.stopPropagation();
+      const dragDuration = d._dragStartTime ? Date.now() - d._dragStartTime : 0;
+      d._dragStartTime = null;
+      if (dragDuration < 300) {
+        // Shift+X+click or Ctrl+click: dismiss node to T0
+        if ((e.shiftKey && xKeyDown) || (e.ctrlKey || e.metaKey)) {
+          selectedNodes.delete(d.id);
+          lockedNodes.delete(d.id);
+          d3.select(e.target).classed('selected-glow', false);
+          updateLockUI();
+          dismissNodeToT0(d);
+          return;
+        }
+        if (e.shiftKey) {
+          // Shift-click: toggle multi-select
+          if (selectedNodes.has(d.id)) {
+            selectedNodes.delete(d.id);
+            lockedNodes.delete(d.id);
+            d3.select(e.target).classed('selected-glow', false);
+          } else {
+            selectedNodes.add(d.id);
+            lockedNodes.add(d.id);
+            stickyNodes.add(d.id);
+            savedPositions.set(d.id, { x: d.x, y: d.y });
+            d3.select(e.target).classed('selected-glow', true);
+          }
+          updateLockUI();
+          return;
+        }
+        selectNode(d, analysis);
+        trackClickCoOccurrence(d.id);
+        // clickPull(d); — disabled: single click should not pull neighbors
+      }
+    })
+    .on('contextmenu', (e, d) => {
+      e.preventDefault();
+      // Ctrl+click on Mac fires contextmenu, not click — handle dismiss here
+      selectedNodes.delete(d.id);
+      lockedNodes.delete(d.id);
+      gNodes.selectAll('.node').filter(n => n.id === d.id)
+        .select('circle').classed('selected-glow', false);
+      updateLockUI();
+      dismissNodeToT0(d);
+    })
+    .on('mouseenter', (e, d) => { if (!attractorNode) highlightNeighbors(d, graph); })
+    .on('mouseleave', () => { if (!attractorNode) clearHighlight(); })
+    .each(function(d) {
+      // Force Touch events for attractor (Safari)
+      this.addEventListener('webkitmouseforcewillbegin', (e) => {
+        e.preventDefault();
+        hasForceTouch = true;
+      });
+      this.addEventListener('webkitmouseforcedown', (e) => {
+        if (!attractorNode) startAttractor(d);
+      });
+      this.addEventListener('webkitmouseforceup', (e) => {
+        if (attractorNode) lockAttractor();
+      });
+      // Pointer Events pressure fallback (Chrome/Firefox)
+      this.addEventListener('pointerdown', (e) => {
+        pressureActive = false;
+      });
+      this.addEventListener('pointermove', (e) => {
+        if (hasForceTouch) return; // webkit events take priority
+        if (e.pressure > 0 && e.pressure !== 0.5) hasPressure = true;
+        if (!hasPressure) return;
+        if (e.pressure >= PRESSURE_THRESHOLD && !pressureActive) {
+          pressureActive = true;
+          if (!attractorNode) startAttractor(d);
+        } else if (e.pressure < PRESSURE_THRESHOLD && pressureActive) {
+          pressureActive = false;
+          if (attractorNode) lockAttractor();
+        }
+      });
+      this.addEventListener('pointerup', () => {
+        if (pressureActive) {
+          pressureActive = false;
+          if (attractorNode) lockAttractor();
+        }
+      });
+    });
+
+  // Secondary affinity rings
+  node.filter(d => {
+    if (!d.affinities || d.affinities.size < 2) return false;
+    const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
+    return sorted[1][1] >= 0.15;
+  }).append('circle')
+    .attr('r', d => d.radius + 2.5)
+    .attr('fill', 'none')
+    .attr('stroke', d => {
+      const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
+      return CLUSTER_COLORS[sorted[1][0] % CLUSTER_COLORS.length];
+    })
+    .attr('stroke-width', d => {
+      const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
+      return Math.max(1, sorted[1][1] * 4);
+    })
+    .attr('stroke-opacity', d => {
+      const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
+      return 0.4 + sorted[1][1] * 0.6;
+    })
+    .style('pointer-events', 'none');
+
+  // Labels
+  gLabels.selectAll('text')
+    .data(nodes)
+    .join('text')
+    .attr('class', 'label')
+    .attr('fill', '#fff')
+    .attr('text-anchor', 'middle')
+    .attr('dominant-baseline', 'central')
+    .attr('opacity', 0)
+    .style('pointer-events', 'none')
+    .style('user-select', 'none')
+    .text(d => d.id)
+    .attr('x', d => d.x)
+    .attr('y', d => d.y);
+
+  // Hulls
+  currentHullClusterIds = showHulls
+    ? [...new Set(nodes.filter(n => n.cluster != null && n.cluster >= 0).map(n => n.cluster))]
+    : null;
+  renderHulls();
+
+  // Cluster labels (floating — always visible)
+  const allClusterIds = [...new Set(nodes.filter(n => n.type === 'function').map(n => n.cluster))];
+  gClusterLabels.selectAll('text')
+    .data(allClusterIds.map(cid => ({
+      cid, name: clusterNames.get(cid) || `cluster_${cid}`,
+      color: CLUSTER_COLORS[cid % CLUSTER_COLORS.length],
+    })))
+    .join('text')
+    .attr('class', 'cluster-label')
+    .attr('fill', d => d.color)
+    .text(d => d.name)
+    .call(clusterLabelDrag(d => currentNodes.filter(n => n.cluster === d.cid)));
+  rebuildClusterMemberCache();
+  computeClusterLabelPlacement();
+
+  // Stats
+  const clusterCount = new Set([...clusters.values()]).size;
+  document.getElementById('stats').innerHTML = `
+    <div>${nodes.filter(n => n.type === 'function').length} functions</div>
+    ${nodes.filter(n => n.type === 'global').length > 0 ? `<div>${nodes.filter(n => n.type === 'global').length} globals</div>` : ''}
+    <div>${links.length} edges</div>
+    <div>${clusterCount} systems</div>`;
+
+  // Legend
+  document.getElementById('legend').innerHTML = [...clusterNames.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([id, name]) => `<div class="item"><div class="dot" style="background:${CLUSTER_COLORS[id % CLUSTER_COLORS.length]}"></div>${name} (${[...clusters.entries()].filter(([, c]) => c === id).length})</div>`)
+    .join('');
+
+  applySemanticZoom();
+
+  // Render user-defined clusters
+  renderUserClusters();
+  renderUserClusterLegend();
+
+  // Push initial arrangement
+  pushArrangement('layout');
+}
+
+function hullPerimeter(pts) {
+  let len = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    len += Math.hypot(pts[j][0] - pts[i][0], pts[j][1] - pts[i][1]);
+  }
+  return len;
+}
+
+function buildRepeatedLabel(name, perimeter, fontSize) {
+  const charW = fontSize * 0.65;
+  const sep = '  \u00b7  '; // " · "
+  const unit = name + sep;
+  const unitW = unit.length * charW;
+  const reps = Math.max(1, Math.ceil(perimeter / unitW));
+  return unit.repeat(reps);
+}
+
+function renderHulls() {
+  if (!currentHullClusterIds || !currentNodes) return;
+  gHulls.selectAll('.hull').remove();
+  gHulls.selectAll('.hull-label').remove();
+  svgDefs.selectAll('.hull-path-def').remove();
+
+  for (const cid of currentHullClusterIds) {
+    const members = currentNodes.filter(n => n.cluster === cid);
+    if (members.length < 3) continue;
+    const points = members.map(d => [d.x, d.y]);
+    const hull = d3.polygonHull(points);
+    if (!hull) continue;
+    const expanded = expandHull(hull, 20);
+    const color = CLUSTER_COLORS[cid % CLUSTER_COLORS.length];
+    const pathD = `M${expanded.join('L')}Z`;
+    const pathId = `hull-path-${cid}`;
+
+    // Hull fill + stroke
+    gHulls.append('path')
+      .attr('class', 'hull')
+      .attr('d', pathD)
+      .attr('fill', color)
+      .attr('stroke', color);
+
+    // Path def for textPath reference
+    svgDefs.append('path')
+      .attr('class', 'hull-path-def')
+      .attr('id', pathId)
+      .attr('d', pathD);
+
+    // TextPath boundary label — always created, visibility controlled by applySemanticZoom
+    const name = currentClusterNames?.get(cid) || `cluster_${cid}`;
+    const perim = hullPerimeter(expanded);
+    // Generate enough text for smallest expected font size (max zoom k=12)
+    const label = buildRepeatedLabel(name, perim, Math.max(4, 10 / 12));
+
+    const text = gHulls.append('text')
+      .attr('class', 'hull-label')
+      .datum({ cid })
+      .attr('fill', color)
+      .attr('fill-opacity', 0)
+      .attr('font-size', 10);
+
+    text.append('textPath')
+      .attr('href', `#${pathId}`)
+      .text(label);
+
+    text.call(clusterLabelDrag(d => currentNodes.filter(n => n.cluster === d.cid)));
+  }
+  // Also render user clusters on top
+  renderUserClusters();
+  // Apply current zoom styling to newly created elements
+  applySemanticZoom();
+}
+
+function renderUserClusters() {
+  if (!currentNodes) return;
+  const nodeMap = currentGraph?.nodeMap;
+  if (!nodeMap) return;
+
+  // Remove previous user cluster hulls (but not labels during drag — they'd be destroyed mid-drag)
+  gHulls.selectAll('.user-hull').remove();
+  if (!clusterDragActive) gClusterLabels.selectAll('.user-cluster-label').remove();
+
+  for (let i = 0; i < userClusterSections.length; i++) {
+    const uc = userClusterSections[i];
+    // Pick color based on position after system clusters
+    const colorIdx = (currentClusterNames?.size || 0) + i;
+    const color = CLUSTER_COLORS[colorIdx % CLUSTER_COLORS.length];
+    const members = uc.nodeIds.map(id => nodeMap.get(id)).filter(n => n && n.x != null);
+    if (members.length < 3) {
+      if (members.length > 0) {
+        const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
+        const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
+        const r = members.length === 1 ? 30 : Math.hypot(members[0].x - members[1].x, members[0].y - members[1].y) / 2 + 25;
+        gHulls.append('circle')
+          .attr('class', 'user-hull')
+          .attr('cx', cx).attr('cy', cy).attr('r', r)
+          .attr('fill', color).attr('fill-opacity', 0.08)
+          .attr('stroke', color).attr('stroke-opacity', 0.3)
+          .attr('stroke-width', 2).attr('stroke-dasharray', '6,3');
+        if (!clusterDragActive) {
+          gClusterLabels.append('text')
+            .datum({ ucIndex: i })
+            .attr('class', 'user-cluster-label cluster-label')
+            .attr('x', cx).attr('y', cy - r - 8)
+            .attr('fill', color)
+            .text(uc.name)
+            .call(clusterLabelDrag(d => {
+              const sec = userClusterSections[d.ucIndex];
+              if (!sec || !currentGraph?.nodeMap) return [];
+              return sec.nodeIds.map(id => currentGraph.nodeMap.get(id)).filter(n => n && n.x != null);
+            }));
+        }
+      }
+      continue;
+    }
+    const points = members.map(d => [d.x, d.y]);
+    const hull = d3.polygonHull(points);
+    if (!hull) continue;
+    const expanded = expandHull(hull, 25);
+    gHulls.append('path')
+      .attr('class', 'user-hull')
+      .attr('d', `M${expanded.join('L')}Z`)
+      .attr('fill', color).attr('fill-opacity', 0.08)
+      .attr('stroke', color).attr('stroke-opacity', 0.3)
+      .attr('stroke-width', 2).attr('stroke-dasharray', '6,3');
+    if (!clusterDragActive) {
+      const centroid = d3.polygonCentroid(hull);
+      const topY = Math.min(...hull.map(p => p[1]));
+      gClusterLabels.append('text')
+        .datum({ ucIndex: i })
+        .attr('class', 'user-cluster-label cluster-label')
+        .attr('x', centroid[0]).attr('y', topY - 12)
+        .attr('fill', color)
+        .text(uc.name)
+        .call(clusterLabelDrag(d => {
+          const sec = userClusterSections[d.ucIndex];
+          if (!sec || !currentGraph?.nodeMap) return [];
+          return sec.nodeIds.map(id => currentGraph.nodeMap.get(id)).filter(n => n && n.x != null);
+        }));
+    }
+  }
+}
+
+function renderUserClusterLegend() {
+  const legendEl = document.getElementById('legend');
+  legendEl.querySelectorAll('.user-cluster-item').forEach(el => el.remove());
+  if (userClusterSections.length === 0) return;
+  for (let i = 0; i < userClusterSections.length; i++) {
+    const uc = userClusterSections[i];
+    const colorIdx = (currentClusterNames?.size || 0) + i;
+    const color = CLUSTER_COLORS[colorIdx % CLUSTER_COLORS.length];
+    const item = document.createElement('div');
+    item.className = 'item user-cluster-item';
+    item.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;cursor:pointer';
+    const label = document.createElement('span');
+    label.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1';
+    label.innerHTML = `<div class="dot" style="background:${color};border:1px dashed #888"></div>${uc.name} (${uc.nodeIds.length})`;
+    label.addEventListener('click', () => {
+      if (currentGraph?.nodeMap) {
+        selectedNodes.clear();
+        for (const id of uc.nodeIds) selectedNodes.add(id);
+        gNodes.selectAll('circle').classed('selected-glow', d => selectedNodes.has(d.id));
+      }
+    });
+    const delBtn = document.createElement('span');
+    delBtn.textContent = '\u00d7';
+    delBtn.title = 'Delete cluster';
+    delBtn.style.cssText = 'color:#666;cursor:pointer;font-size:14px;line-height:1;padding:0 2px';
+    delBtn.addEventListener('mouseenter', () => { delBtn.style.color = '#f66'; });
+    delBtn.addEventListener('mouseleave', () => { delBtn.style.color = '#666'; });
+    delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteUserCluster(uc.name); });
+    item.appendChild(label);
+    item.appendChild(delBtn);
+    legendEl.appendChild(item);
+  }
+}
+
+let clusterDragActive = false;
+function clusterLabelDrag(getMembersFn) {
+  return d3.drag()
+    .on('start', function(e, d) {
+      d._clusterMembers = getMembersFn(d);
+      clusterDragActive = true;
+      d3.select(this).style('cursor', 'grabbing');
+    })
+    .on('drag', function(e, d) {
+      if (!d._clusterMembers || !d._clusterMembers.length) return;
+      for (const n of d._clusterMembers) {
+        n.x += e.dx;
+        n.y += e.dy;
+      }
+      renderPositions();
+    })
+    .on('end', function(e, d) {
+      clusterDragActive = false;
+      d3.select(this).style('cursor', null);
+      if (d._clusterMembers) {
+        for (const n of d._clusterMembers) {
+          stickyNodes.add(n.id);
+          savedPositions.set(n.id, { x: n.x, y: n.y });
+        }
+        pushArrangement('cluster-drag', d._clusterMembers.slice(0, 5).map(n => n.id));
+        d._clusterMembers = null;
+      }
+      renderPositions();
+    });
+}
+
+function rebuildClusterMemberCache() {
+  clusterMemberCache.clear();
+  if (!currentNodes) return;
+  for (const n of currentNodes) {
+    if (n.cid != null || n.cluster != null) {
+      const cid = n.cluster;
+      if (!clusterMemberCache.has(cid)) clusterMemberCache.set(cid, []);
+      clusterMemberCache.get(cid).push(n);
+    }
+  }
+}
+
+function estimateLabelBBox(text, fontSize) {
+  const w = text.length * fontSize * 0.62;
+  const h = fontSize * 1.3;
+  return { w, h };
+}
+
+function rotatedCorners(cx, cy, w, h, angleDeg) {
+  const a = angleDeg * Math.PI / 180;
+  const cos = Math.cos(a), sin = Math.sin(a);
+  const hw = w / 2, hh = h / 2;
+  return [
+    [cx + (-hw * cos - -hh * sin), cy + (-hw * sin + -hh * cos)],
+    [cx + ( hw * cos - -hh * sin), cy + ( hw * sin + -hh * cos)],
+    [cx + ( hw * cos -  hh * sin), cy + ( hw * sin +  hh * cos)],
+    [cx + (-hw * cos -  hh * sin), cy + (-hw * sin +  hh * cos)],
+  ];
+}
+
+function rectCircleOverlap(cx, cy, w, h, angleDeg, nx, ny, nr) {
+  // Transform node center into label's rotated coordinate frame
+  const a = -angleDeg * Math.PI / 180;
+  const cos = Math.cos(a), sin = Math.sin(a);
+  const dx = nx - cx, dy = ny - cy;
+  const lx = dx * cos - dy * sin;
+  const ly = dx * sin + dy * cos;
+  // Closest point on rect to circle center
+  const hw = w / 2, hh = h / 2;
+  const closestX = Math.max(-hw, Math.min(hw, lx));
+  const closestY = Math.max(-hh, Math.min(hh, ly));
+  const distSq = (lx - closestX) ** 2 + (ly - closestY) ** 2;
+  return distSq < nr * nr;
+}
+
+function rectRectOverlap(ax, ay, aw, ah, aAngle, bx, by, bw, bh, bAngle) {
+  // Quick center-distance check first
+  const dx = ax - bx, dy = ay - by;
+  const maxDist = Math.hypot(aw, ah) / 2 + Math.hypot(bw, bh) / 2;
+  if (dx * dx + dy * dy > maxDist * maxDist) return false;
+  // SAT with rotated rects
+  const cornersA = rotatedCorners(ax, ay, aw, ah, aAngle);
+  const cornersB = rotatedCorners(bx, by, bw, bh, bAngle);
+  function getAxes(corners) {
+    const axes = [];
+    for (let i = 0; i < corners.length; i++) {
+      const j = (i + 1) % corners.length;
+      const ex = corners[j][0] - corners[i][0], ey = corners[j][1] - corners[i][1];
+      axes.push([-ey, ex]);
+    }
+    return axes;
+  }
+  function project(corners, axis) {
+    let min = Infinity, max = -Infinity;
+    for (const c of corners) {
+      const p = c[0] * axis[0] + c[1] * axis[1];
+      if (p < min) min = p;
+      if (p > max) max = p;
+    }
+    return [min, max];
+  }
+  for (const axis of [...getAxes(cornersA), ...getAxes(cornersB)]) {
+    const [minA, maxA] = project(cornersA, axis);
+    const [minB, maxB] = project(cornersB, axis);
+    if (maxA < minB || maxB < minA) return false;
+  }
+  return true;
+}
+
+function computeClusterLabelPlacement() {
+  if (!currentNodes || currentNodes.length === 0) return;
+
+  const fontSize = Math.max(8, Math.min(18, 13 / currentK));
+  const placedLabels = []; // { cx, cy, w, h, angle }
+
+  // Collect all labels sorted by cluster size (largest first for priority)
+  const labels = [];
+  gClusterLabels.selectAll('text:not(.user-cluster-label)').each(function(d) {
+    if (!d || d.cid == null) return;
+    const members = clusterMemberCache.get(d.cid);
+    if (!members || !members.length) return;
+    labels.push({ el: this, d, members });
+  });
+  labels.sort((a, b) => b.members.length - a.members.length);
+
+  for (const { el, d, members } of labels) {
+    const bbox = estimateLabelBBox(d.name, fontSize);
+
+    // Compute cluster centroid and hull
+    let cx = 0, cy = 0;
+    for (const m of members) { cx += m.x; cy += m.y; }
+    cx /= members.length; cy /= members.length;
+
+    let hull = null, expanded = null;
+    if (members.length >= 3) {
+      hull = d3.polygonHull(members.map(m => [m.x, m.y]));
+      if (hull) expanded = expandHull(hull, 20);
+    }
+
+    // Generate candidates
+    const candidates = [];
+    const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
+    const maxY = Math.max(...members.map(m => m.y + (m.radius || 4)));
+    const minX = Math.min(...members.map(m => m.x - (m.radius || 4)));
+    const maxX = Math.max(...members.map(m => m.x + (m.radius || 4)));
+
+    // Basic candidates at 0 degrees
+    candidates.push({ x: cx, y: minY - bbox.h, angle: 0 }); // top center
+    candidates.push({ x: cx, y: maxY + bbox.h, angle: 0 }); // bottom center
+    candidates.push({ x: minX - bbox.w * 0.6, y: cy, angle: 0 }); // left
+    candidates.push({ x: maxX + bbox.w * 0.6, y: cy, angle: 0 }); // right
+
+    // Hull edge midpoints with tangent-aligned angles
+    if (hull && hull.length >= 3) {
+      for (let i = 0; i < hull.length; i++) {
+        const j = (i + 1) % hull.length;
+        const mx = (hull[i][0] + hull[j][0]) / 2;
+        const my = (hull[i][1] + hull[j][1]) / 2;
+        const edgeDx = hull[j][0] - hull[i][0];
+        const edgeDy = hull[j][1] - hull[i][1];
+        const edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
+        if (edgeLen < bbox.w * 0.5) continue; // too short
+
+        let edgeAngle = Math.atan2(edgeDy, edgeDx) * 180 / Math.PI;
+        // Normalize to ±90 so text isn't upside down
+        if (edgeAngle > 90) edgeAngle -= 180;
+        if (edgeAngle < -90) edgeAngle += 180;
+        // Clamp to ±30 degrees
+        edgeAngle = Math.max(-30, Math.min(30, edgeAngle));
+
+        // Push outward from centroid
+        const outDx = mx - cx, outDy = my - cy;
+        const outDist = Math.sqrt(outDx * outDx + outDy * outDy) || 1;
+        const pushOut = bbox.h * 0.8;
+        const ox = mx + (outDx / outDist) * pushOut;
+        const oy = my + (outDy / outDist) * pushOut;
+        candidates.push({ x: ox, y: oy, angle: edgeAngle });
+      }
+    }
+
+    // Interior "dark spot" candidates — sample grid within bounding box
+    const stepX = (maxX - minX) / 4 || 20;
+    const stepY = (maxY - minY) / 4 || 20;
+    for (let gx = minX; gx <= maxX; gx += stepX) {
+      for (let gy = minY; gy <= maxY; gy += stepY) {
+        // Only include if inside hull (or if no hull, within bounding box)
+        if (hull && !d3.polygonContains(hull, [gx, gy])) continue;
+        candidates.push({ x: gx, y: gy, angle: 0 });
+      }
+    }
+
+    // Also try rotated variants of top/bottom
+    for (const angle of [-20, 20]) {
+      candidates.push({ x: cx, y: minY - bbox.h * 0.7, angle });
+      candidates.push({ x: cx, y: maxY + bbox.h * 0.7, angle });
+    }
+
+    // Score each candidate
+    let bestScore = Infinity, bestCand = candidates[0];
+
+    for (const cand of candidates) {
+      let score = 0;
+
+      // Node overlap penalty — check all nodes, not just cluster members
+      for (const n of currentNodes) {
+        const nr = (n.radius || 4) + 2;
+        if (rectCircleOverlap(cand.x, cand.y, bbox.w + 4, bbox.h + 4, cand.angle, n.x, n.y, nr)) {
+          score += 100;
+        } else {
+          // Proximity penalty (soft repulsion from nearby nodes)
+          const dist = Math.hypot(cand.x - n.x, cand.y - n.y);
+          if (dist < bbox.w) score += (bbox.w - dist) * 0.3;
+        }
+      }
+
+      // Already-placed label overlap penalty
+      for (const pl of placedLabels) {
+        if (rectRectOverlap(cand.x, cand.y, bbox.w + 6, bbox.h + 6, cand.angle,
+                            pl.cx, pl.cy, pl.w + 6, pl.h + 6, pl.angle)) {
+          score += 80;
+        }
+      }
+
+      // Distance from centroid (mild — prefer staying near cluster)
+      const distFromCenter = Math.hypot(cand.x - cx, cand.y - cy);
+      score += distFromCenter * 0.3;
+
+      // Outside own hull penalty
+      if (hull && !d3.polygonContains(expanded || hull, [cand.x, cand.y])) {
+        score += 15;
+      }
+
+      // Inside other cluster's hull penalty
+      for (const [otherCid, otherMembers] of clusterMemberCache) {
+        if (otherCid === d.cid || otherMembers.length < 3) continue;
+        const otherHull = d3.polygonHull(otherMembers.map(m => [m.x, m.y]));
+        if (otherHull && d3.polygonContains(otherHull, [cand.x, cand.y])) {
+          score += 200;
+        }
+      }
+
+      // Rotation penalty (slight preference for horizontal)
+      score += Math.abs(cand.angle) * 0.15;
+
+      if (score < bestScore) { bestScore = score; bestCand = cand; }
+    }
+
+    // Store placement as offset from centroid
+    clusterLabelPlacement.set(d.cid, {
+      dx: bestCand.x - cx,
+      dy: bestCand.y - cy,
+      angle: bestCand.angle,
+    });
+    placedLabels.push({ cx: bestCand.x, cy: bestCand.y, w: bbox.w, h: bbox.h, angle: bestCand.angle });
+  }
+
+  // Apply placements
+  applyClusterLabelPlacements();
+}
+
+function applyClusterLabelPlacements() {
+  gClusterLabels.selectAll('text:not(.user-cluster-label)').each(function(d) {
+    if (!d || d.cid == null) return;
+    const members = clusterMemberCache.get(d.cid);
+    if (!members || !members.length) return;
+    let cx = 0, cy = 0;
+    for (const m of members) { cx += m.x; cy += m.y; }
+    cx /= members.length; cy /= members.length;
+
+    const placement = clusterLabelPlacement.get(d.cid);
+    if (placement) {
+      const x = cx + placement.dx, y = cy + placement.dy;
+      d3.select(this)
+        .attr('x', null).attr('y', null)
+        .attr('transform', `translate(${x},${y}) rotate(${placement.angle})`);
+    } else {
+      // Fallback: above cluster
+      const minY = Math.min(...members.map(m => m.y - (m.radius || 4)));
+      d3.select(this)
+        .attr('transform', null)
+        .attr('x', cx).attr('y', minY - 12);
+    }
+  });
+}
+
+function renderClusterLabels() {
+  if (!currentNodes) return;
+  rebuildClusterMemberCache();
+  applyClusterLabelPlacements();
+  // Debounce the full solver
+  if (labelPlacementTimer) clearTimeout(labelPlacementTimer);
+  labelPlacementTimer = setTimeout(computeClusterLabelPlacement, 200);
+}
+
+function renderPositions() {
+  if (!currentNodes || !currentGraph) return;
+  const nodeMap = currentGraph.nodeMap;
+
+  gLinks.selectAll('.link')
+    .attr('x1', d => nodeMap.get(d.source)?.x || 0)
+    .attr('y1', d => nodeMap.get(d.source)?.y || 0)
+    .attr('x2', d => nodeMap.get(d.target)?.x || 0)
+    .attr('y2', d => nodeMap.get(d.target)?.y || 0);
+
+  gNodes.selectAll('.node')
+    .attr('transform', d => `translate(${d.x},${d.y})`);
+
+  gLabels.selectAll('text')
+    .attr('x', d => d.x)
+    .attr('y', d => d.y);
+
+  renderHulls();
+  renderClusterLabels();
+}
+
+// ═══════════════════════════════════════════════════════
+// INTERACTION
+// ═══════════════════════════════════════════════════════
+function bfsDistances(startId, adjacency, maxDepth) {
+  const dist = new Map();
+  dist.set(startId, 0);
+  const queue = [startId];
+  while (queue.length) {
+    const cur = queue.shift();
+    const d = dist.get(cur);
+    if (d >= maxDepth) continue;
+    for (const nb of (adjacency.get(cur) || [])) {
+      if (!dist.has(nb)) {
+        dist.set(nb, d + 1);
+        queue.push(nb);
+      }
+    }
+  }
+  return dist;
+}
+
+function highlightNeighbors(d, graph) {}
+function clearHighlight() {}
+
+function affinityBarsHTML(d, clusterNames) {
+  if (!d.affinities || d.affinities.size === 0) return '';
+  const sorted = [...d.affinities.entries()].sort((a, b) => b[1] - a[1]);
+  const bars = sorted.map(([cid, weight]) => {
+    const pct = Math.round(weight * 100);
+    const color = CLUSTER_COLORS[cid % CLUSTER_COLORS.length];
+    const name = clusterNames.get(cid) || `system_${cid}`;
+    return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0">
+      <div style="width:${Math.max(4, pct)}%;height:6px;background:${color};border-radius:3px;min-width:4px"></div>
+      <span style="color:${color};white-space:nowrap">${name} ${pct}%</span>
+    </div>`;
+  }).join('');
+  return `<div class="section"><div class="section-title">Affinities</div>${bars}</div>`;
+}
+
+function applyContextualEdgeWeights(focusId) {
+  if (!currentGraph || !currentNodes) return;
+  const adj = currentGraph.adjacency;
+  const distances = bfsDistances(focusId, adj, 3);
+
+  gLinks.selectAll('.link')
+    .transition().duration(300)
+    .attr('stroke-opacity', l => {
+      const sd = distances.get(l.source) ?? 99;
+      const td = distances.get(l.target) ?? 99;
+      const minD = Math.min(sd, td);
+      const maxD = Math.max(sd, td);
+      if (maxD <= 1) return 0.8;
+      if (maxD <= 2) return 0.35;
+      if (minD <= 2) return 0.12;
+      return 0.03;
+    })
+    .attr('stroke-width', l => {
+      const sd = distances.get(l.source) ?? 99;
+      const td = distances.get(l.target) ?? 99;
+      const maxD = Math.max(sd, td);
+      const w = (l.weight || 1);
+      if (maxD <= 1) return Math.min(4, 1.5 + w * 0.5);
+      if (maxD <= 2) return Math.min(3, 0.8 + w * 0.3);
+      return Math.min(2, 0.3 + w * 0.15);
+    });
+}
+
+function selectNode(d, analysis) {
+  selectedNode = d;
+  const panel = document.getElementById('info-panel');
+  panel.classList.add('open');
+  applyContextualEdgeWeights(d.id);
+  document.getElementById('info-name').textContent = d.id;
+  const clusterNames = currentClusterNames;
+  const affinitySection = affinityBarsHTML(d, clusterNames);
+
+  if (d.type === 'global') {
+    const users = [];
+    for (const [fname, info] of analysis.functions) {
+      const access = [];
+      if (info.reads.has(d.id)) access.push('read');
+      if (info.writes.has(d.id)) access.push('write');
+      if (info.rw.has(d.id)) access.push('r/w');
+      if (access.length) users.push({ fname, access: access.join(', ') });
+    }
+    document.getElementById('info-body').innerHTML = `
+      <div class="section"><div class="section-title">Type</div>global variable</div>
+      ${affinitySection}
+      <div class="section"><div class="section-title">Used by ${users.length} functions</div>
+        ${users.map(u => `<span class="tag">${u.fname} (${u.access})</span>`).join('')}
+      </div>`;
+    return;
+  }
+
+  const info = d.info;
+  if (!info) return;
+  const reads = [...info.reads].sort();
+  const writes = [...info.writes].sort();
+  const rw = [...info.rw].sort();
+  const calls = [...info.calls].sort();
+
+  document.getElementById('info-body').innerHTML = `
+    <div class="section"><div class="section-title">Location</div>Line ${info.line} — ${info.endLine} (${info.lines} lines)</div>
+    <div class="section"><div class="section-title">System</div>${d.clusterName}</div>
+    ${affinitySection}
+    ${reads.length ? `<div class="section"><div class="section-title">Reads (${reads.length})</div>${reads.map(r => `<span class="tag read">${r}</span>`).join('')}</div>` : ''}
+    ${writes.length ? `<div class="section"><div class="section-title">Writes (${writes.length})</div>${writes.map(w => `<span class="tag write">${w}</span>`).join('')}</div>` : ''}
+    ${rw.length ? `<div class="section"><div class="section-title">Read+Write (${rw.length})</div>${rw.map(v => `<span class="tag rw">${v}</span>`).join('')}</div>` : ''}
+    ${calls.length ? `<div class="section"><div class="section-title">Calls (${calls.length})</div>${calls.map(c => `<span class="tag call">${c}</span>`).join('')}</div>` : ''}
+  `;
+}
+
+// ═══════════════════════════════════════════════════════
+// ATTRACTOR (press-and-hold)
+// ═══════════════════════════════════════════════════════
+function startAttractor(d) {
+  attractorNode = d;
+  attractorStartTime = Date.now();
+  attractorHoldStrength = 0;
+
+  gNodes.selectAll('.node').filter(n => n.id === d.id)
+    .select('circle').classed('attractor-glow', true);
+
+  attractorRAF = requestAnimationFrame(attractorLoop);
+}
+
+function attractorLoop() {
+  if (!attractorNode) return;
+  const holdMs = Date.now() - attractorStartTime;
+  attractorHoldStrength = Math.min(1, holdMs / 2000);
+  const str = attractorHoldStrength;
+  if (str < 0.05) { attractorRAF = requestAnimationFrame(attractorLoop); return; }
+
+  const tx = attractorNode.x;
+  const ty = attractorNode.y;
+  const adj = currentGraph?.adjacency;
+  if (!adj) { attractorRAF = requestAnimationFrame(attractorLoop); return; }
+
+  // Hold duration controls how many hops are affected:
+  // 0-0.5s: n+1 only, 0.5-1.5s: n+1 and n+2, 1.5s+: n+1, n+2, n+3
+  const maxHop = holdMs < 500 ? 1 : holdMs < 1500 ? 2 : 3;
+  const distances = bfsDistances(attractorNode.id, adj, maxHop);
+
+  // Only move nodes within the active BFS radius — everything else stays put
+  const attractorIsSelected = selectedNodes.has(attractorNode.id);
+  const movedNodes = [];
+  for (const n of currentNodes) {
+    if (n.id === attractorNode.id) continue;
+    if (!attractorIsSelected && lockedNodes.has(n.id)) continue;
+    const graphDist = distances.get(n.id);
+    if (graphDist == null || graphDist > maxHop) continue;
+
+    const dx = tx - n.x, dy = ty - n.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+
+    let move = 0;
+    if (graphDist === 1) {
+      const targetDist = n.radius + attractorNode.radius + 12;
+      move = (dist - targetDist) * str * 0.12;
+    } else if (graphDist === 2) {
+      // Ramp in: strength grows from 0 at 0.5s to full at 1.5s
+      const hop2Str = Math.min(1, (holdMs - 500) / 1000);
+      const targetDist = n.radius + attractorNode.radius + 50;
+      if (dist > targetDist) {
+        move = (dist - targetDist) * str * hop2Str * 0.025;
+      }
+    } else if (graphDist === 3) {
+      const hop3Str = Math.min(1, (holdMs - 1500) / 1000);
+      const targetDist = n.radius + attractorNode.radius + 100;
+      if (dist > targetDist) {
+        move = (dist - targetDist) * str * hop3Str * 0.01;
+      }
+    }
+
+    if (Math.abs(move) > 0.01) {
+      const maxMove = graphDist === 1 ? 4 : graphDist === 2 ? 2 : 1;
+      move = Math.max(-maxMove, Math.min(maxMove, move));
+      n.x += (dx / dist) * move;
+      n.y += (dy / dist) * move;
+      movedNodes.push(n);
+    }
+  }
+
+  // Collision resolution only among moved nodes (prevent stacking)
+  for (let i = 0; i < movedNodes.length; i++) {
+    for (let j = i + 1; j < movedNodes.length; j++) {
+      const a = movedNodes[i], b = movedNodes[j];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const minDist = a.radius + b.radius + 6;
+      if (dist < minDist) {
+        const push = (minDist - dist) * 0.4;
+        a.x -= (dx / dist) * push;
+        a.y -= (dy / dist) * push;
+        b.x += (dx / dist) * push;
+        b.y += (dy / dist) * push;
+      }
+    }
+  }
+
+  // Minimal node-node overlap resolution: only between moved nodes and
+  // their immediate static neighbors (nodes they're now overlapping).
+  // No cluster-level forces — uninvolved clusters stay perfectly still.
+  for (const m of movedNodes) {
+    for (const n of currentNodes) {
+      if (n.id === m.id || movedNodes.includes(n)) continue;
+      const dx = n.x - m.x, dy = n.y - m.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const minDist = m.radius + n.radius + 4;
+      if (dist < minDist) {
+        // Push the static node just enough to not overlap, very gently
+        const push = (minDist - dist) * 0.3;
+        n.x += (dx / dist) * push;
+        n.y += (dy / dist) * push;
+      }
+    }
+  }
+
+  renderPositions();
+  attractorRAF = requestAnimationFrame(attractorLoop);
+}
+
+// ═══════════════════════════════════════════════════════
+// CLICK-PULL: pull connected nodes toward clicked node
+// ═══════════════════════════════════════════════════════
+function clickPull(d) {
+  if (!currentGraph || !currentNodes) return;
+  if (clickPullRAF) cancelAnimationFrame(clickPullRAF);
+
+  const adj = currentGraph.adjacency;
+  const edgeWeights = currentGraph.edgeWeights;
+  const distances = bfsDistances(d.id, adj, 2);
+  const startTime = performance.now();
+  const duration = 500;
+
+  // Snapshot start positions for connected nodes
+  const startPos = new Map();
+  for (const n of currentNodes) {
+    if (n.id !== d.id && distances.has(n.id)) {
+      startPos.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+
+  function step(now) {
+    const t = Math.min(1, (now - startTime) / duration);
+    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+    for (const [id, from] of startPos) {
+      const n = currentGraph.nodeMap.get(id);
+      if (!n) continue;
+      const graphDist = distances.get(id);
+
+      // Compute target: pull toward d, with distance based on hop count and importance
+      const importanceSep = (n.radius || 4) + (d.radius || 4) + 8;
+      const edgeKey = d.id + '\0' + id;
+      const ew = edgeWeights.get(edgeKey) || edgeWeights.get(id + '\0' + d.id) || 1;
+      let targetDist;
+      if (graphDist === 1) {
+        targetDist = importanceSep + 15 / Math.min(3, ew);
+      } else {
+        targetDist = importanceSep + 60;
+      }
+
+      const dx = d.x - from.x, dy = d.y - from.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      if (dist <= targetDist) continue; // already close enough
+
+      const pullAmount = (dist - targetDist) * (graphDist === 1 ? 0.6 : 0.25);
+      const tx = from.x + (dx / dist) * pullAmount;
+      const ty = from.y + (dy / dist) * pullAmount;
+
+      n.x = from.x + (tx - from.x) * ease;
+      n.y = from.y + (ty - from.y) * ease;
+    }
+
+    // Collision resolution among pulled nodes
+    const pulled = [...startPos.keys()].map(id => currentGraph.nodeMap.get(id)).filter(Boolean);
+    for (let i = 0; i < pulled.length; i++) {
+      for (let j = i + 1; j < pulled.length; j++) {
+        const a = pulled[i], b = pulled[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = a.radius + b.radius + 6;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.3;
+          a.x -= (dx / dist) * push;
+          a.y -= (dy / dist) * push;
+          b.x += (dx / dist) * push;
+          b.y += (dy / dist) * push;
+        }
+      }
+    }
+
+    renderPositions();
+    if (t < 1) {
+      clickPullRAF = requestAnimationFrame(step);
+    } else {
+      clickPullRAF = null;
+      for (const n of currentNodes) {
+        savedPositions.set(n.id, { x: n.x, y: n.y });
+      }
+      pushArrangement('click-pull', [d.id]);
+    }
+  }
+  clickPullRAF = requestAnimationFrame(step);
+}
+
+function lockAttractor() {
+  if (attractorRAF) { cancelAnimationFrame(attractorRAF); attractorRAF = null; }
+
+  // Save positions for all moved nodes
+  if (currentNodes) {
+    for (const n of currentNodes) {
+      savedPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+  const id = attractorNode ? attractorNode.id : null;
+  gNodes.selectAll('circle').classed('attractor-glow', false);
+  attractorNode = null;
+  attractorHoldStrength = 0;
+  if (id) pushArrangement('attractor', [id]);
+}
+
+function releaseAttractor() {
+  if (attractorRAF) { cancelAnimationFrame(attractorRAF); attractorRAF = null; }
+  gNodes.selectAll('circle').classed('attractor-glow', false);
+  attractorNode = null;
+  attractorHoldStrength = 0;
+}
+
+// ═══════════════════════════════════════════════════════
+// NODE LOCKING
+// ═══════════════════════════════════════════════════════
+function lockSelectedNodes() {
+  if (selectedNodes.size === 0) return;
+  for (const id of selectedNodes) {
+    lockedNodes.add(id);
+    stickyNodes.add(id);
+    const n = currentGraph?.nodeMap.get(id);
+    if (n) savedPositions.set(id, { x: n.x, y: n.y });
+  }
+  updateLockUI();
+}
+
+function unlockNodes() {
+  lockedNodes.clear();
+  updateLockUI();
+}
+
+function updateLockUI() {
+  const btn = document.getElementById('lock-btn');
+  const indicator = document.getElementById('lock-indicator');
+  if (lockedNodes.size > 0) {
+    btn.classList.add('active');
+    indicator.style.display = '';
+    indicator.textContent = `Locked (${lockedNodes.size})`;
+    // Show locked glow on locked nodes
+    gNodes.selectAll('.node circle').classed('selected-glow', d => lockedNodes.has(d.id) || selectedNodes.has(d.id));
+  } else {
+    btn.classList.remove('active');
+    indicator.style.display = 'none';
+    gNodes.selectAll('.node circle').classed('selected-glow', d => selectedNodes.has(d.id));
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// X-KEY EDGE RELAXATION
+// ═══════════════════════════════════════════════════════
+let xRelaxFactor = 0; // 0 = current positions, 1 = fully back to T0
+let xT0Positions = null; // snapshot: where nodes were at X-press (to lerp back toward)
+let xStartPositions = null; // snapshot: where nodes are now (lerp from)
+
+// singleNode: if provided, only this node lerps to T0
+function startXForces(singleNode) {
+  if (xKeyRAF) return;
+  // Cancel any running arrangement animation to prevent position conflicts
+  if (animationRAF) { cancelAnimationFrame(animationRAF); animationRAF = null; }
+  xKeyHeld = true;
+  const xStartTime = performance.now();
+
+  // Snapshot current positions (start) and layout positions (T0)
+  xStartPositions = new Map();
+  xT0Positions = new Map();
+
+  if (singleNode) {
+    // Single-node mode: only move this one node
+    xStartPositions.set(singleNode.id, { x: singleNode.x, y: singleNode.y });
+    const t0 = initialLayoutPositions.get(singleNode.id);
+    xT0Positions.set(singleNode.id, t0 ? { x: t0.x, y: t0.y } : { x: singleNode.x, y: singleNode.y });
+  } else {
+    // Bulk mode: all unlocked nodes
+    for (const n of currentNodes) {
+      if (lockedNodes.has(n.id)) continue;
+      xStartPositions.set(n.id, { x: n.x, y: n.y });
+      const t0 = initialLayoutPositions.get(n.id);
+      xT0Positions.set(n.id, t0 ? { x: t0.x, y: t0.y } : { x: n.x, y: n.y });
+    }
+  }
+
+  function xLoop() {
+    if (!xKeyHeld || !currentNodes || !currentGraph) return;
+
+    const now = performance.now();
+    const elapsed = now - xStartTime;
+    // Ramp relaxation from 0 to 1 — single node: 0.5s, bulk: 3s
+    const duration = singleNode ? 500 : 3000;
+    xRelaxFactor = Math.min(1, elapsed / duration);
+
+    // Lerp target nodes from start positions back toward T0
+    for (const n of currentNodes) {
+      const start = xStartPositions.get(n.id);
+      const t0 = xT0Positions.get(n.id);
+      if (!start || !t0) continue;
+      n.x = start.x + (t0.x - start.x) * xRelaxFactor;
+      n.y = start.y + (t0.y - start.y) * xRelaxFactor;
+    }
+
+    renderPositions();
+    xKeyRAF = requestAnimationFrame(xLoop);
+  }
+  xKeyRAF = requestAnimationFrame(xLoop);
+}
+
+function stopXForces() {
+  xKeyHeld = false;
+  if (xKeyRAF) { cancelAnimationFrame(xKeyRAF); xKeyRAF = null; }
+
+  // Save positions of moved nodes
+  if (xStartPositions && currentGraph) {
+    for (const id of xStartPositions.keys()) {
+      const n = currentGraph.nodeMap.get(id);
+      if (n) {
+        stickyNodes.add(n.id);
+        savedPositions.set(n.id, { x: n.x, y: n.y });
+      }
+    }
+  }
+
+  pushArrangement('x-step', []);
+
+  xRelaxFactor = 0;
+  xStartPositions = null;
+  xT0Positions = null;
+}
+
+// ═══════════════════════════════════════════════════════
+// Z-KEY TIME TRAVEL (backwards through arrangement history)
+// ═══════════════════════════════════════════════════════
+function startZTimeTravel() {
+  if (zKeyRAF || !currentNodes) return;
+  if (spatialMemory.arrangements.length < 2) return;
+  zKeyHeld = true;
+  zTravelStartIndex = arrangementIndex;
+
+  const stepDuration = 3000; // ms per arrangement step (matches X rewind ramp)
+  let lastStepTime = performance.now();
+  let currentLerpFrom = null; // positions at start of current step
+  let currentLerpTo = null;   // target positions for current step
+  let stepStart = performance.now();
+
+  function snapshotCurrent() {
+    const m = new Map();
+    for (const n of currentNodes) {
+      m.set(n.id, { x: n.x, y: n.y });
+    }
+    return m;
+  }
+
+  function arrPositions(idx) {
+    const arr = spatialMemory.arrangements[idx];
+    if (!arr) return null;
+    const m = new Map();
+    for (const [id, pos] of Object.entries(arr.positions)) {
+      m.set(id, { x: pos[0], y: pos[1] });
+    }
+    return m;
+  }
+
+  // Start first step: lerp from current positions to previous arrangement
+  currentLerpFrom = snapshotCurrent();
+  const prevIdx = arrangementIndex - 1;
+  if (prevIdx < 0) { zKeyHeld = false; return; }
+  currentLerpTo = arrPositions(prevIdx);
+  arrangementIndex = prevIdx;
+  updateArrNav();
+
+  function zLoop() {
+    if (!zKeyHeld || !currentNodes) return;
+
+    const now = performance.now();
+    const elapsed = now - stepStart;
+    const t = Math.min(1, elapsed / stepDuration);
+    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+    // Lerp nodes toward current target
+    if (currentLerpFrom && currentLerpTo) {
+      for (const n of currentNodes) {
+        const from = currentLerpFrom.get(n.id);
+        const to = currentLerpTo.get(n.id);
+        if (from && to) {
+          n.x = from.x + (to.x - from.x) * ease;
+          n.y = from.y + (to.y - from.y) * ease;
+        }
+      }
+      renderPositions();
+    }
+
+    // When step completes, move to next arrangement back
+    if (t >= 1 && arrangementIndex > 0) {
+      currentLerpFrom = currentLerpTo;
+      const nextIdx = arrangementIndex - 1;
+      currentLerpTo = arrPositions(nextIdx);
+      arrangementIndex = nextIdx;
+      stepStart = now;
+      updateArrNav();
+    }
+
+    zKeyRAF = requestAnimationFrame(zLoop);
+  }
+  zKeyRAF = requestAnimationFrame(zLoop);
+}
+
+function stopZTimeTravel() {
+  zKeyHeld = false;
+  if (zKeyRAF) { cancelAnimationFrame(zKeyRAF); zKeyRAF = null; }
+
+  // Save current positions into savedPositions
+  if (currentNodes && currentGraph) {
+    for (const n of currentNodes) {
+      if (n.x != null) savedPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+
+  // Push a new arrangement capturing where we landed
+  pushArrangement('z-travel', []);
+}
+
+// Repulse nearby nodes toward T0 from a point in SVG space
+function repulseFromPoint(svgX, svgY) {
+  if (!currentNodes || !currentGraph) return;
+  const radius = 150; // affect nodes within this distance
+  const stepFactor = 0.25; // equivalent to ~0.75s of X rewind (3s ramp)
+  const duration = 300;
+
+  // Find nearby unlocked nodes
+  const targets = [];
+  for (const n of currentNodes) {
+    if (lockedNodes.has(n.id)) continue;
+    const dx = n.x - svgX, dy = n.y - svgY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > radius) continue;
+    const t0 = initialLayoutPositions.get(n.id);
+    if (!t0) continue;
+    const proximity = 1 - dist / radius; // 1 at center, 0 at edge
+    const factor = stepFactor * proximity;
+    targets.push({
+      node: n,
+      startX: n.x, startY: n.y,
+      targetX: n.x + (t0.x - n.x) * factor,
+      targetY: n.y + (t0.y - n.y) * factor,
+    });
+  }
+  if (!targets.length) return;
+
+  const startTime = performance.now();
+  function step() {
+    const t = Math.min(1, (performance.now() - startTime) / duration);
+    const ease = 1 - (1 - t) * (1 - t);
+    for (const { node, startX, startY, targetX, targetY } of targets) {
+      node.x = startX + (targetX - startX) * ease;
+      node.y = startY + (targetY - startY) * ease;
+    }
+    renderPositions();
+    if (t < 1) {
+      requestAnimationFrame(step);
+    } else {
+      for (const { node } of targets) {
+        stickyNodes.add(node.id);
+        savedPositions.set(node.id, { x: node.x, y: node.y });
+      }
+      pushArrangement('repulse', []);
+    }
+  }
+  requestAnimationFrame(step);
+}
+
+// Dismiss a single node to T0 (independent animation, multiple can run at once)
+function dismissNodeToT0(d) {
+  const t0 = initialLayoutPositions.get(d.id);
+  if (!t0) return;
+  const startX = d.x, startY = d.y;
+  const startTime = performance.now();
+  const duration = 500;
+
+  // Cancel any existing dismiss on this node
+  if (xDismissRAFs.has(d.id)) cancelAnimationFrame(xDismissRAFs.get(d.id));
+
+  function step() {
+    const t = Math.min(1, (performance.now() - startTime) / duration);
+    d.x = startX + (t0.x - startX) * t;
+    d.y = startY + (t0.y - startY) * t;
+    renderPositions();
+    if (t < 1) {
+      xDismissRAFs.set(d.id, requestAnimationFrame(step));
+    } else {
+      xDismissRAFs.delete(d.id);
+      stickyNodes.add(d.id);
+      savedPositions.set(d.id, { x: d.x, y: d.y });
+    }
+  }
+  xDismissRAFs.set(d.id, requestAnimationFrame(step));
+}
+
+// ═══════════════════════════════════════════════════════
+// STRANGER-GATHER (pull neighbors, except selected, toward a clicked node)
+// ═══════════════════════════════════════════════════════
+function startNeighborGather(anchorNode) {
+  if (neighborGatherRAF || !currentGraph || groupMoveActive) return;
+  neighborGatherHeld = true;
+  const adj = currentGraph.adjacency;
+  const neighborIds = adj.get(anchorNode.id);
+  if (!neighborIds || neighborIds.size === 0) return;
+
+  let lastFrameTime = performance.now();
+  const startTime = performance.now();
+
+  function loop() {
+    if (!neighborGatherHeld || !currentNodes || !currentGraph) return;
+
+    const now = performance.now();
+    const dt = Math.min(now - lastFrameTime, 50) / 16.67;
+    lastFrameTime = now;
+    const ramp = Math.min(1, (now - startTime) / 1000);
+
+    // Pin anchor position — restore after all physics
+    const anchorX = anchorNode.x, anchorY = anchorNode.y;
+
+    // Pull neighbors toward anchor node (skip selected and locked nodes)
+    for (const nid of neighborIds) {
+      const n = currentGraph.nodeMap.get(nid);
+      if (!n || lockedNodes.has(n.id) || selectedNodes.has(n.id)) continue;
+      const dx = anchorX - n.x, dy = anchorY - n.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const pull = dist * 0.03 * ramp * dt;
+      n.x += (dx / dist) * pull;
+      n.y += (dy / dist) * pull;
+    }
+
+    // Collision resolution among neighbors + against anchor (anchor never moves, skip selected)
+    const neighbors = [...neighborIds].map(id => currentGraph.nodeMap.get(id)).filter(n => n && !selectedNodes.has(n.id));
+    for (let i = 0; i < neighbors.length; i++) {
+      for (let j = i + 1; j < neighbors.length; j++) {
+        const a = neighbors[i], b = neighbors[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = a.radius + b.radius + 6;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.4;
+          a.x -= (dx / dist) * push;
+          a.y -= (dy / dist) * push;
+          b.x += (dx / dist) * push;
+          b.y += (dy / dist) * push;
+        }
+      }
+      // Push neighbor away from anchor (only neighbor moves)
+      const dx = neighbors[i].x - anchorX, dy = neighbors[i].y - anchorY;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const minDist = neighbors[i].radius + anchorNode.radius + 6;
+      if (dist < minDist) {
+        const push = (minDist - dist) * 0.5;
+        neighbors[i].x += (dx / dist) * push;
+        neighbors[i].y += (dy / dist) * push;
+      }
+    }
+
+    // Force anchor back to pinned position (in case anything else touched it)
+    anchorNode.x = anchorX;
+    anchorNode.y = anchorY;
+
+    renderPositions();
+    neighborGatherRAF = requestAnimationFrame(loop);
+  }
+  neighborGatherRAF = requestAnimationFrame(loop);
+}
+
+function stopNeighborGather() {
+  neighborGatherHeld = false;
+  if (neighborGatherRAF) { cancelAnimationFrame(neighborGatherRAF); neighborGatherRAF = null; }
+  // Save positions of pulled neighbors
+  if (currentGraph) {
+    for (const n of currentNodes) {
+      if (n.x != null) {
+        stickyNodes.add(n.id);
+        savedPositions.set(n.id, { x: n.x, y: n.y });
+      }
+    }
+  }
+  pushArrangement('stranger-gather', []);
+}
+
+// ═══════════════════════════════════════════════════════
+// QUICK-GATHER / GROUP-GATHER (pull selected nodes toward centroid or target)
+// ═══════════════════════════════════════════════════════
+let spacePullIsGroupGather = false;
+function startSpacePull(targetNode) {
+  if (spacePullRAF || selectedNodes.size < 2 || groupMoveActive) return;
+  spacePullHeld = true;
+  spacePullIsGroupGather = !!targetNode;
+  let lastFrameTime = performance.now();
+  const startTime = performance.now();
+
+  function loop() {
+    if (!spacePullHeld || !currentNodes || !currentGraph) return;
+
+    const now = performance.now();
+    const dt = Math.min(now - lastFrameTime, 50) / 16.67;
+    lastFrameTime = now;
+    const ramp = Math.min(1, (now - startTime) / 1000);
+
+    // Pull toward target node if provided, otherwise toward centroid
+    let cx, cy;
+    if (targetNode) {
+      cx = targetNode.x;
+      cy = targetNode.y;
+    } else {
+      cx = 0; cy = 0; let count = 0;
+      for (const n of currentNodes) {
+        if (!selectedNodes.has(n.id)) continue;
+        cx += n.x; cy += n.y; count++;
+      }
+      if (count < 2) { spacePullRAF = requestAnimationFrame(loop); return; }
+      cx /= count; cy /= count;
+    }
+
+    // Pull selected nodes toward target
+    for (const n of currentNodes) {
+      if (!selectedNodes.has(n.id) || n === targetNode) continue;
+      const dx = cx - n.x, dy = cy - n.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const pull = dist * 0.03 * ramp * dt;
+      n.x += (dx / dist) * pull;
+      n.y += (dy / dist) * pull;
+    }
+
+    // Collision resolution among selected nodes
+    const selected = currentNodes.filter(n => selectedNodes.has(n.id));
+    for (let i = 0; i < selected.length; i++) {
+      for (let j = i + 1; j < selected.length; j++) {
+        const a = selected[i], b = selected[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        const minDist = a.radius + b.radius + 6;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.4;
+          a.x -= (dx / dist) * push;
+          a.y -= (dy / dist) * push;
+          b.x += (dx / dist) * push;
+          b.y += (dy / dist) * push;
+        }
+      }
+    }
+
+    renderPositions();
+    spacePullRAF = requestAnimationFrame(loop);
+  }
+  spacePullRAF = requestAnimationFrame(loop);
+}
+
+function stopSpacePull() {
+  spacePullHeld = false;
+  if (spacePullRAF) { cancelAnimationFrame(spacePullRAF); spacePullRAF = null; }
+  // Save positions of pulled nodes
+  for (const id of selectedNodes) {
+    const n = currentGraph?.nodeMap.get(id);
+    if (n) {
+      stickyNodes.add(n.id);
+      savedPositions.set(n.id, { x: n.x, y: n.y });
+    }
+  }
+  pushArrangement(spacePullIsGroupGather ? 'group-gather' : 'quick-gather', [...selectedNodes].slice(0, 5));
+}
+
+// ═══════════════════════════════════════════════════════
+// KEYBOARD
+// ═══════════════════════════════════════════════════════
+document.addEventListener('keydown', (e) => {
+  // SPACEBAR: gather neighbors, pull selected, or unlock
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (!e.repeat) {
+      const anchorNode = forcePressDragNode || selectedNode;
+      if (anchorNode && e.shiftKey && selectedNodes.size >= 2) {
+        // Click node + Shift+Space: pull selected nodes toward clicked node
+        startSpacePull(anchorNode);
+      } else if (anchorNode && !selectedNodes.has(anchorNode.id)) {
+        // Click node + Space: pull neighbors (except selected) toward clicked node
+        startNeighborGather(anchorNode);
+      } else if (selectedNodes.size >= 2) {
+        startSpacePull(null);
+      } else if (lockedNodes.size > 0) {
+        unlockNodes();
+      }
+    }
+    return;
+  }
+
+  // X: hold to relax
+  if (e.code === 'KeyX' && !e.repeat && currentNodes) {
+    e.preventDefault();
+    xKeyDown = true;
+    if (e.shiftKey) return; // Shift+X: dismiss-on-click mode, don't start bulk
+    if (!attractorNode) {
+      startXForces(forcePressDragNode || null);
+    }
+    return;
+  }
+
+  // Z: hold to time-travel backwards through arrangement history
+  if (e.code === 'KeyZ' && !e.repeat && currentNodes && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault();
+    zKeyDown = true;
+    startZTimeTravel();
+    return;
+  }
+
+  // Alt+Left / Alt+Right: arrangement navigation
+  if (e.altKey && e.code === 'ArrowLeft') {
+    e.preventDefault();
+    navigateArrangement(-1);
+    return;
+  }
+  if (e.altKey && e.code === 'ArrowRight') {
+    e.preventDefault();
+    navigateArrangement(1);
+    return;
+  }
+
+  // Enter: create user cluster from selected nodes
+  if (e.code === 'Enter' && selectedNodes.size >= 2 && !e.target.closest('input, select')) {
+    e.preventDefault();
+    createUserCluster([...selectedNodes]);
+    return;
+  }
+
+  // Escape: close info panel, exit comparison mode, or clear selection
+  if (e.code === 'Escape') {
+    if (comparisonMode) { exitComparisonMode(); return; }
+    if (selectedNodes.size > 0) {
+      selectedNodes.clear();
+      lockedNodes.clear();
+      gNodes.selectAll('circle').classed('selected-glow', false);
+      updateLockUI();
+      return;
+    }
+    document.getElementById('info-panel').classList.remove('open');
+    selectedNode = null;
+  }
+});
+
+document.addEventListener('keyup', (e) => {
+  if (e.code === 'KeyX') {
+    xKeyDown = false;
+    if (xKeyHeld) stopXForces();
+  }
+  if (e.code === 'KeyZ') {
+    zKeyDown = false;
+    if (zKeyHeld) stopZTimeTravel();
+  }
+  if (e.code === 'Space') {
+    if (spacePullHeld) stopSpacePull();
+    if (neighborGatherHeld) stopNeighborGather();
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// FORCE TOUCH / PRESSURE (document-level for drag+force-press)
+// ═══════════════════════════════════════════════════════
+// Webkit Force Touch (Safari)
+document.addEventListener('webkitmouseforcewillbegin', (e) => {
+  if (forcePressDragNode) e.preventDefault();
+  hasForceTouch = true;
+});
+document.addEventListener('webkitmouseforcedown', (e) => {
+  if (forcePressDragNode && !attractorNode) {
+    startAttractor(forcePressDragNode);
+  }
+});
+document.addEventListener('webkitmouseforceup', (e) => {
+  if (attractorNode) lockAttractor();
+});
+// Pointer Events pressure fallback (Chrome/Firefox) — for drag+force-press
+document.addEventListener('pointermove', (e) => {
+  if (hasForceTouch || !forcePressDragNode) return;
+  if (e.pressure > 0 && e.pressure !== 0.5) hasPressure = true;
+  if (!hasPressure) return;
+  if (e.pressure >= PRESSURE_THRESHOLD && !pressureActive) {
+    pressureActive = true;
+    if (!attractorNode) startAttractor(forcePressDragNode);
+  } else if (e.pressure < PRESSURE_THRESHOLD && pressureActive) {
+    pressureActive = false;
+    if (attractorNode) lockAttractor();
+  }
+});
+// Full release cleanup
+document.addEventListener('mouseup', () => {
+  pressureActive = false;
+  if (attractorNode) lockAttractor();
+});
+document.addEventListener('pointerup', () => {
+  pressureActive = false;
+  if (attractorNode) lockAttractor();
+});
+
+// ═══════════════════════════════════════════════════════
+// RE-LAYOUT
+// ═══════════════════════════════════════════════════════
+function reLayout() {
+  if (!currentNodes || !currentLinks) return;
+
+  // Save old positions
+  const oldPositions = new Map();
+  for (const n of currentNodes) oldPositions.set(n.id, { x: n.x, y: n.y });
+
+  // Compute fresh layout (skip sticky nodes will be handled after)
+  const tempSticky = new Set(stickyNodes);
+  computeLayout(currentNodes, currentLinks, {
+    isWarmRestart: false,
+    spatialEdgesMap: spatialMemory.spatialEdges,
+  });
+
+  // Sticky nodes: blend toward new position but stay mostly where they are
+  for (const n of currentNodes) {
+    if (tempSticky.has(n.id) && oldPositions.has(n.id)) {
+      const old = oldPositions.get(n.id);
+      n.x = old.x * 0.7 + n.x * 0.3;
+      n.y = old.y * 0.7 + n.y * 0.3;
+    }
+  }
+
+  // Collect target positions
+  const targetPositions = new Map();
+  for (const n of currentNodes) targetPositions.set(n.id, { x: n.x, y: n.y });
+
+  // Restore old positions (we'll animate to new)
+  for (const n of currentNodes) {
+    const old = oldPositions.get(n.id);
+    if (old) { n.x = old.x; n.y = old.y; }
+  }
+
+  animateToPositions(targetPositions, 400);
+  pushArrangement('relayout');
+}
+
+// ═══════════════════════════════════════════════════════
+// SEARCH
+// ═══════════════════════════════════════════════════════
+document.getElementById('search').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase();
+  if (!q) { clearHighlight(); return; }
+  const matches = new Set();
+  gNodes.selectAll('.node').each(d => {
+    if (d.id.toLowerCase().includes(q)) matches.add(d.id);
+  });
+  gNodes.selectAll('.node').style('opacity', d => matches.has(d.id) ? 1 : 0.08);
+  gLabels.selectAll('text').attr('opacity', d => matches.has(d.id) ? 1 : 0.05);
+  gLinks.selectAll('.link').attr('stroke-opacity', l => {
+    if (matches.has(l.source) || matches.has(l.target)) return 0.4;
+    return 0.01;
+  });
+});
+
+// ═══════════════════════════════════════════════════════
+// CONTROLS
+// ═══════════════════════════════════════════════════════
+function getOpts() {
+  return {
+    viewMode: document.getElementById('view-mode').value,
+    edgeMode: document.getElementById('edge-mode').value,
+    minShared: parseInt(document.getElementById('min-shared').value),
+  };
+}
+
+function rebuild() {
+  if (!analysisResult) return;
+  const clusters = clusterFunctions(analysisResult);
+  const clusterNames = nameClusters(analysisResult, clusters);
+  currentClusterNames = clusterNames;
+  const affinities = computeAffinities(analysisResult, clusters, clusterNames);
+  const graph = buildGraph(analysisResult, clusters, clusterNames, affinities, getOpts());
+  renderGraph(graph, analysisResult, clusters, clusterNames);
+}
+
+document.getElementById('view-mode').addEventListener('change', () => { stickyNodes.clear(); savedPositions.clear(); rebuild(); });
+document.getElementById('edge-mode').addEventListener('change', rebuild);
+document.getElementById('min-shared').addEventListener('input', e => {
+  document.getElementById('min-shared-val').textContent = e.target.value;
+  rebuild();
+});
+document.getElementById('show-labels').addEventListener('change', () => applySemanticZoom());
+document.getElementById('show-edges').addEventListener('change', () => {
+  const show = document.getElementById('show-edges').checked;
+  gLinks.selectAll('.link').style('display', show ? null : 'none');
+});
+document.getElementById('show-hulls').addEventListener('change', () => {
+  const showHulls = document.getElementById('show-hulls').checked;
+  if (showHulls && currentNodes) {
+    currentHullClusterIds = [...new Set(currentNodes.filter(n => n.cluster != null && n.cluster >= 0).map(n => n.cluster))];
+    renderHulls();
+  } else {
+    currentHullClusterIds = null;
+    gHulls.selectAll('path').remove();
+  }
+});
+
+document.getElementById('lock-btn').addEventListener('click', () => {
+  if (lockedNodes.size > 0 && selectedNodes.size === 0) {
+    unlockNodes();
+  } else {
+    lockSelectedNodes();
+  }
+});
+
+// Close info panel on background click
+document.getElementById('graph').addEventListener('click', e => {
+  if (e.target.tagName === 'svg') {
+    document.getElementById('info-panel').classList.remove('open');
+    selectedNode = null;
+    if (comparisonMode) exitComparisonMode();
+  }
+});
+
+// Ctrl+click on background: repulse nearby nodes toward T0
+document.getElementById('graph').addEventListener('contextmenu', e => {
+  if (e.target.tagName === 'svg' || e.target.classList.contains('hull')) {
+    e.preventDefault();
+    // Convert screen coords to SVG coords using current zoom transform
+    const transform = d3.zoomTransform(svg.node());
+    const [svgX, svgY] = transform.invert([e.offsetX, e.offsetY]);
+    repulseFromPoint(svgX, svgY);
+  }
+});
+
+// Arrangement nav buttons
+document.getElementById('arr-reset').addEventListener('click', () => {
+  // Clear all user modifications, spatial memory, and localStorage
+  stickyNodes.clear();
+  savedPositions.clear();
+  lockedNodes.clear();
+  selectedNodes.clear();
+  initialLayoutPositions.clear();
+  spatialMemory = { arrangements: [], spatialEdges: {}, clickLog: [] };
+  arrangementIndex = -1;
+  localStorage.removeItem(SPATIAL_KEY);
+  gNodes.selectAll('circle').classed('selected-glow', false);
+  updateLockUI();
+  rebuild();
+});
+document.getElementById('arr-first').addEventListener('click', () => navigateToArrangement(0));
+document.getElementById('arr-back').addEventListener('click', () => navigateArrangement(-1));
+document.getElementById('arr-fwd').addEventListener('click', () => navigateArrangement(1));
+document.getElementById('arr-last').addEventListener('click', () => navigateToArrangement(spatialMemory.arrangements.length - 1));
+
+// ═══════════════════════════════════════════════════════
+// FOCUS SSE
+// ═══════════════════════════════════════════════════════
+let currentFocus = null;
+
+function connectFocusSSE() {
+  const source = new EventSource(location.origin + '/focus-events');
+  source.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.timestamp && Date.now() - data.timestamp > 30000) {
+        applyFocus(null);
+      } else {
+        applyFocus(data);
+      }
+    } catch { applyFocus(null); }
+  };
+  source.onerror = () => {
+    document.getElementById('focus-panel').classList.remove('active');
+  };
+}
+
+function applyFocus(data) {
+  const panel = document.getElementById('focus-panel');
+  currentFocus = data;
+
+  if (!data || !data.focus || data.focus.length === 0) {
+    panel.classList.remove('active');
+    if (gNodes) {
+      gNodes.selectAll('.node').style('opacity', 1);
+      gNodes.selectAll('circle').classed('focus-glow', false);
+      clearHighlight();
+    }
+    return;
+  }
+
+  panel.classList.add('active');
+  panel.querySelector('.focus-step').textContent = data.step || '';
+  panel.querySelector('.focus-desc').textContent = data.description || '';
+  panel.querySelector('.focus-targets').innerHTML = data.focus.map(f => {
+    const level = f.relevance >= 0.7 ? 'high' : f.relevance >= 0.4 ? 'med' : 'low';
+    return `<span class="focus-tag ${level}">${f.name} ${(f.relevance * 100)|0}%</span>`;
+  }).join('');
+
+  if (!gNodes || !gLinks) return;
+  const relevanceMap = new Map();
+  for (const f of data.focus) relevanceMap.set(f.name, f.relevance);
+
+  // BFS spread
+  const adj = currentGraph?.adjacency || new Map();
+  const queue = [...data.focus.map(f => ({ id: f.name, rel: f.relevance, depth: 0 }))];
+  const visited = new Set(data.focus.map(f => f.name));
+  while (queue.length) {
+    const { id, rel, depth } = queue.shift();
+    if (depth >= 3) continue;
+    for (const nb of (adj.get(id) || [])) {
+      if (!visited.has(nb)) {
+        visited.add(nb);
+        const spreadRel = rel * 0.4;
+        if (spreadRel > (relevanceMap.get(nb) || 0)) relevanceMap.set(nb, spreadRel);
+        queue.push({ id: nb, rel: spreadRel, depth: depth + 1 });
+      }
+    }
+  }
+
+  gNodes.selectAll('.node').style('opacity', d => {
+    const r = relevanceMap.get(d.id);
+    return r != null ? 0.3 + r * 0.7 : 0.06;
+  });
+  gNodes.selectAll('circle').classed('focus-glow', d => (relevanceMap.get(d.id) || 0) >= 0.7);
+
+  gLinks.selectAll('.link').attr('stroke-opacity', l => {
+    const sr = relevanceMap.get(l.source) || 0;
+    const tr = relevanceMap.get(l.target) || 0;
+    const minR = Math.min(sr, tr);
+    return minR >= 0.5 ? 0.7 : minR >= 0.2 ? 0.25 : minR > 0 ? 0.08 : 0.015;
+  }).attr('stroke-width', l => {
+    const sr = relevanceMap.get(l.source) || 0;
+    const tr = relevanceMap.get(l.target) || 0;
+    const minR = Math.min(sr, tr);
+    return minR >= 0.5 ? Math.min(4, 1.5 + (l.weight || 1) * 0.5) : Math.min(2, 0.3 + (l.weight || 1) * 0.15);
+  });
+
+  gLabels.selectAll('text').attr('opacity', d => {
+    const r = relevanceMap.get(d.id) || 0;
+    return r >= 0.5 ? 1 : r >= 0.2 ? 0.4 : 0.04;
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+// MAIN LOOP
+// ═══════════════════════════════════════════════════════
+async function loadAndAnalyze(force) {
+  if (!force && !document.getElementById('live-reload').checked) return;
+  const statusEl = document.getElementById('status');
+  try {
+    const [html, codemapMd] = await Promise.all([
+      fetch(SRC).then(r => r.text()),
+      fetch(CODEMAP_SRC).then(r => r.ok ? r.text() : null).catch(() => null),
+    ]);
+    const h = hashStr(html + (codemapMd || ''));
+    if (h === lastHash) return;
+    lastHash = h;
+
+    statusEl.textContent = 'parsing...';
+    if (codemapMd) codemapSections = parseCodemap(codemapMd);
+
+    const { code, lineOffset } = extractJS(html);
+    const result = analyzeCode(code, lineOffset);
+    if (!result) { statusEl.textContent = 'parse error'; return; }
+
+    analysisResult = result;
+    const nSys = codemapSections ? codemapSections.size : 0;
+    statusEl.textContent = `live — ${result.functions.size} funcs, ${nSys} systems`;
+    statusEl.className = 'live';
+    rebuild();
+  } catch (e) {
+    statusEl.textContent = 'fetch error: ' + e.message;
+    console.error(e);
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════
+loadSpatialMemory();
+initSVG();
+
+window.addEventListener('resize', () => {
+  width = window.innerWidth;
+  height = window.innerHeight - 44;
+  svg.attr('width', width).attr('height', height);
+});
+
+loadAndAnalyze(true);
+setInterval(() => loadAndAnalyze(false), REFRESH_MS);
+
+document.getElementById('live-reload').addEventListener('change', (e) => {
+  const statusEl = document.getElementById('status');
+  if (e.target.checked) {
+    lastHash = null;
+    statusEl.textContent = 'resuming...';
+    statusEl.className = '';
+  } else {
+    statusEl.textContent = 'paused';
+    statusEl.className = '';
+  }
+});
+
+connectFocusSSE();
+updateArrNav();
+
+// Restore last arrangement positions if available
+if (spatialMemory.arrangements.length > 0) {
+  const last = spatialMemory.arrangements[spatialMemory.arrangements.length - 1];
+  for (const [id, pos] of Object.entries(last.positions)) {
+    savedPositions.set(id, { x: pos[0], y: pos[1] });
+  }
+}
+</script>
+</body>
+</html>

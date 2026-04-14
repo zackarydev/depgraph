@@ -11,13 +11,13 @@
  */
 
 import { resetToT0, resetAllToT0 } from '../layout/positions.js';
+import { descentStep } from '../layout/gradient.js';
 
 /**
  * @typedef {Object} ResetState
  * @property {boolean} active - whether X is held
  * @property {boolean} ctrlOnly - Ctrl+X mode (weights only)
  * @property {number} elapsed - ms since X pressed
- * @property {number} decayRate - lerp factor per second (0..1)
  */
 
 /**
@@ -30,38 +30,53 @@ export function startReset(ctrlHeld = false) {
     active: true,
     ctrlOnly: ctrlHeld,
     elapsed: 0,
-    decayRate: 2.0,
   };
 }
 
 /**
- * Per-frame decay: lerp all unlocked node positions toward T0.
- * Returns the set of node ids that were moved.
+ * Per-frame relax: runs gradient descent so all edges approach their
+ * energy minimum. This is the spec'd behavior — X "is a restoring force"
+ * toward equilibrium, not a lerp to stale seed coordinates.
  *
  * @param {ResetState} reset
  * @param {number} dt - ms since last frame
  * @param {import('../layout/positions.js').PositionMap} posMap
+ * @param {Map<string, import('../core/types.js').Edge>} edges
+ * @param {import('../core/types.js').WeightVector} [W]
  * @returns {string[]} ids of nodes that moved
  */
-export function updateReset(reset, dt, posMap) {
+export function updateReset(reset, dt, posMap, edges, W) {
   if (!reset.active || reset.ctrlOnly) return [];
-
   reset.elapsed += dt;
-  const t = Math.min(1, (reset.decayRate * dt) / 1000);
-  const moved = [];
+  if (!edges) return [];
 
+  // Temporarily treat sticky nodes as non-sticky so they participate fully:
+  // X is explicitly a relaxation gesture and should overpower drag stickiness.
+  const prevSticky = new Map();
   for (const [id, ps] of posMap.positions) {
-    if (ps.locked) continue;
-
-    const dx = ps.t0x - ps.x;
-    const dy = ps.t0y - ps.y;
-    if (Math.abs(dx) < 0.1 && Math.abs(dy) < 0.1) continue;
-
-    ps.x += dx * t;
-    ps.y += dy * t;
-    moved.push(id);
+    if (ps.sticky) {
+      prevSticky.set(id, true);
+      ps.sticky = false;
+    }
   }
 
+  // Snapshot pre-step positions so we can report which nodes actually moved.
+  const pre = new Map();
+  for (const [id, ps] of posMap.positions) pre.set(id, { x: ps.x, y: ps.y });
+
+  descentStep(posMap, edges, W, { eta: 0.25 });
+
+  for (const [id, sticky] of prevSticky) {
+    const ps = posMap.positions.get(id);
+    if (ps) ps.sticky = sticky;
+  }
+
+  const moved = [];
+  for (const [id, ps] of posMap.positions) {
+    const p = pre.get(id);
+    if (!p) continue;
+    if (Math.abs(ps.x - p.x) > 0.01 || Math.abs(ps.y - p.y) > 0.01) moved.push(id);
+  }
   return moved;
 }
 

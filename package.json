@@ -7,7 +7,10 @@
   "scripts": {
     "test": "node --test --test-reporter=spec --test-concurrency=1 test/",
     "test:visual": "npx playwright test",
-    "test:visual:show": "npx playwright test --headed"
+    "test:visual:show": "npx playwright test --headed",
+    "start": "node depgraph-server.mjs",
+    "dev": "node depgraph-server.mjs --watch src/",
+    "serve": "node depgraph-server.mjs --port 3000"
   },
   "keywords": [],
   "author": "",

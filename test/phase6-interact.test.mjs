@@ -277,11 +277,11 @@ describe('interact/keyboard', () => {
     assert.equal(ks.activeMode, null);
   });
 
-  it('Z key starts time-travel mode', () => {
+  it('Z key starts arrangement-travel (spatial memory rewind)', () => {
     const ks = createKeyState();
     const action = keyDown(ks, 'z', {});
-    assert.equal(action.action, 'time-travel-start');
-    assert.equal(ks.activeMode, 'time-travel');
+    assert.equal(action.action, 'arrangement-back-start');
+    assert.equal(ks.activeMode, 'arrangement-travel');
   });
 
   it('Space starts gather mode', () => {
@@ -366,31 +366,39 @@ describe('interact/reset', () => {
     assert.ok(rs.ctrlOnly);
   });
 
-  it('updateReset moves nodes toward T0', () => {
-    const pm = makePosMap([['a', 100, 100]]);
-    // T0 is (100,100), move it away
-    pm.positions.get('a').x = 200;
-    pm.positions.get('a').y = 200;
+  it('updateReset relaxes nodes along the edge gradient', () => {
+    // Two nodes with an edge: descent should pull/push them toward the
+    // target rest length (DEFAULT_TARGET_DIST = 100). Seed them far apart.
+    const pm = makePosMap([['a', 0, 0], ['b', 1000, 0]]);
+    const edges = makeEdgeMap({ id: 'a->b', source: 'a', target: 'b', layer: 'ref', weight: 1 });
 
+    const bx0 = pm.positions.get('b').x;
+    const rs = startReset(false);
+    const moved = updateReset(rs, 16, pm, edges);
+
+    assert.ok(moved.length > 0, 'descent should report movement');
+    // 'b' should move toward 'a' (smaller x)
+    assert.ok(pm.positions.get('b').x < bx0);
+  });
+
+  it('updateReset is a no-op when no edges are supplied', () => {
+    const pm = makePosMap([['a', 100, 100]]);
     const rs = startReset(false);
     const moved = updateReset(rs, 500, pm);
-
-    assert.ok(moved.length > 0);
-    // Should have moved toward T0 (100,100)
-    assert.ok(pm.positions.get('a').x < 200);
-    assert.ok(pm.positions.get('a').y < 200);
+    assert.equal(moved.length, 0);
+    assert.equal(pm.positions.get('a').x, 100);
   });
 
   it('updateReset skips locked nodes', () => {
-    const pm = makePosMap([['a', 100, 100]]);
-    pm.positions.get('a').x = 200;
+    const pm = makePosMap([['a', 0, 0], ['b', 1000, 0]]);
+    const edges = makeEdgeMap({ id: 'a->b', source: 'a', target: 'b', layer: 'ref', weight: 1 });
     pm.positions.get('a').locked = true;
 
     const rs = startReset(false);
-    const moved = updateReset(rs, 500, pm);
-
-    assert.equal(moved.length, 0);
-    assert.equal(pm.positions.get('a').x, 200);
+    updateReset(rs, 16, pm, edges);
+    // 'a' stays put; 'b' is free to move.
+    assert.equal(pm.positions.get('a').x, 0);
+    assert.equal(pm.positions.get('a').y, 0);
   });
 
   it('updateReset does nothing in ctrlOnly mode', () => {

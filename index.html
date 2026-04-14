@@ -6,15 +6,72 @@
   <title>Depgraph</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; color: #ccc; font-family: system-ui, sans-serif; }
-    #viewport { width: 100%; height: 100%; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden;
+      background: #0a0a0f; color: #ccc;
+      font-family: 'SF Mono', 'Fira Code', ui-monospace, Menlo, monospace;
+      user-select: none; -webkit-user-select: none;
+    }
+    #viewport { position: fixed; top: 36px; left: 0; right: 0; bottom: 0; }
     svg { width: 100%; height: 100%; }
+
+    /* Top toolbar — matches old_versions/index.html styling */
+    #hud-bar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+      background: #111118; border-bottom: 1px solid #2a2a35;
+      padding: 8px 16px;
+      display: flex; align-items: center; gap: 16px;
+      font-size: 12px; height: 36px;
+    }
+    #hud-bar strong { color: #e8e8f0; }
+    #hud-bar .sep { width: 1px; height: 20px; background: #333; }
+    #hud-bar .stat { color: #888; }
+    #hud-bar .stat span { color: #ccc; }
+    #hud-bar .hint { color: #555; margin-left: auto; font-size: 11px; }
+
+    /* Arrangement navigation — bottom center */
+    #arr-nav {
+      position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+      z-index: 5;
+      background: #111118dd; border: 1px solid #2a2a35; border-radius: 6px;
+      padding: 6px 14px; font-size: 11px;
+      display: flex; align-items: center; gap: 10px;
+      opacity: 0; transition: opacity 0.3s; pointer-events: none;
+    }
+    #arr-nav.visible { opacity: 1; pointer-events: auto; }
+    #arr-nav button {
+      background: #1a1a25; color: #888;
+      border: 1px solid #333; border-radius: 4px;
+      padding: 3px 10px;
+      font-family: inherit; font-size: 11px; cursor: pointer;
+    }
+    #arr-nav button:hover:not(:disabled) { color: #ccc; border-color: #555; }
+    #arr-nav button:disabled { opacity: 0.3; cursor: default; }
+    #arr-nav .arr-label { color: #888; min-width: 56px; text-align: center; }
   </style>
 </head>
 <body>
+  <div id="hud-bar">
+    <strong>depgraph</strong>
+    <div class="sep"></div>
+    <div class="stat">nodes: <span data-hud="nodes">0</span></div>
+    <div class="stat">edges: <span data-hud="edges">0</span></div>
+    <div class="sep"></div>
+    <div class="stat">cursor: <span data-hud="cursor">t0</span></div>
+    <div class="stat">arr: <span data-hud="arr">0 / 0</span></div>
+    <div class="hint">hold Z to rewind layout · hold X to relax · drag to move</div>
+  </div>
+
   <div id="viewport">
     <svg id="graph"></svg>
   </div>
+
+  <div id="arr-nav">
+    <button data-arr="back" title="Previous arrangement">&larr;</button>
+    <span class="arr-label" data-arr="label">—</span>
+    <button data-arr="fwd" title="Next arrangement">&rarr;</button>
+  </div>
+
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script type="module" src="src/main.js"></script>
 </body>

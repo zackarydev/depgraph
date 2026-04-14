@@ -54,6 +54,10 @@ export function initSVG(container, options) {
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   container.appendChild(svg);
 
+  // <defs> holds per-edge linearGradients reused by fullRender.
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  svg.appendChild(defs);
+
   // Root group that gets zoom-transformed
   const root = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   root.setAttribute('class', 'depgraph-root');
@@ -70,22 +74,11 @@ export function initSVG(container, options) {
 
   const ctx = {
     svg,
+    defs,
     root,
     layers,
     transform: { x: 0, y: 0, k: 1 },
   };
-
-  // Wire D3 zoom if available
-  if (typeof d3 !== 'undefined' && d3.zoom) {
-    const zoom = d3.zoom()
-      .scaleExtent([0.1, 12])
-      .on('zoom', (event) => {
-        const t = event.transform;
-        root.setAttribute('transform', `translate(${t.x},${t.y}) scale(${t.k})`);
-        ctx.transform = { x: t.x, y: t.y, k: t.k };
-      });
-    d3.select(svg).call(zoom);
-  }
 
   return ctx;
 }

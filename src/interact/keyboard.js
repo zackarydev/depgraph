@@ -24,7 +24,7 @@
  * Trace and semantic-zoom are read-only overlays and run concurrently.
  */
 const POSITION_MODES = new Set([
-  'drag', 'reset', 'time-travel', 'gather', 'attractor',
+  'drag', 'reset', 'time-travel', 'gather', 'attractor', 'arrangement-travel',
 ]);
 
 const OVERLAY_MODES = new Set([
@@ -62,10 +62,11 @@ export function keyDown(state, key, modifiers = {}) {
     return { action: 'reset-start', ctrl, shift };
   }
 
-  // Z-key: time travel
+  // Z-key: walk backward through the arrangement stack (spatial memory).
+  // Distinct from history time-travel which lives on Alt+Arrow.
   if (key === 'z' && !POSITION_MODES.has(state.activeMode)) {
-    state.activeMode = 'time-travel';
-    return { action: 'time-travel-start', shift };
+    state.activeMode = 'arrangement-travel';
+    return { action: 'arrangement-back-start', shift };
   }
 
   // Space: gather (various modes)
@@ -138,9 +139,9 @@ export function keyUp(state, key) {
     return { action: 'reset-stop' };
   }
 
-  if (key === 'z' && state.activeMode === 'time-travel') {
+  if (key === 'z' && state.activeMode === 'arrangement-travel') {
     state.activeMode = null;
-    return { action: 'time-travel-stop' };
+    return { action: 'arrangement-back-stop' };
   }
 
   if (key === ' ' && state.activeMode === 'gather') {

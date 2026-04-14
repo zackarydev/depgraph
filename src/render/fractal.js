@@ -123,22 +123,30 @@ export function computeRenderPlan(params) {
     }
   }
 
+  const visitedClusters = new Set();
   renderGraphRecursive(
     topNodes, edges, clusters, clusterMembers, clusterIndex,
-    posMap, context, zoom, 0, budget, plan
+    posMap, context, zoom, 0, budget, plan, visitedClusters
   );
 
   return plan;
 }
 
+const MAX_FRACTAL_DEPTH = 16;
+
 /**
  * Recursive rendering function. SPEC §5 core algorithm.
+ *
+ * `visitedClusters` tracks every cluster expanded on the path from the
+ * root to here, so a cluster whose members resolve back to itself
+ * (member id collides with a cluster id) cannot recurse forever.
  */
 function renderGraphRecursive(
   nodesAtDepth, allEdges, clusters, clusterMembers,
-  clusterIndex, posMap, context, zoom, depth, budget, plan
+  clusterIndex, posMap, context, zoom, depth, budget, plan, visitedClusters
 ) {
   if (plan.totalPrimitives >= budget) return;
+  if (depth > MAX_FRACTAL_DEPTH) return;
   if (depth > plan.maxDepth) plan.maxDepth = depth;
 
   const expandedClusters = new Set();
@@ -152,6 +160,21 @@ function renderGraphRecursive(
     const isCluster = !!cluster;
 
     if (isCluster) {
+      // Cycle guard: never re-expand a cluster already on the ancestry path.
+      if (visitedClusters.has(cluster.id)) {
+        plan.nodes.push({
+          id: cluster.id,
+          kind: 'cluster',
+          label: cluster.id.replace('cluster:', ''),
+          importance: cluster.members.size,
+          depth,
+          isCluster: true,
+          lod: 'circle',
+        });
+        plan.totalPrimitives++;
+        continue;
+      }
+
       // Compute screen radius for LOD
       const worldRadius = estimateClusterWorldRadius(cluster, posMap);
       const sr = screenRadius(worldRadius, zoom);
@@ -162,7 +185,8 @@ function renderGraphRecursive(
       const lod = lodLevel(sr, isPinnedCollapsed, isPinnedExpanded);
 
       if ((lod === 'expanded' || lod === 'full') &&
-          plan.totalPrimitives + cluster.members.size <= budget) {
+          plan.totalPrimitives + cluster.members.size <= budget &&
+          depth < MAX_FRACTAL_DEPTH) {
         // RECURSE: expand this cluster
         expandedClusters.add(cluster.id);
 
@@ -195,11 +219,13 @@ function renderGraphRecursive(
           memberNodes.set(memberId, memberNode);
         }
 
-        // Recurse into this cluster's members
+        // Recurse into this cluster's members (with cycle guard)
+        visitedClusters.add(cluster.id);
         renderGraphRecursive(
           memberNodes, allEdges, clusters, clusterMembers,
-          clusterIndex, posMap, context, zoom, depth + 1, budget, plan
+          clusterIndex, posMap, context, zoom, depth + 1, budget, plan, visitedClusters
         );
+        visitedClusters.delete(cluster.id);
 
       } else {
         // COLLAPSED: render as single node
