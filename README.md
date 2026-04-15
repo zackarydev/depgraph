@@ -166,3 +166,13 @@ View the latest work here:
 - [https://www.youtube.com/watch?v=N-AHH3XsR14](https://www.youtube.com/watch?v=N-AHH3XsR14)
   
 There's still a lot of work to do on which way the gradient descent is being performed. But overall I think the behavior and the base is there for a future iteration to build upon.
+
+## Immediate next steps for interesting results going forwards.
+
+This version of depgraph is almost ready to have a living hypergraph. One that watches code changes in real-time as work is being performed on the repo. View the video: [https://www.youtube.com/watch?v=XVznqzOAeQM](https://www.youtube.com/watch?v=XVznqzOAeQM)
+
+Next step is to finish up the streaming part and getting rid of the dummy `demo-history.mjs` file.
+
+By the way, while working on this project going forwards, `yarn watch` should always be on. This will actively append new rows to the history file, probably better results compared to only git commit listeners. Although, adding git to this will be incredible, a kind of time step, a grouping of the changes, visually rendered.
+
+Git will most likely be a hugely important contributor to the hypergraph. It may indeed be the very first iteration of it. Certainly the most terminal friendly tool there is. But it lacks a certain ... visual aspect to it. How many have tried to visualize git trees? There are awesome visualizations out there. This seems to be a user desire. It is for me at least. Even if it just ends up being beautiful.
