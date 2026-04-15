@@ -166,5 +166,3 @@ View the latest work here:
 - [https://www.youtube.com/watch?v=N-AHH3XsR14](https://www.youtube.com/watch?v=N-AHH3XsR14)
   
 There's still a lot of work to do on which way the gradient descent is being performed. But overall I think the behavior and the base is there for a future iteration to build upon.
-
-Test update

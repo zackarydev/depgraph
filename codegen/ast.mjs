@@ -60,13 +60,21 @@ export function parseJS(source, opts = {}) {
     };
   }
 
-  // File node
+  // Slice the raw source for an AST node — used as the structural signature.
+  // Two parses produce the same signature iff the source range is byte-identical,
+  // which means line-number drift never shows up as a "change".
+  const sliceOf = (n) => source.slice(n.start, n.end);
+
+  // File node — `signature: ''` means "container, never emit cosmetic updates".
+  // Adding a blank line to the file changes `payload.lines` but not the
+  // signature, so the watcher won't fire an update for it.
   const lineCount = source.split('\n').length;
   nodes.push({
     id: fileId,
     kind: 'file',
     label: basename(filePath),
     payload: { path: filePath, lines: lineCount, language: 'javascript' },
+    signature: '',
   });
 
   // Pass 1: collect top-level globals (const/let/var) and top-level functions.
@@ -84,6 +92,7 @@ export function parseJS(source, opts = {}) {
             kind: 'global',
             label: decl.id.name,
             payload: { file: filePath, line: decl.id.loc.start.line, declKind: stmt.kind },
+            signature: sliceOf(decl),
           });
           edges.push({
             id: `${id}->memberOf->${fileId}`,
@@ -126,6 +135,7 @@ export function parseJS(source, opts = {}) {
               kind: 'global',
               label: name,
               payload: { file: filePath, line: decl.id.loc.start.line, declKind: inner.kind, exported: true },
+              signature: sliceOf(decl),
             });
             edges.push({
               id: `${id}->memberOf->${fileId}`,
@@ -150,7 +160,10 @@ export function parseJS(source, opts = {}) {
     }
   }
 
-  // Emit function nodes + memberOf edges
+  // Emit function nodes + memberOf edges. The signature is the raw source
+  // slice of the declaration — adding `console.log` inside `foo` only changes
+  // `foo`'s signature; functions BELOW it shift line numbers but keep an
+  // identical body slice, so they don't emit updates.
   for (const [name, info] of functionInfo) {
     nodes.push({
       id: info.id,
@@ -162,6 +175,7 @@ export function parseJS(source, opts = {}) {
         endLine: info.endLine,
         exported: !!info.exported,
       },
+      signature: sliceOf(info.node),
     });
     edges.push({
       id: `${info.id}->memberOf->${fileId}`,
@@ -252,7 +266,8 @@ export function parseJS(source, opts = {}) {
 
 /**
  * Convert parseJS output into a list of HistoryRow objects (without `t` —
- * the orchestrator assigns timestamps).
+ * the orchestrator assigns timestamps). The internal `signature` field is
+ * stripped because it's a watcher-internal optimization, not history data.
  *
  * @param {{nodes:Array,edges:Array}} parsed
  * @returns {Array}

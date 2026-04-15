@@ -1,16 +1,18 @@
 /**
  * Phase 10f handler: JSON files.
  *
- * The whole file becomes a NODE kind=json-file. A few well-known shapes get
- * expanded into child nodes:
+ * Every JSON file becomes a NODE kind=json-file. Top-level keys become
+ * NODE kind=json-key, with one exception: `package.json` gets richer
+ * shapes — `scripts.*` becomes kind=script and dependencies become
+ * kind=dependency. Other package.json fields (name, version, keywords,
+ * description, ...) still become json-key nodes so editing one of them
+ * produces a precise diff on that single key, not a "whole file changed"
+ * blast radius.
  *
- *   package.json           → each entry under `scripts` becomes a NODE kind=script,
- *                            each dep under `dependencies`/`devDependencies` becomes
- *                            NODE kind=dependency
- *   inspect.json           → fields become NODE kind=config-field
- *   *.json                 → top-level keys become NODE kind=json-key
- *
- * Expansion is shallow on purpose; deeper drill-down is the next phase.
+ * Each node carries a `signature`: a stable fingerprint of its real
+ * content. The watcher diffs by signature, so cosmetic file shifts (line
+ * counts, formatting whitespace that doesn't affect parsed JSON) do not
+ * trigger updates.
  *
  * @module codegen/handlers/json
  */
@@ -19,6 +21,16 @@ import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
 export const extensions = ['.json'];
+
+/** Stable JSON stringification — sorted keys for object signatures. */
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map(k => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
+}
+
+const PKG_SPECIAL_KEYS = new Set(['scripts', 'dependencies', 'devDependencies', 'peerDependencies']);
 
 export function handle(absPath, relPath) {
   const source = readFileSync(absPath, 'utf-8');
@@ -35,15 +47,18 @@ export function handle(absPath, relPath) {
       kind: 'json-file',
       label: basename(relPath),
       payload: { path: relPath, parseError: err.message },
+      signature: 'parse-error',
     });
     return { nodes, edges };
   }
 
+  // File node — empty signature so re-saves with no content change are silent.
   nodes.push({
     id: fileId,
     kind: 'json-file',
     label: basename(relPath),
     payload: { path: relPath, lines: source.split('\n').length },
+    signature: '',
   });
 
   const isPkg = basename(relPath) === 'package.json';
@@ -57,6 +72,7 @@ export function handle(absPath, relPath) {
           kind: 'script',
           label: name,
           payload: { command: body, file: relPath },
+          signature: String(body),
         });
         edges.push({
           id: `${id}->memberOf->${fileId}`,
@@ -77,6 +93,7 @@ export function handle(absPath, relPath) {
           kind: 'dependency',
           label: name,
           payload: { version, source: depKey },
+          signature: `${depKey}:${version}`,
         });
         edges.push({
           id: `${fileId}->depends->${id}`,
@@ -87,18 +104,20 @@ export function handle(absPath, relPath) {
         });
       }
     }
-    return { nodes, edges };
   }
 
-  // Generic JSON: expose top-level keys as child nodes.
+  // Top-level keys as json-key nodes (skip the special package.json keys we
+  // already covered above). For other JSON files, every key becomes a node.
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
     for (const [key, value] of Object.entries(parsed)) {
+      if (isPkg && PKG_SPECIAL_KEYS.has(key)) continue;
       const id = `${fileId}#${key}`;
       nodes.push({
         id,
         kind: 'json-key',
         label: key,
         payload: { type: typeof value, file: relPath },
+        signature: stableStringify(value),
       });
       edges.push({
         id: `${id}->memberOf->${fileId}`,
