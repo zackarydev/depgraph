@@ -159,10 +159,12 @@ A clear structure emerged, one of files and folders, instead of the 8000 line ja
 
 This new version introduces a radical idea that was impossible to implement in v1. The concept of cluster collapse/expansion using gradient descent applied to the hypergraph. 
 
-**Note/TODO:**  At the moment i'm worried about the clusterId slithering its way throughout the codebase. There should be no distinction between a cluster and a node. A cluster is a collection of nodes. Some nodes cannot be expanded, which comes from having no hyperedges of that type. My worry is crystallized when reading `clusterId.startsWith('cluster:cluster:')`. 
+**Note/TODO:**  At the moment i'm worried about the clusterId slithering its way throughout the codebase. There should be no distinction between a cluster and a node. except for the fact that a cluster is a collection of nodes with a shared hyperedge. Some nodes cannot be expanded, which comes from having no hyperedges of that type. My worry is crystallized when reading `clusterId.startsWith('cluster:cluster:')`.
 
 View the latest work here: 
 - [https://www.youtube.com/watch?v=JH2Xb0Edlgk](https://www.youtube.com/watch?v=JH2Xb0Edlgk) 
 - [https://www.youtube.com/watch?v=N-AHH3XsR14](https://www.youtube.com/watch?v=N-AHH3XsR14)
   
 There's still a lot of work to do on which way the gradient descent is being performed. But overall I think the behavior and the base is there for a future iteration to build upon.
+
+Test update

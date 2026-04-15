@@ -231,6 +231,41 @@ function splitLines(text) {
 }
 
 /**
+ * Frozen set of valid row types and ops (SPEC §4).
+ * Phase 10a: history schema freeze.
+ */
+export const VALID_TYPES = new Set(['NODE', 'EDGE']);
+export const VALID_OPS = new Set(['add', 'update', 'remove']);
+
+/**
+ * Validate a HistoryRow against the frozen schema.
+ * Returns `null` if valid; otherwise a reason string.
+ *
+ * Rules:
+ *  - `type` must be NODE or EDGE
+ *  - `op` must be add/update/remove
+ *  - `id` is required and non-empty
+ *  - `t` must be a finite number (assigned before validation or by the reader)
+ *  - EDGE add requires `source`, `target`, and `layer`
+ *
+ * @param {import('../core/types.js').HistoryRow} row
+ * @returns {string|null}
+ */
+export function validateRow(row) {
+  if (!row || typeof row !== 'object') return 'row is not an object';
+  if (!VALID_TYPES.has(row.type)) return `invalid type: ${row.type}`;
+  if (!VALID_OPS.has(row.op)) return `invalid op: ${row.op}`;
+  if (!row.id || typeof row.id !== 'string') return 'missing id';
+  if (row.t != null && !Number.isFinite(row.t)) return 'invalid t';
+  if (row.type === 'EDGE' && row.op === 'add') {
+    if (!row.source) return 'EDGE add requires source';
+    if (!row.target) return 'EDGE add requires target';
+    if (!row.layer) return 'EDGE add requires layer';
+  }
+  return null;
+}
+
+/**
  * Process CSV text line-by-line, calling callback for each parsed row.
  * Useful for large files — avoids building the full array.
  * @param {string} text

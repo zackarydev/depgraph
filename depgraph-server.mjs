@@ -19,6 +19,10 @@ import { readFile, stat, appendFile, readdir, watch } from 'node:fs/promises';
 import { join, extname, resolve } from 'node:path';
 import { existsSync, createReadStream, statSync, watchFile, unwatchFile } from 'node:fs';
 
+import { createWatcher } from './codegen/watcher.mjs';
+import { appendHistory } from './codegen/graphgen.mjs';
+import { validateRow } from './src/data/csv.js';
+
 // ─── CLI args ────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -129,17 +133,43 @@ async function watchSources() {
   if (!WATCH_DIR) return;
   const dir = resolve(WATCH_DIR);
 
+  // Phase 10f: drive the universal repo watcher. Every file change becomes
+  // history rows, which append to history.csv, which the SSE tail picks up
+  // and pushes to the browser. The browser's existing /history-events
+  // consumer treats these like any other rows.
+  const repoWatcher = createWatcher(dir, {
+    onRows(rows) {
+      let t = Date.now();
+      const stamped = [];
+      for (const r of rows) {
+        const row = { ...r, t: t++ };
+        if (!validateRow(row)) stamped.push(row);
+      }
+      if (stamped.length) {
+        appendHistory(HISTORY_PATH, stamped);
+        console.log(`[watch] +${stamped.length} rows → history.csv`);
+      }
+    },
+  });
+  repoWatcher.seed();
+
   try {
     const ac = new AbortController();
     watchAbort = ac;
     const watcher = watch(dir, { recursive: true, signal: ac.signal });
     for await (const event of watcher) {
       if (!event.filename) continue;
-      const ext = extname(event.filename);
-      if (['.js', '.mjs', '.py', '.md'].includes(ext)) {
-        broadcastSSE({ type: 'source-changed', file: event.filename });
-        console.log(`[watch] ${event.eventType}: ${event.filename}`);
+      if (event.filename.includes('node_modules') || event.filename.includes('.git/')) continue;
+      if (event.filename.endsWith('history.csv')) continue;
+      const abs = resolve(dir, event.filename);
+      try {
+        const s = statSync(abs);
+        if (s.isFile()) repoWatcher.feed(abs);
+      } catch {
+        repoWatcher.remove(abs);
       }
+      broadcastSSE({ type: 'source-changed', file: event.filename });
+      console.log(`[watch] ${event.eventType}: ${event.filename}`);
     }
   } catch (err) {
     if (err.name !== 'AbortError') {

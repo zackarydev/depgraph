@@ -365,31 +365,92 @@ test/
 
 ---
 
-## Phase 10 — Producers
+## Phase 10 — Producers ✅ DONE
 
 **Goal:** Codegen tools append to the unified history.csv. Schema is frozen.
+**The whole repo lives in the hypergraph** — every file (js, json, image, md)
+is a node, with handlers that drill in deeper (functions, package.json scripts,
+markdown headings). A live watcher streams AST deltas as the user (or an agent)
+edits the codebase.
 
-### 10a. History schema freeze
-- Document the final CSV schema in `docs/history-schema.md`. Lock columns.
-- **Test:** schema validation in `data/csv.js` rejects malformed rows.
+### 10a. History schema freeze ✅
+- Frozen schema documented in [docs/history-schema.md](docs/history-schema.md).
+- `validateRow()` in [src/data/csv.js](src/data/csv.js) rejects malformed rows.
+- Used by every producer + the watcher before any append.
 
-### 10b. AST producer
-- `codegen/ast.mjs` → reads source, emits NODE + EDGE rows to history.csv.
-- **Test:** run against `prototypes/index.html`. Assert output has correct node count (~155 functions).
+### 10b. AST producer ✅ — [codegen/ast.mjs](codegen/ast.mjs)
+- Acorn-based JS / .mjs / .cjs parser. Emits:
+  - `NODE kind=file` per source file
+  - `NODE kind=function` per top-level function (incl. `export function`, `export const x = () => …`)
+  - `NODE kind=global` per top-level binding
+  - `EDGE layer=memberOf` from each entity to its file
+  - `EDGE layer=calls` between functions
+  - `EDGE layer=reads` / `layer=writes` against globals
+- CLI: `node codegen/ast.mjs <file> [--json|--csv]`.
 
-### 10c. Codemap producer
-- `codegen/codemap.py` → reads codemap, emits `memberOf` EDGE rows.
-- **Test:** run against `runtime/depgraph.md`. Assert cluster edges match codemap sections.
+### 10c. Codemap producer ✅ — [codegen/codemap.mjs](codegen/codemap.mjs)
+- Wraps the existing parser in [src/data/codemap.js](src/data/codemap.js).
+- Emits `cluster:` nodes + function nodes + `memberOf` edges.
+- CLI: `node codegen/codemap.mjs runtime/depgraph.md`.
 
-### 10d. Combined producer
-- `codegen/graphgen.mjs` → orchestrates ast + codemap. Appends to history.csv.
-- **Test:** run from clean. Load history in app. Assert graph matches current prototype.
+### 10d. Combined producer ✅ — [codegen/graphgen.mjs](codegen/graphgen.mjs)
+- Orchestrates AST + codemap (+ optional repo scan), dedupes by `(type,id)`,
+  assigns monotonic `t`, runs `validateRow` on every output.
+- `writeHistory()` / `appendHistory()` helpers used by both the CLI and the server.
+- CLI: `npm run generate`.
 
-### 10e. Historygen
-- `codegen/historygen.mjs` → takes current state, emits a replayable history.
-- **Test:** generate from snapshot. Replay. Assert identical graph.
+### 10e. Historygen ✅ — [codegen/historygen.mjs](codegen/historygen.mjs)
+- `stateToHistoryRows(state)` → minimal replayable history (one `add` per surviving primitive).
+- `compactHistory(csv)` replays an existing history.csv and re-emits its
+  cursor-state — drops removed entities, collapses updates.
+- CLI: `node codegen/historygen.mjs runtime/history.csv > runtime/history.compact.csv`.
 
-**Phase 10 acceptance:** `npm run generate` writes a valid history.csv. The app loads it and shows the current codebase correctly.
+### 10f. Universal repo → hypergraph + live watcher ✅
+**The wow factor.** Everything in the repo is a node; every file change is a
+history delta the browser already knows how to consume.
+
+- [codegen/repo-scanner.mjs](codegen/repo-scanner.mjs) — walks the repo (with
+  ignore filters for `node_modules`, `.git`, `runtime/history.csv`, etc.) and
+  dispatches every file to a pluggable handler. Directories become
+  `dir:<rel>` nodes joined by `contains` edges.
+- Pluggable handlers under [codegen/handlers/](codegen/handlers/):
+  - `js.mjs` — delegates to the AST producer (functions, calls, reads, writes).
+  - `json.mjs` — `package.json` scripts → `kind=script` nodes,
+    deps → `kind=dependency` nodes, generic JSON → top-level keys as children.
+  - `markdown.mjs` — every heading is a node; sibling H*n* headings linked by
+    `next` edges so an agent can walk the document.
+  - `image.mjs` — every image becomes a node whose payload carries `src` so the
+    renderer can draw the picture in place.
+  - `text.mjs` — fallback for any extension we don't know yet.
+- [codegen/watcher.mjs](codegen/watcher.mjs) — keeps a per-file `{nodes,edges}`
+  snapshot, diffs it on every change, and emits `add`/`update`/`remove` rows
+  tagged with `payload.author='watcher'`. The pure `diffHandlerOutput()` helper
+  is exported for tests.
+- [depgraph-server.mjs](depgraph-server.mjs) — the existing `--watch` flag now
+  drives the universal watcher: file changes append to `runtime/history.csv`,
+  the existing SSE tail picks them up, the browser already reacts identically
+  to user-produced rows. **Bidirectional by construction**: a human drag and
+  an AST edit both end up as rows in the same file.
+
+**Test:** [test/phase10-produce.test.mjs](test/phase10-produce.test.mjs) — 24
+hermetic tests across schema, AST, codemap, graphgen, historygen, repo-scanner,
+all five handlers, and the watcher diff (including a "wow factor" assertion
+that editing a `.mjs` file produces `add:gamma` + `remove:beta` rows).
+
+### What 10f sets up for Phase 11
+
+- Rich, uniformly-typed nodes (file, function, image, script, dependency,
+  heading) make subgraph isomorphism a small-pattern problem instead of a
+  schema problem.
+- Every producer agrees on `validateRow`, so a rule-application transaction
+  can be appended through the same path with no extra plumbing.
+- The watcher's `add/update/remove` diff is the same shape rules will emit,
+  so the rules engine can reuse the watcher's sink.
+
+**Phase 10 acceptance:** `npm run generate` writes a valid history.csv;
+`npm run scan` writes a hypergraph of the entire repo; `npm run watch` keeps
+that file live as the codebase changes; `npm test` is green for phases 1–10
+(24 new assertions).
 
 ---
 
@@ -486,10 +547,10 @@ Phase 0 (scaffold)              ✅ DONE
                  ├─► Phase 4 (placement)   ✅ DONE
                  │    └─► Phase 5 (rendering)   ✅ DONE
                  │         └─► Phase 6 (interaction)   ✅ DONE
-                 │              └─► Phase 6.5 (integration) ◄── YOU ARE HERE
-                 │                   ├─► Phase 7 (streaming/server)
+                 │              └─► Phase 6.5 (integration) ✅ DONE
+                 │                   ├─► Phase 7 (streaming/server) ✅ DONE
                  │                   ├─► Phase 8 (context UI)
-                 │                   └─► Phase 10 (producers)
+                 │                   └─► Phase 10 (producers) ✅ DONE ◄── YOU ARE HERE
                  │
                  └─► Phase 9 (scaling) ◄── can start after Phase 6.5
                       └─► Phase 11 (rules) ◄── needs Phase 6.5 + 9

@@ -39,6 +39,8 @@ export function parseCodemap(markdown) {
       continue;
     }
 
+    console.log('I\'m parsing code line now');
+
     // Match function entries: - `name`: ~line importance:N
     const entryMatch = line.match(/^-\s+`([^`]+)`:\s+~(\d+)\s+importance:(\d+)/);
     if (entryMatch && currentCluster) {
