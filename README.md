@@ -176,3 +176,7 @@ Next step is to finish up the streaming part and getting rid of the dummy `demo-
 By the way, while working on this project going forwards, `yarn watch` should always be on. This will actively append new rows to the history file, probably better results compared to only git commit listeners. Although, adding git to this will be incredible, a kind of time step, a grouping of the changes, visually rendered.
 
 Git will most likely be a hugely important contributor to the hypergraph. It may indeed be the very first iteration of it. Certainly the most terminal friendly tool there is. But it lacks a certain ... visual aspect to it. How many have tried to visualize git trees? There are awesome visualizations out there. This seems to be a user desire. It is for me at least. Even if it just ends up being beautiful.
+
+## and what if i add another section now
+
+With some text here?

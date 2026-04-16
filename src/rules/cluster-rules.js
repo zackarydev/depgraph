@@ -20,6 +20,10 @@ export const STRETCH_COLLAPSED = -2.0; // ~14% of BASE
 export const STRETCH_DEFAULT = 0.0;
 export const STRETCH_EXPANDED = 1.5;   // ~448% of BASE
 
+// Fallback state for clusters with no structural edges (e.g. affinity-only
+// clusters where no edges have both endpoints inside the cluster).
+const edgelessClusterStretch = new Map();
+
 /**
  * Resolve the set of member node ids for a cluster. Derivation keys clusters
  * as `cluster:${edge.target}`, so `clusterId` is typically of the form
@@ -70,8 +74,12 @@ function clusterStructuralEdges(clusterId, graph) {
   const members = clusterMembers(clusterId, graph);
   if (members.size === 0) return [];
 
+  // Build the set of possible memberOf edge targets. The cluster id is
+  // `cluster:X` where X is the memberOf target, so we always strip one
+  // `cluster:` prefix. For double-prefixed ids (`cluster:cluster:X`) we
+  // also try the single-stripped form.
   const clusterTargets = new Set([clusterId]);
-  if (clusterId.startsWith('cluster:cluster:')) {
+  if (clusterId.startsWith('cluster:')) {
     clusterTargets.add(clusterId.slice('cluster:'.length));
   }
 
@@ -141,7 +149,7 @@ export function resetClusterStretchRule(clusterId, graph) {
  */
 export function readClusterStretch(clusterId, graph) {
   const edges = clusterStructuralEdges(clusterId, graph);
-  if (edges.length === 0) return 0;
+  if (edges.length === 0) return edgelessClusterStretch.get(clusterId) || 0;
   let sum = 0;
   for (const e of edges) sum += e.stretch || 0;
   return sum / edges.length;
@@ -161,8 +169,8 @@ export function toggleClusterStretchRule(clusterId, graph) {
   if (cur > 0.5) next = STRETCH_COLLAPSED;
   else if (cur < -0.5) next = STRETCH_DEFAULT;
   else next = STRETCH_EXPANDED;
-  return {
-    rows: setClusterStretchRule(clusterId, next, graph, { action: 'cluster-toggle' }),
-    next,
-  };
+  const rows = setClusterStretchRule(clusterId, next, graph, { action: 'cluster-toggle' });
+  // Track state for edgeless clusters so the toggle cycle works.
+  if (rows.length === 0) edgelessClusterStretch.set(clusterId, next);
+  return { rows, next };
 }

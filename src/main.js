@@ -313,20 +313,24 @@ export function init(opts = {}) {
   let descentBurstFrames = 0;
   /** @type {Set<string> | null} */
   let descentBurstScope = null;
-  function kickDescentBurst(frames = 60, scope = null) {
+  let descentBurstCollapse = false;
+  function kickDescentBurst(frames = 60, scope = null, collapse = false) {
     descentBurstFrames = Math.max(descentBurstFrames, frames);
     descentBurstScope = scope;
+    descentBurstCollapse = collapse;
     if (scheduler.tickNames.includes('descent-burst')) return;
     scheduler.register('descent-burst', () => {
       if (descentBurstFrames <= 0) {
         scheduler.unregister('descent-burst');
         descentBurstScope = null;
+        descentBurstCollapse = false;
         return;
       }
       const zoomEta = 0.25 / Math.max(0.5, Math.min(2, currentZoom));
       descentStep(posMap, graph.state.edges, context.weights.physics, {
         eta: zoomEta,
         scope: descentBurstScope || undefined,
+        collapse: descentBurstCollapse,
       });
       descentBurstFrames--;
     });
@@ -520,15 +524,14 @@ export function init(opts = {}) {
       // from the pre-mutation derivation — safer against any rederive side
       // effects that might touch cluster membership.
       const memberScope = resolveClusterMembers(clusterId, graph);
-      const { rows } = toggleClusterStretchRule(clusterId, graph);
+      const { rows, next } = toggleClusterStretchRule(clusterId, graph);
       for (const row of rows) appendRow(row);
-      if (rows.length > 0) {
-        // If X is held the global descent is already running; the cluster
-        // edges just got a heavier stretch so they'll dominate naturally.
-        // In the normal case, we fire a scoped burst so outside nodes stay
-        // put while members coalesce/spread.
+      // Trigger burst if we have edges to stretch OR members to centroid-pull.
+      if (rows.length > 0 || memberScope.size > 0) {
+        if (legacyState) legacyState.clusterLabelOffset.delete(clusterId);
         const scope = resetState ? null : memberScope;
-        kickDescentBurst(90, scope);
+        const isCollapse = next < -0.5;
+        kickDescentBurst(200, scope, isCollapse);
         pushArrangement(arrangements, 'cluster-toggle', posMap);
         updateHud();
       }
@@ -1108,7 +1111,18 @@ export function init(opts = {}) {
 
 // Auto-init when loaded in the browser
 if (typeof window !== 'undefined') {
-  const runtime = init();
-  window.__depgraph = runtime;
-  console.log('depgraph runtime initialized', runtime);
+  // Try to load history.csv from the server before falling back to demo data.
+  (async () => {
+    let csv = null;
+    try {
+      const res = await fetch('/history');
+      if (res.ok) csv = await res.text();
+    } catch {
+      // offline or no server — fall through to demo
+    }
+    const opts = csv ? { csv } : {};
+    const runtime = init(opts);
+    window.__depgraph = runtime;
+    console.log('depgraph runtime initialized', csv ? '(from history.csv)' : '(demo)', runtime);
+  })();
 }

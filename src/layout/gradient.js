@@ -194,9 +194,10 @@ export function gradNorm(grad) {
 export function descentStep(posMap, edges, W, options) {
   const eta = (options && options.eta) || DEFAULT_ETA;
   const scope = options && options.scope;
+  const collapse = options && options.collapse;
 
   const grad = scope
-    ? scopedGradEnergy(posMap, edges, W, scope)
+    ? scopedGradEnergy(posMap, edges, W, scope, collapse)
     : gradEnergy(posMap, edges, W);
 
   for (const [id, ps] of posMap.positions) {
@@ -229,17 +230,32 @@ export function descentStep(posMap, edges, W, options) {
  * repulsion only between scope pairs. Used for cluster-local collapse/expand
  * bursts so bridge edges to outside nodes cannot fight the rule.
  */
-function scopedGradEnergy(posMap, edges, W, scope) {
+function scopedGradEnergy(posMap, edges, W, scope, collapse) {
   const grad = new Map();
   const positions = posMap.positions;
 
   for (const id of scope) grad.set(id, { gx: 0, gy: 0 });
+
+  // Compute centroid for centroid-pull during collapse.
+  let cx = 0, cy = 0, cn = 0;
+  for (const id of scope) {
+    const p = positions.get(id);
+    if (p) { cx += p.x; cy += p.y; cn++; }
+  }
+  if (cn) { cx /= cn; cy /= cn; }
+
+  // Detect collapse from edges OR from the explicit flag (needed when the
+  // cluster has no internal edges — only memberOf edges to a virtual node).
+  let stretchSum = 0, stretchCount = 0;
 
   for (const [, edge] of edges) {
     if (!scope.has(edge.source) || !scope.has(edge.target)) continue;
     const ps = positions.get(edge.source);
     const pt = positions.get(edge.target);
     if (!ps || !pt) continue;
+
+    stretchSum += (edge.stretch || 0);
+    stretchCount++;
 
     const dx = ps.x - pt.x;
     const dy = ps.y - pt.y;
@@ -258,8 +274,26 @@ function scopedGradEnergy(posMap, edges, W, scope) {
     if (gt) { gt.gx -= gx; gt.gy -= gy; }
   }
 
-  // Brute-force pairwise repulsion among scope members — typical cluster
-  // sizes are small, so quadratic is fine and we skip the Barnes-Hut setup.
+  const collapsing = collapse || (stretchCount > 0 && stretchSum / stretchCount < -0.5);
+
+  // When collapsing, add a centroid-pull that drives all members toward their
+  // center of mass — this dominates over repulsion and guarantees convergence
+  // even when members share no internal edges.
+  if (collapsing && cn > 0) {
+    const pullK = 0.5;
+    for (const id of scope) {
+      const p = positions.get(id);
+      if (!p) continue;
+      const g = grad.get(id);
+      if (!g) continue;
+      g.gx += pullK * (p.x - cx);
+      g.gy += pullK * (p.y - cy);
+    }
+  }
+
+  // Brute-force pairwise repulsion among scope members. When collapsing,
+  // suppress repulsion so nodes can actually converge.
+  const repulsionScale = collapsing ? 0.02 : 1.0;
   const ids = [...scope];
   for (let i = 0; i < ids.length; i++) {
     const pi = positions.get(ids[i]);
@@ -272,8 +306,7 @@ function scopedGradEnergy(posMap, edges, W, scope) {
       const distSq = dx * dx + dy * dy;
       if (distSq < 0.01) continue;
       const dist = Math.sqrt(distSq);
-      // Gradient of REPULSION_K / dist wrt position = -REPULSION_K * r / dist^3
-      const f = REPULSION_K / (dist * distSq);
+      const f = repulsionScale * REPULSION_K / (dist * distSq);
       const gi = grad.get(ids[i]);
       const gj = grad.get(ids[j]);
       if (gi) { gi.gx -= f * dx; gi.gy -= f * dy; }
