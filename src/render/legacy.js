@@ -610,20 +610,45 @@ function renderClusterLabelsFull(state, graph, posMap) {
 
     let text = clusterLabelElements.get(cid);
     if (!text) {
-      text = document.createElementNS(SVG_NS, 'text');
+      // Use a <g> wrapper so the invisible hit-rect and visible text share
+      // the same data-cluster attribute for event delegation.
+      text = document.createElementNS(SVG_NS, 'g');
       text.setAttribute('class', 'cluster-label');
       text.setAttribute('data-cluster', cid);
-      text.setAttribute('text-anchor', 'middle');
-      text.setAttribute('dominant-baseline', 'central');
-      text.setAttribute('font-weight', '600');
-      text.setAttribute('fill', clusterColor(cid));
-      text.setAttribute('fill-opacity', '0.6');
       text.style.cursor = 'grab';
-      text.textContent = clusterShortName(cid);
+
+      // Invisible backing rect — makes the hit area the full bounding box
+      // instead of just the visible glyphs. Sized after first paint.
+      const hitRect = document.createElementNS(SVG_NS, 'rect');
+      hitRect.setAttribute('fill', 'transparent');
+      hitRect.setAttribute('rx', '4');
+      text.appendChild(hitRect);
+      text._hitRect = hitRect;
+
+      const label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('dominant-baseline', 'central');
+      label.setAttribute('font-weight', '600');
+      label.setAttribute('fill', clusterColor(cid));
+      label.setAttribute('fill-opacity', '0.6');
+      label.textContent = clusterShortName(cid);
+      text.appendChild(label);
+      text._label = label;
+
       gClusterLabels.appendChild(text);
       clusterLabelElements.set(cid, text);
     }
     text.setAttribute('transform', `translate(${cx + off.dx},${cy + off.dy})`);
+
+    // Size the hit rect to match the text bounding box (+ padding).
+    if (text._hitRect && text._label) {
+      const bbox = text._label.getBBox();
+      const pad = 6;
+      text._hitRect.setAttribute('x', bbox.x - pad);
+      text._hitRect.setAttribute('y', bbox.y - pad);
+      text._hitRect.setAttribute('width', bbox.width + pad * 2);
+      text._hitRect.setAttribute('height', bbox.height + pad * 2);
+    }
   }
 
   for (const [cid, el] of clusterLabelElements) {
@@ -895,7 +920,9 @@ export function applySemanticZoom(state, deps, k) {
   const fFont = k <= 2 ? 13 / Math.max(0.3, k) : 13 / (2 * Math.pow(k / 2, 0.75));
   for (const [, text] of state.clusterLabelElements) {
     text.setAttribute('opacity', String(fLabOp));
-    text.setAttribute('font-size', String(fFont));
+    // font-size goes on the inner <text>, not the <g> wrapper.
+    const labelEl = text._label || text;
+    labelEl.setAttribute('font-size', String(fFont));
   }
 
   // Node labels: fade in only when the node is big enough on screen
