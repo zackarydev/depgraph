@@ -1,3 +1,132 @@
+# Summary — Conversation Arc and What Was Built
+
+> Written at the end of a multi-turn architecture conversation so the next
+> session has full context. Below the summary is the raw thread (preserved).
+
+## The arc, in five moves
+
+1. **Scope request (OS-layer integration).** Zack asked what bidirectional
+   graph↔file integration would look like: editing a node in the UI should
+   write a heading to README.md; editing README.md should update the graph.
+   Agent proposed splitting Phase 12 into two new phases: **Phase 12 =
+   writeback sinks** (inverse producers mirroring the forward handlers), and
+   **Phase 13 = live runtime** (state variables ticking on nodes/edges).
+
+2. **State belongs in history (push-back).** Zack rejected "state is not in
+   history" — state IS events and belongs in the log. The real problem is
+   the **storage shape**, not the principle. A linear CSV is wrong for
+   per-entity time-series queries. Agent proposed three shapes ranked by
+   upheaval: hybrid per-entity files, SQLite with EAV schema (recommended),
+   or full Datomic-style EAV log. Conclusion: **SQLite container, EAV row
+   shape** as Phase 12.
+
+3. **Concurrent writes, HLC, fuzzy moments.** Zack observed that at scale,
+   concurrent writes are unavoidable and timestamps will collide — proposed
+   an "n-dimensional coordinate system" for space-and-time axes. Agent named
+   this as **Hybrid Logical Clocks** (HLC: wallMs + producerId + counter).
+   Linearity moves up one level: a linear sequence of *moments*, each
+   containing an unordered set of concurrent events. This is **not
+   speculative** — it's what Riak/Cassandra/Dynamo/git use, and it maps
+   formally to relativistic simultaneity (Minkowski partial order).
+
+4. **The moment IS a hyperedge.** Zack's radical move: each moment is a
+   hyperedge that ties nodes together and applies a rule (arithmetic,
+   construction, whatever software does). Computation is graph rewriting.
+   Agent named the existing theory: **interaction combinators** (Lafont
+   1997), HVM/Bend as production runtimes, rule locality as the property
+   that makes sharding viable. Zack extended: partitioning by local
+   hypergraph position, consensus by local compute servers, some regions
+   locked/private, some public. Agent flagged the unexpected gift: **the
+   existing gradient-descent layout IS a hypergraph partitioner** —
+   the spatial layout already proposes where to cut. Fuzzy moments =
+   Naiad/Timely Dataflow's **frontier model**, the cheapest viable
+   cross-shard consensus.
+
+5. **Reality check → build the smallest proof.** Zack acknowledged: "this
+   is getting exponentially harder. We have trouble implementing space-bar
+   makes nodes cluster together." Agent reframed: **space-bar is not a
+   distraction, it's the canonical test case**. If the moment/rule substrate
+   makes space-bar trivial (30 lines of rule), the theory is real. If it
+   doesn't, the distributed version won't work either. Zack: "OK. Build it."
+
+## What was built
+
+- [src/core/clock.js](src/core/clock.js) — Hybrid Logical Clock. `createHLC`,
+  `compareHLC` (returns `null` for concurrent cross-producer coords),
+  `parseHLC`.
+- [src/core/moment.js](src/core/moment.js) — `Moment` record: `id`, `rule`,
+  `members`, `payload`, `author`, `tx`, `causes`, `clock`, `state`.
+- [src/core/dispatcher.js](src/core/dispatcher.js) — `createDispatcher`,
+  `registerRule`, `emit`, `retract`, `commit`, `tick`, `liveMoments`.
+  `tick` sums `posDeltas` across all live moments and applies them once.
+- [src/rules/gather.js](src/rules/gather.js) — first rule: `gatherRule`
+  (tick returns per-member position deltas toward a target), plus
+  `gatherCentroid` and `neighborsOf` helpers.
+- [src/main.js](src/main.js) — dispatcher boots at startup, gather rule
+  registered. Space-bar keydown/keyup now `emit`/`retract` a `gather`
+  moment instead of calling legacy `startGather` / `updateGather`.
+- [test/phase12-substrate.test.mjs](test/phase12-substrate.test.mjs) —
+  19 assertions covering HLC, dispatcher, gather rule, and **two legacy
+  parity tests** that prove the substrate produces bit-exact identical
+  trajectories to the legacy bespoke gather code (within 1e-9 over 30
+  frames). All 19 pass.
+
+Full suite: 261/263 pass. Two failures (phase6 group-drag stale assertion,
+playwright visual test) are pre-existing and unrelated.
+
+## Architectural decisions locked in
+
+1. **Moment as the primitive of dynamics.** Every interaction, file diff,
+   runtime tick, and agent action is a moment emitted against a rule.
+   Dispatcher is universal; rules are small.
+2. **HLC from day one.** Even with one producer, the clock carries
+   `{wallMs, producerId, counter}`. Distribution-ready by schema, not by
+   code.
+3. **Rules compose by summation.** Two moments targeting the same node
+   sum their deltas naturally — no conflict resolution needed at the
+   dispatcher level.
+4. **Legacy parity is the verdict.** Substrate replaces bespoke code only
+   if output is bit-identical to the legacy path.
+5. **SQLite/EAV is the next storage migration.** Not yet built.
+   `moments` table will have columns `moment_id, shard, rule, members_in,
+   members_out, causes, clock, payload, author`. CSV becomes an
+   import/export projection, not the runtime format.
+
+## Known bug (open — see BUILD_PROMPT_CLUSTER_GATHER.md)
+
+Clicking/holding a cluster label and pressing Space does nothing. Cluster
+labels never populate `selection.primary`, so the dispatcher's
+`gather-start` sees no target. Fix: promote the cluster node to primary
+selection on mousedown, and add a cluster-case branch to `gather-start`
+that pulls cluster members toward the cluster centroid.
+
+## What's next, in order
+
+1. **Ship cluster-gather fix** (BUILD_PROMPT_CLUSTER_GATHER.md). Low-risk,
+   proves the rule substrate handles variant interactions cleanly.
+2. **Express a second interaction as a rule** — `trace`, `attractor`, or
+   `reset`. Each should be ~30 lines of rule + a simple call-site.
+   This is the real test of whether the substrate amortizes across
+   interactions.
+3. **Migrate history.csv → SQLite/EAV.** `dispatcher.log` becomes the
+   append target. CSV stays as import/export.
+4. **Writeback sinks (Phase 12 proper).** Subscribe to moments with
+   `author='user'`, apply inverse handlers (markdown + json first).
+   Closes the graph↔file loop.
+5. **Runtime state (Phase 13).** Add `heat` / `callRate` rules. State
+   ticks into the same moment log.
+
+## Reading list Zack flagged
+
+- Lafont, 1997 — Interaction combinators. The paper that names what we're
+  building.
+
+---
+
+Below: the raw conversation thread (preserved).
+
+---
+
 [Other.]
 
 ---
@@ -38,3 +167,6 @@ Fuzzy moments = timely dataflow's frontier model
 The fuzziness-as-fault-line-protection instinct is exactly the Naiad/Timely Dataflow frontier model. Instead of "moment T has happened globally," you have "all events with timestamp ≤ T from shard S are now in." Different shards close their frontiers at different wall-clock times. A cross-shard rule only fires when all its members' shards have closed the relevant frontier. You never need global clock sync — only per-shard monotonic progress.
 
 This is dramatically cheaper than Paxos/Raft-style consensus and it's the reason timely dataflow scales to huge clusters. Your fuzzy-moment intuition is the existing state of the art, not a workaround.
+
+---
+Building results:

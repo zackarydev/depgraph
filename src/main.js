@@ -33,6 +33,8 @@ import { descentStep, setStretchBias } from './layout/gradient.js';
 import { createKeyState, keyDown, keyUp } from './interact/keyboard.js';
 import { startTrace, updateTrace, revealedNodes, releaseTrace, holdTrace, changeDirection } from './interact/trace.js';
 import { startGather, startStrangerGather, updateGather, stopGather } from './interact/gather.js';
+import { createDispatcher, registerRule, emit as emitMoment, retract as retractMoment, tick as tickDispatcher } from './core/dispatcher.js';
+import { gatherRule, gatherCentroid, neighborsOf } from './rules/gather.js';
 import { startReset, updateReset, stopReset } from './interact/reset.js';
 import { startTimeTravel, updateTimeTravel, stopTimeTravel, stepOnce, switchBranchByDirection } from './interact/time-travel.js';
 import { createArrangementStack, pushArrangement, startTravel as startArrangementTravel, updateTravel as updateArrangementTravel, stopTravel as stopArrangementTravel } from './interact/arrangements.js';
@@ -107,12 +109,20 @@ export function init(opts = {}) {
   let dragState = null;
   let traceState = null;
   let gatherState = null;
+  let activeGatherMoment = null;
   let resetState = null;
   let timeTravelState = null;
   let arrangementTravelState = null;
   const arrangements = createArrangementStack();
   let currentZoom = 1;
   let highlightedSearchIds = new Set();
+
+  // --- Moment dispatcher (phase-12 substrate) ---
+  // Holds live moments emitted by user interactions, file watchers, agents,
+  // and the future runtime ticker. Each frame the dispatcher asks every live
+  // moment's rule to contribute position deltas; they sum and apply in one pass.
+  const dispatcher = createDispatcher({ producerId: 'ui' });
+  registerRule(dispatcher, gatherRule);
 
   // --- Legacy render state (port of old_versions/index.html visuals) ---
   if (svgCtx) {
@@ -423,6 +433,12 @@ export function init(opts = {}) {
         mouseDownTarget = clusterId;
         mouseDownPos = { sx, sy, wx: world.x, wy: world.y };
         isDragging = false;
+        // Promote cluster node to primary selection so keyboard modes
+        // (gather, trace, reset) can target it while the mouse is held.
+        selection = e.shiftKey
+          ? toggleSelection(selection, clusterId)
+          : selectNode(selection, clusterId);
+        bus.emit('selection-changed', { selected: selection.selected, primary: selection.primary });
         return;
       }
 
@@ -545,29 +561,59 @@ export function init(opts = {}) {
       if (!action) return;
 
       switch (action.action) {
-        case 'gather-start':
-          if (selection.selected.size >= 2) {
-            gatherState = startGather(selection, posMap);
-            if (gatherState) {
-              scheduler.register('gather', (dt) => {
-                updateGather(gatherState, dt, posMap);
-              });
-            }
-          } else if (selection.primary) {
-            gatherState = startStrangerGather(selection.primary, graph.state.edges, selection, posMap);
-            if (gatherState) {
-              scheduler.register('gather', (dt) => {
-                updateGather(gatherState, dt, posMap);
-              });
+        case 'gather-start': {
+          // Under the substrate: gather is just an emit. Members + target are
+          // derived from selection; the rule owns the pull math.
+          let members = null;
+          let target = null;
+
+          // Cluster gather: primary is a cluster id → pull members to centroid.
+          // Cluster ids are derivation keys (e.g. `cluster:cluster:render`),
+          // not graph-node ids, so we check derivation.clusters, not state.nodes.
+          const isCluster = selection.primary
+            && graph.derivation
+            && graph.derivation.clusters
+            && graph.derivation.clusters.has(selection.primary);
+          if (isCluster) {
+            const cm = resolveClusterMembers(selection.primary, graph);
+            const memberIds = (cm && cm.size >= 2)
+              ? [...cm]
+              : (legacyState && legacyState.clusterMembers.get(selection.primary)
+                  ? [...legacyState.clusterMembers.get(selection.primary)]
+                  : null);
+            if (memberIds && memberIds.length >= 2) {
+              members = memberIds;
+              target = gatherCentroid(members, posMap);
             }
           }
+
+          if (!members && selection.selected.size >= 2) {
+            members = [...selection.selected];
+            target = gatherCentroid(members, posMap);
+          } else if (!members && selection.primary) {
+            members = neighborsOf(selection.primary, graph.state.edges, selection.selected);
+            const ps = posMap.positions.get(selection.primary);
+            if (ps) target = { x: ps.x, y: ps.y };
+          }
+          if (members && members.length > 0 && target) {
+            activeGatherMoment = emitMoment(dispatcher, {
+              rule: 'gather',
+              members,
+              payload: { targetX: target.x, targetY: target.y, strength: 3.0 },
+              author: 'user',
+            });
+            scheduler.register('gather', (dt) => {
+              tickDispatcher(dispatcher, dt, { posMap, edges: graph.state.edges });
+            });
+          }
           break;
+        }
 
         case 'gather-stop':
-          if (gatherState) {
-            stopGather(gatherState);
+          if (activeGatherMoment) {
+            retractMoment(dispatcher, activeGatherMoment.id);
+            activeGatherMoment = null;
             scheduler.unregister('gather');
-            gatherState = null;
             pushArrangement(arrangements, 'gather', posMap);
             updateHud();
             fullRender();
@@ -704,10 +750,10 @@ export function init(opts = {}) {
 
       switch (action.action) {
         case 'gather-stop':
-          if (gatherState) {
-            stopGather(gatherState);
+          if (activeGatherMoment) {
+            retractMoment(dispatcher, activeGatherMoment.id);
+            activeGatherMoment = null;
             scheduler.unregister('gather');
-            gatherState = null;
             pushArrangement(arrangements, 'gather', posMap);
             updateHud();
             fullRender();
