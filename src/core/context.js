@@ -22,6 +22,9 @@ const DEFAULT_WEIGHTS = {
   sharedWrites: 0.5,
   sharedName: 1.5,
   spatial: 0.1,
+  // Event layers are structural markers for queries, not springs.
+  // Zero weight in both physics and affinity so clicks don't warp layout.
+  'event:click': 0,
 };
 
 /**

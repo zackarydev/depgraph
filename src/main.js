@@ -35,12 +35,21 @@ import { startTrace, updateTrace, revealedNodes, releaseTrace, holdTrace, change
 import { startGather, startStrangerGather, updateGather, stopGather } from './interact/gather.js';
 import { createDispatcher, registerRule, emit as emitMoment, retract as retractMoment, tick as tickDispatcher } from './core/dispatcher.js';
 import { gatherRule, gatherCentroid, neighborsOf } from './rules/gather.js';
+import {
+  SENTINEL_MOUSE_CLICKED,
+  CLICK_EDGE_LAYER,
+  clickEdgeId,
+  sentinelRow,
+  lastClickTarget,
+} from './rules/click-events.js';
+import { updatePosition, setLocked } from './layout/positions.js';
 import { startReset, updateReset, stopReset } from './interact/reset.js';
 import { startTimeTravel, updateTimeTravel, stopTimeTravel, stepOnce, switchBranchByDirection } from './interact/time-travel.js';
 import { createArrangementStack, pushArrangement, startTravel as startArrangementTravel, updateTravel as updateArrangementTravel, stopTravel as stopArrangementTravel } from './interact/arrangements.js';
 import { loadFromLocal, wirePersistence } from './stream/local-persistence.js';
 import { tryConnectSSE } from './stream/sse.js';
 import { toCSV } from './data/history.js';
+import { writeRowLine } from './data/csv.js';
 import { startCinematic, stopCinematic } from './stream/cinematic.js';
 
 /**
@@ -89,6 +98,23 @@ export function init(opts = {}) {
 
   // --- Layout ---
   const { posMap } = initialPlace(graph.state.nodes, graph.state.edges, context.weights.physics);
+
+  // --- Click-event sentinel ---
+  // The `mouse-clicked` sentinel node is how we record user clicks as edges
+  // in the graph. Seed it once per history (idempotent) and lock it far off
+  // screen so it never participates in layout. Every click becomes an
+  // `event:click` edge from this sentinel to the clicked node — gather-start
+  // and other interactions can then query the graph instead of a parallel
+  // selection object.
+  if (!graph.state.nodes.has(SENTINEL_MOUSE_CLICKED)) {
+    const seeded = historyAppend(history, sentinelRow());
+    applyRowToGraph(graph, seeded, context.weights.affinity);
+  }
+  // Place the sentinel at the world origin and lock it. It renders like any
+  // other node so the user can see which node/cluster was last clicked via
+  // the outgoing event:click edge. Locked so physics can't drag it around.
+  updatePosition(posMap, SENTINEL_MOUSE_CLICKED, 0, 0);
+  setLocked(posMap, SENTINEL_MOUSE_CLICKED, true);
 
   // --- SVG (browser only) ---
   let svgCtx = null;
@@ -245,6 +271,29 @@ export function init(opts = {}) {
     rings.forEach(r => r.remove());
   }
 
+  // --- Emit a click event as an edge from the mouse-clicked sentinel to
+  //     the target node. Persists to history; downstream consumers query the
+  //     graph's edges for the most recent `event:click` to learn selection.
+  function emitClickEvent(targetId, extra) {
+    if (!targetId) return;
+    const t = history.nextT;
+    return appendRow({
+      type: 'EDGE',
+      op: 'add',
+      id: clickEdgeId(t, targetId),
+      source: SENTINEL_MOUSE_CLICKED,
+      target: targetId,
+      layer: CLICK_EDGE_LAYER,
+      weight: 0,
+      payload: {
+        author: 'user',
+        action: 'click',
+        target: targetId,
+        ...(extra || {}),
+      },
+    });
+  }
+
   // --- Append row to history + update graph ---
   function appendRow(row) {
     const fullRow = historyAppend(history, row);
@@ -253,6 +302,21 @@ export function init(opts = {}) {
     // Place new nodes
     if (row.type === 'NODE' && row.op === 'add') {
       warmRestart(posMap, graph.state.nodes, graph.state.edges, context.weights.physics);
+    }
+
+    // Mirror user-authored rows to runtime/history.csv via the dev server's
+    // POST endpoint. This turns `yarn stream` into a bidirectional log: file
+    // watchers append rows, the UI appends rows, both land in the same CSV.
+    // SSE echoes come back stamped with the same `t` → dedup skips them.
+    const author = fullRow.payload && fullRow.payload.author;
+    if (author === 'user' && typeof fetch === 'function') {
+      try {
+        fetch('/history-append', {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/csv' },
+          body: writeRowLine(fullRow),
+        }).catch(() => {});
+      } catch {}
     }
 
     bus.emit('row-appended', { row: fullRow });
@@ -433,12 +497,7 @@ export function init(opts = {}) {
         mouseDownTarget = clusterId;
         mouseDownPos = { sx, sy, wx: world.x, wy: world.y };
         isDragging = false;
-        // Promote cluster node to primary selection so keyboard modes
-        // (gather, trace, reset) can target it while the mouse is held.
-        selection = e.shiftKey
-          ? toggleSelection(selection, clusterId)
-          : selectNode(selection, clusterId);
-        bus.emit('selection-changed', { selected: selection.selected, primary: selection.primary });
+        emitClickEvent(clusterId, { kind: 'cluster', shiftKey: e.shiftKey });
         return;
       }
 
@@ -450,6 +509,7 @@ export function init(opts = {}) {
 
       if (nodeId) {
         dragState = startDrag(nodeId, posMap, selection, e.shiftKey);
+        emitClickEvent(nodeId, { kind: 'node', shiftKey: e.shiftKey });
       }
     }, true);
 
@@ -567,22 +627,19 @@ export function init(opts = {}) {
           let members = null;
           let target = null;
 
-          // Cluster gather: primary is a cluster id → pull members to centroid.
-          // Cluster ids are derivation keys (e.g. `cluster:cluster:render`),
-          // not graph-node ids, so we check derivation.clusters, not state.nodes.
-          const isCluster = selection.primary
+          // Cluster path: query the graph for the most recent click. If it
+          // landed on a cluster label (a derivation.clusters key), pull the
+          // cluster's members toward their centroid. This replaces the
+          // missing cluster branch in the old `selection`-object world.
+          const lastClicked = lastClickTarget(graph);
+          const isCluster = lastClicked
             && graph.derivation
             && graph.derivation.clusters
-            && graph.derivation.clusters.has(selection.primary);
+            && graph.derivation.clusters.has(lastClicked);
           if (isCluster) {
-            const cm = resolveClusterMembers(selection.primary, graph);
-            const memberIds = (cm && cm.size >= 2)
-              ? [...cm]
-              : (legacyState && legacyState.clusterMembers.get(selection.primary)
-                  ? [...legacyState.clusterMembers.get(selection.primary)]
-                  : null);
-            if (memberIds && memberIds.length >= 2) {
-              members = memberIds;
+            const cm = resolveClusterMembers(lastClicked, graph);
+            if (cm && cm.size >= 2) {
+              members = [...cm];
               target = gatherCentroid(members, posMap);
             }
           }

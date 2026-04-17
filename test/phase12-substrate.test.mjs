@@ -32,7 +32,17 @@ import {
   startGather as legacyStartGather,
   startStrangerGather as legacyStartStrangerGather,
   updateGather as legacyUpdateGather,
+  startClusterGather as legacyStartClusterGather,
 } from '../src/interact/gather.js';
+import {
+  SENTINEL_MOUSE_CLICKED,
+  CLICK_EDGE_LAYER,
+  clickEdgeId,
+  sentinelRow,
+  lastClickTarget,
+} from '../src/rules/click-events.js';
+import { buildFromHistory, applyRowToGraph } from '../src/data/graph-builder.js';
+import { createHistory, append as historyAppend } from '../src/data/history.js';
 
 describe('core/clock (HLC)', () => {
   it('advances monotonically within one producer', () => {
@@ -275,6 +285,58 @@ describe('substrate parity with legacy gather', () => {
     }
   });
 
+  it('cluster gather: substrate trajectory == legacy startClusterGather', () => {
+    // Build a toy graph with cluster node C and three members a/b/c.
+    // Pre-seed positions so the two paths see identical initial state.
+    const initial = [
+      { type: 'NODE', op: 'add', id: 'C', kind: 'cluster', label: 'C', weight: 5 },
+      { type: 'NODE', op: 'add', id: 'a', kind: 'function', label: 'a' },
+      { type: 'NODE', op: 'add', id: 'b', kind: 'function', label: 'b' },
+      { type: 'NODE', op: 'add', id: 'c', kind: 'function', label: 'c' },
+      { type: 'EDGE', op: 'add', id: 'a->C', source: 'a', target: 'C', layer: 'memberOf', weight: 5 },
+      { type: 'EDGE', op: 'add', id: 'b->C', source: 'b', target: 'C', layer: 'memberOf', weight: 5 },
+      { type: 'EDGE', op: 'add', id: 'c->C', source: 'c', target: 'C', layer: 'memberOf', weight: 5 },
+    ].map((r, i) => ({ ...r, t: i }));
+
+    const graph = buildFromHistory(initial);
+    // derivation keys clusters as `cluster:${edge.target}`
+    const clusterKey = 'cluster:C';
+    assert.ok(graph.derivation.clusters.has(clusterKey), 'cluster derived under expected key');
+
+    const pmLegacy = createPositionMap();
+    const pmSub = createPositionMap();
+    for (const pm of [pmLegacy, pmSub]) {
+      updatePosition(pm, 'C', 0, 0);
+      updatePosition(pm, 'a', 100, 0);
+      updatePosition(pm, 'b', -100, 0);
+      updatePosition(pm, 'c', 0, 100);
+    }
+
+    // Legacy path
+    const legacyCluster = { members: new Set(['a', 'b', 'c']) };
+    const g = legacyStartClusterGather(legacyCluster, pmLegacy);
+    for (let i = 0; i < 30; i++) legacyUpdateGather(g, 50, pmLegacy);
+
+    // Substrate path — members resolved from the cluster id via derivation
+    const members = [...graph.derivation.clusters.get(clusterKey).members];
+    const target = gatherCentroid(members, pmSub);
+    const d = createDispatcher();
+    registerRule(d, gatherRule);
+    emit(d, {
+      rule: 'gather',
+      members,
+      payload: { targetX: target.x, targetY: target.y, strength: 3.0 },
+    });
+    for (let i = 0; i < 30; i++) tick(d, 50, { posMap: pmSub });
+
+    for (const id of ['a', 'b', 'c']) {
+      const L = pmLegacy.positions.get(id);
+      const S = pmSub.positions.get(id);
+      assert.ok(Math.abs(L.x - S.x) < 1e-9, `${id}.x parity: legacy=${L.x} sub=${S.x}`);
+      assert.ok(Math.abs(L.y - S.y) < 1e-9, `${id}.y parity: legacy=${L.y} sub=${S.y}`);
+    }
+  });
+
   it('stranger gather: substrate trajectory == legacy trajectory', () => {
     const edges = new Map([
       ['e1', { id: 'e1', source: 'anchor', target: 'n1', layer: 'calls', weight: 1 }],
@@ -310,5 +372,109 @@ describe('substrate parity with legacy gather', () => {
       assert.ok(Math.abs(L.x - S.x) < 1e-9, `${id}.x parity`);
       assert.ok(Math.abs(L.y - S.y) < 1e-9, `${id}.y parity`);
     }
+  });
+});
+
+describe('click events as graph edges', () => {
+  it('clickEdgeId is unique per (t, target) pair', () => {
+    assert.notEqual(clickEdgeId(1, 'a'), clickEdgeId(2, 'a'));
+    assert.notEqual(clickEdgeId(1, 'a'), clickEdgeId(1, 'b'));
+  });
+
+  it('lastClickTarget returns null on an empty graph', () => {
+    const graph = buildFromHistory([]);
+    assert.equal(lastClickTarget(graph), null);
+  });
+
+  it('lastClickTarget tracks the most recent click edge from the sentinel', () => {
+    const history = createHistory();
+    historyAppend(history, sentinelRow());
+    historyAppend(history, { type: 'NODE', op: 'add', id: 'n1', kind: 'function' });
+    historyAppend(history, { type: 'NODE', op: 'add', id: 'n2', kind: 'function' });
+    const graph = buildFromHistory(history.rows);
+    assert.ok(graph.state.nodes.has(SENTINEL_MOUSE_CLICKED));
+
+    // Simulate two clicks in order; assert lastClickTarget reflects the latest.
+    const click1 = historyAppend(history, {
+      type: 'EDGE', op: 'add',
+      id: clickEdgeId(history.nextT, 'n1'),
+      source: SENTINEL_MOUSE_CLICKED, target: 'n1',
+      layer: CLICK_EDGE_LAYER, weight: 0,
+    });
+    applyRowToGraph(graph, click1);
+    assert.equal(lastClickTarget(graph), 'n1');
+
+    const click2 = historyAppend(history, {
+      type: 'EDGE', op: 'add',
+      id: clickEdgeId(history.nextT, 'n2'),
+      source: SENTINEL_MOUSE_CLICKED, target: 'n2',
+      layer: CLICK_EDGE_LAYER, weight: 0,
+    });
+    applyRowToGraph(graph, click2);
+    assert.equal(lastClickTarget(graph), 'n2');
+  });
+
+  it('click edges on a cluster id resolve to cluster-gather members', () => {
+    // End-to-end: a cluster exists, user clicks the cluster, lastClickTarget
+    // lands on a derivation cluster key, members resolve via cluster-rules.
+    const history = createHistory();
+    historyAppend(history, sentinelRow());
+    const nodeRows = [
+      { type: 'NODE', op: 'add', id: 'C', kind: 'cluster', label: 'C', weight: 5 },
+      { type: 'NODE', op: 'add', id: 'a', kind: 'function', label: 'a' },
+      { type: 'NODE', op: 'add', id: 'b', kind: 'function', label: 'b' },
+      { type: 'EDGE', op: 'add', id: 'a->C', source: 'a', target: 'C', layer: 'memberOf', weight: 5 },
+      { type: 'EDGE', op: 'add', id: 'b->C', source: 'b', target: 'C', layer: 'memberOf', weight: 5 },
+    ];
+    for (const r of nodeRows) historyAppend(history, r);
+    const graph = buildFromHistory(history.rows);
+
+    const clusterKey = 'cluster:C';
+    assert.ok(graph.derivation.clusters.has(clusterKey));
+
+    const click = historyAppend(history, {
+      type: 'EDGE', op: 'add',
+      id: clickEdgeId(history.nextT, clusterKey),
+      source: SENTINEL_MOUSE_CLICKED, target: clusterKey,
+      layer: CLICK_EDGE_LAYER, weight: 0,
+    });
+    applyRowToGraph(graph, click);
+
+    const clicked = lastClickTarget(graph);
+    assert.equal(clicked, clusterKey);
+    assert.ok(graph.derivation.clusters.has(clicked), 'clicked id is a cluster key');
+    const members = graph.derivation.clusters.get(clicked).members;
+    assert.deepEqual(new Set(members), new Set(['a', 'b']));
+  });
+
+  it('event:click edges do not create spurious clusters or distort affinities', () => {
+    // Sanity: the event layer has zero weight, so clicks accumulate in history
+    // without warping the graph. Build a graph, spray a bunch of click edges,
+    // confirm the non-sentinel clusters are unchanged.
+    const baseRows = [
+      { type: 'NODE', op: 'add', id: 'C', kind: 'cluster', label: 'C', weight: 5 },
+      { type: 'NODE', op: 'add', id: 'a', kind: 'function', label: 'a' },
+      { type: 'NODE', op: 'add', id: 'b', kind: 'function', label: 'b' },
+      { type: 'EDGE', op: 'add', id: 'a->C', source: 'a', target: 'C', layer: 'memberOf', weight: 5 },
+      { type: 'EDGE', op: 'add', id: 'b->C', source: 'b', target: 'C', layer: 'memberOf', weight: 5 },
+    ].map((r, i) => ({ ...r, t: i }));
+
+    const history = createHistory();
+    historyAppend(history, sentinelRow());
+    for (const r of baseRows) historyAppend(history, r);
+    const before = buildFromHistory(history.rows);
+    const beforeMembers = new Set(before.derivation.clusters.get('cluster:C').members);
+
+    for (const target of ['a', 'b', 'C', 'cluster:C', 'a', 'b']) {
+      historyAppend(history, {
+        type: 'EDGE', op: 'add',
+        id: clickEdgeId(history.nextT, target),
+        source: SENTINEL_MOUSE_CLICKED, target,
+        layer: CLICK_EDGE_LAYER, weight: 0,
+      });
+    }
+    const after = buildFromHistory(history.rows);
+    const afterMembers = new Set(after.derivation.clusters.get('cluster:C').members);
+    assert.deepEqual(afterMembers, beforeMembers, 'cluster membership unchanged by clicks');
   });
 });
