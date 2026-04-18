@@ -48,7 +48,6 @@ export function applyRow(state, row) {
         kind: row.kind || 'unknown',
         label: row.label || id,
         importance: row.weight != null ? row.weight : 1,
-        payload: row.payload || null,
       });
     } else if (op === 'update') {
       const existing = state.nodes.get(id);
@@ -56,11 +55,6 @@ export function applyRow(state, row) {
         if (row.kind != null) existing.kind = row.kind;
         if (row.label != null) existing.label = row.label;
         if (row.weight != null) existing.importance = row.weight;
-        if (row.payload != null) {
-          existing.payload = existing.payload
-            ? { ...existing.payload, ...row.payload }
-            : row.payload;
-        }
       }
     } else if (op === 'remove') {
       state.nodes.delete(id);
@@ -73,10 +67,20 @@ export function applyRow(state, row) {
         target: row.target,
         layer: row.layer || 'unknown',
         weight: row.weight != null ? row.weight : 1,
-        stretch: row.payload?.stretch != null ? row.payload.stretch : 0,
-        directed: row.payload?.directed !== false,
+        stretch: 0,
+        directed: true,
         label: row.label || null,
       });
+      // Property-edge mirror: `prop:stretch` edges cache the scalar back onto
+      // the edge they describe, so layout can read edge.stretch without
+      // querying the graph per frame.
+      if (row.layer === 'prop:stretch' && row.source && typeof row.target === 'string') {
+        const target = state.edges.get(row.source);
+        if (target && row.target.startsWith('value:stretch:')) {
+          const n = Number(row.target.slice('value:stretch:'.length));
+          if (!Number.isNaN(n)) target.stretch = n;
+        }
+      }
     } else if (op === 'update') {
       const existing = state.edges.get(id);
       if (existing) {
@@ -85,10 +89,6 @@ export function applyRow(state, row) {
         if (row.label != null) existing.label = row.label;
         if (row.source != null) existing.source = row.source;
         if (row.target != null) existing.target = row.target;
-        if (row.payload != null) {
-          if (row.payload.directed != null) existing.directed = row.payload.directed;
-          if (row.payload.stretch != null) existing.stretch = row.payload.stretch;
-        }
       }
     } else if (op === 'remove') {
       state.edges.delete(id);

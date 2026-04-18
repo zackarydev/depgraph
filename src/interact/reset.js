@@ -110,7 +110,7 @@ export function resetSingleNode(nodeId, posMap) {
     type: 'NODE',
     op: 'update',
     id: nodeId,
-    payload: { x: ps.x, y: ps.y, author: 'user', action: 'reset-single' },
+    _payload: { x: ps.x, y: ps.y, author: 'user', action: 'reset-single' },
   };
 }
 

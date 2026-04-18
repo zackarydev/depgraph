@@ -47,7 +47,7 @@ export function clickRow(targetId, meta) {
     target: targetId,
     layer: CLICK_EDGE_LAYER,
     weight: 0,
-    payload: {
+    _payload: {
       author: 'user',
       action: 'click',
       target: targetId,
@@ -89,6 +89,6 @@ export function sentinelRow() {
     kind: 'sentinel',
     label: SENTINEL_MOUSE_CLICKED,
     weight: 0.1,
-    payload: { author: 'system', action: 'sentinel-init' },
+    _payload: { author: 'system', action: 'sentinel-init' },
   };
 }

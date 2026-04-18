@@ -105,7 +105,7 @@ export function endDrag(drag, posMap, opts) {
       type: 'NODE',
       op: 'update',
       id: drag.nodeId,
-      payload: { x: ps.x, y: ps.y, author: 'user', action: 'drag' },
+      _payload: { x: ps.x, y: ps.y, author: 'user', action: 'drag' },
     });
 
     // Emit spatial edges to K nearest neighbors
@@ -123,7 +123,7 @@ export function endDrag(drag, posMap, opts) {
           type: 'NODE',
           op: 'update',
           id,
-          payload: { x: other.x, y: other.y, author: 'user', action: 'group-drag' },
+          _payload: { x: other.x, y: other.y, author: 'user', action: 'group-drag' },
         });
         const spatialRows = computeSpatialEdges(id, posMap, spatialK);
         rows.push(...spatialRows);
@@ -169,7 +169,7 @@ function computeSpatialEdges(nodeId, posMap, k) {
     target: otherId,
     layer: 'spatial',
     weight: Math.max(0.1, 1 / (1 + dist / 100)),
-    payload: { distance: Math.round(dist), author: 'user', action: 'drag-spatial' },
+    _payload: { distance: Math.round(dist), author: 'user', action: 'drag-spatial' },
   }));
 }
 
