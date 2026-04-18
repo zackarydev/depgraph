@@ -49,6 +49,7 @@ import { startTimeTravel, updateTimeTravel, stopTimeTravel, stepOnce, switchBran
 import { createArrangementStack, pushArrangement, startTravel as startArrangementTravel, stopTravel as stopArrangementTravel } from './interact/arrangements.js';
 import { loadFromLocal, wirePersistence } from './stream/local-persistence.js';
 import { tryConnectSSE } from './stream/sse.js';
+import { connectHistoryWS } from './stream/history-ws.js';
 import { toCSV } from './data/history.js';
 import { writeRowLine } from './data/csv.js';
 import { startCinematic, stopCinematic } from './stream/cinematic.js';
@@ -67,6 +68,16 @@ export function init(opts = {}) {
   const bus = createBus();
   const context = createContext();
   const scheduler = createScheduler();
+
+  // --- History WebSocket (fire-and-forget append channel) ---
+  // User-authored rows go straight to the server as text frames. The server
+  // batches and flushes to history.csv every ~30ms. Opening here means the
+  // socket is ready by the time the first user interaction lands.
+  let historyWS = null;
+  if (typeof window !== 'undefined') {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    historyWS = connectHistoryWS(`${proto}//${window.location.host}/history-ws`);
+  }
 
   // --- History ---
   // Priority: explicit CSV > localStorage > demo
@@ -129,6 +140,12 @@ export function init(opts = {}) {
       svgCtx = initSVG(container);
     }
   }
+
+  // --- Dirty flags (row-appended batching) ---
+  // Appends during a frame just set these; the render pump picks them up
+  // once per rAF. Collapses watcher/drag/SSE-replay bursts.
+  let dirtyGraph = false;
+  let dirtyHud = false;
 
   // --- Selection & interaction state ---
   let selection = createSelection();
@@ -370,19 +387,13 @@ export function init(opts = {}) {
       warmRestart(posMap, graph.state.nodes, graph.state.edges, context.weights.physics);
     }
 
-    // Mirror user-authored rows to runtime/history.csv via the dev server's
-    // POST endpoint. This turns `yarn stream` into a bidirectional log: file
-    // watchers append rows, the UI appends rows, both land in the same CSV.
-    // SSE echoes come back stamped with the same `t` → dedup skips them.
+    // Mirror user-authored rows to runtime/history.csv over the WebSocket.
+    // Fire-and-forget: no ack, no await. The server batches writes. SSE still
+    // echoes each appended line; the dedup-by-`t` path in the SSE handler
+    // ignores our own echo.
     const author = fullRow.payload && fullRow.payload.author;
-    if (author === 'user' && typeof fetch === 'function') {
-      try {
-        fetch('/history-append', {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/csv' },
-          body: writeRowLine(fullRow),
-        }).catch(() => {});
-      } catch {}
+    if (author === 'user' && historyWS) {
+      historyWS.send(writeRowLine(fullRow));
     }
 
     bus.emit('row-appended', { row: fullRow });
@@ -390,9 +401,12 @@ export function init(opts = {}) {
   }
 
   // --- Bus wiring ---
+  // Row-appended is high-frequency (cluster drags, file watchers, SSE replay).
+  // Setting flags here and letting the render pump collapse them into one
+  // full-render per frame converts N appends into at most one fullRender.
   bus.on('row-appended', () => {
-    updateHud();
-    fullRender();
+    dirtyGraph = true;
+    dirtyHud = true;
   });
 
   bus.on('context-changed', ({ context: ctx }) => {
@@ -1040,8 +1054,18 @@ export function init(opts = {}) {
   }
 
   // --- Set up render pump ---
+  // Checks dirty flags before the position-only pass. Full rebuilds are
+  // expensive; position/selection renders are cheap and run every frame.
   if (legacyState) {
     scheduler.setRender(() => {
+      if (dirtyGraph) {
+        dirtyGraph = false;
+        fullRender();
+      }
+      if (dirtyHud) {
+        dirtyHud = false;
+        updateHud();
+      }
       legacyRenderPositions(legacyState, { posMap });
       renderSelectionRings();
     });
@@ -1318,6 +1342,7 @@ export function init(opts = {}) {
       scheduler.stop();
       if (persistenceUnsub) persistenceUnsub();
       if (sseConnection) sseConnection.close();
+      if (historyWS) historyWS.close();
       stopCinematic(cinematicState);
     },
   };

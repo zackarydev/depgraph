@@ -18,6 +18,7 @@ import { createServer } from 'node:http';
 import { readFile, stat, appendFile, readdir, watch } from 'node:fs/promises';
 import { join, extname, resolve } from 'node:path';
 import { existsSync, createReadStream, statSync, watchFile, unwatchFile } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 import { createWatcher } from './codegen/watcher.mjs';
 import { appendHistory } from './codegen/graphgen.mjs';
@@ -178,6 +179,165 @@ async function watchSources() {
   }
 }
 
+// ─── WebSocket endpoint (/history-ws) ────────────
+//
+// Client fire-and-forget path: browsers open a WS and push each user-authored
+// row as a text frame containing one CSV line. The server buffers lines in
+// memory and flushes to history.csv on a 30ms debounce (or when the buffer
+// fills). The existing tail watcher still broadcasts appended lines via SSE,
+// so other clients (and this client's dedup-by-t path) see them like before.
+//
+// We hand-roll the WebSocket protocol (RFC 6455) to avoid adding a dep —
+// the project is minimal and we only need server-side text frames.
+
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+/** @type {Set<import('node:net').Socket>} */
+const wsClients = new Set();
+
+function acceptKey(key) {
+  return createHash('sha1').update(key + WS_GUID).digest('base64');
+}
+
+function parseFrame(buf) {
+  if (buf.length < 2) return null;
+  const b0 = buf[0];
+  const b1 = buf[1];
+  const fin = (b0 & 0x80) !== 0;
+  const opcode = b0 & 0x0F;
+  const masked = (b1 & 0x80) !== 0;
+  let len = b1 & 0x7F;
+  let offset = 2;
+  if (len === 126) {
+    if (buf.length < offset + 2) return null;
+    len = buf.readUInt16BE(offset);
+    offset += 2;
+  } else if (len === 127) {
+    if (buf.length < offset + 8) return null;
+    const hi = buf.readUInt32BE(offset);
+    const lo = buf.readUInt32BE(offset + 4);
+    len = hi * 0x100000000 + lo;
+    offset += 8;
+  }
+  let maskKey = null;
+  if (masked) {
+    if (buf.length < offset + 4) return null;
+    maskKey = buf.slice(offset, offset + 4);
+    offset += 4;
+  }
+  if (buf.length < offset + len) return null;
+  let payload = buf.slice(offset, offset + len);
+  if (masked) {
+    const out = Buffer.alloc(len);
+    for (let i = 0; i < len; i++) out[i] = payload[i] ^ maskKey[i % 4];
+    payload = out;
+  }
+  return { fin, opcode, payload, consumed: offset + len };
+}
+
+function writeFrame(socket, opcode, payload) {
+  const len = payload.length;
+  let header;
+  if (len < 126) {
+    header = Buffer.alloc(2);
+    header[0] = 0x80 | opcode;
+    header[1] = len;
+  } else if (len < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    header.writeUInt32BE(0, 2);
+    header.writeUInt32BE(len, 6);
+  }
+  try { socket.write(Buffer.concat([header, payload])); } catch {}
+}
+
+// Batched CSV append
+let pendingLines = [];
+let flushTimer = null;
+let flushing = null;
+const FLUSH_DEBOUNCE_MS = 30;
+const MAX_BUFFER = 500;
+
+function scheduleFlush() {
+  if (flushTimer || flushing) return;
+  flushTimer = setTimeout(flush, FLUSH_DEBOUNCE_MS);
+}
+
+async function flush() {
+  flushTimer = null;
+  if (flushing) return;
+  if (!pendingLines.length) return;
+  const data = pendingLines.join('\n') + '\n';
+  pendingLines = [];
+  flushing = appendFile(HISTORY_PATH, data, 'utf-8')
+    .catch(err => console.error('[ws] flush error:', err.message))
+    .finally(() => {
+      flushing = null;
+      if (pendingLines.length) scheduleFlush();
+    });
+}
+
+function ingestWsLines(message) {
+  const lines = message.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed) pendingLines.push(trimmed);
+  }
+  if (pendingLines.length >= MAX_BUFFER) flush();
+  else scheduleFlush();
+}
+
+function handleUpgrade(req, socket) {
+  if ((req.headers['upgrade'] || '').toLowerCase() !== 'websocket') {
+    socket.destroy();
+    return;
+  }
+  const key = req.headers['sec-websocket-key'];
+  if (!key) { socket.destroy(); return; }
+
+  socket.write([
+    'HTTP/1.1 101 Switching Protocols',
+    'Upgrade: websocket',
+    'Connection: Upgrade',
+    `Sec-WebSocket-Accept: ${acceptKey(key)}`,
+    '', '',
+  ].join('\r\n'));
+
+  wsClients.add(socket);
+  socket.setNoDelay(true);
+
+  let buf = Buffer.alloc(0);
+  socket.on('data', (chunk) => {
+    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+    while (true) {
+      const frame = parseFrame(buf);
+      if (!frame) break;
+      buf = buf.slice(frame.consumed);
+      if (frame.opcode === 0x8) { // close
+        try { socket.end(); } catch {}
+        return;
+      }
+      if (frame.opcode === 0x9) { // ping → pong
+        writeFrame(socket, 0xA, frame.payload);
+        continue;
+      }
+      if (frame.opcode === 0x1) { // text
+        ingestWsLines(frame.payload.toString('utf-8'));
+      }
+      // binary / continuation frames ignored
+    }
+  });
+  const cleanup = () => wsClients.delete(socket);
+  socket.on('close', cleanup);
+  socket.on('error', cleanup);
+}
+
 // ─── HTTP server ─────────────────────────────────
 
 const server = createServer(async (req, res) => {
@@ -213,26 +373,6 @@ const server = createServer(async (req, res) => {
       } catch {
         res.write(`data: ${JSON.stringify({ type: 'replay-done' })}\n\n`);
       }
-    }
-    return;
-  }
-
-  // ─── POST: /history-append ───
-  if (pathname === '/history-append' && req.method === 'POST') {
-    let body = '';
-    for await (const chunk of req) body += chunk;
-
-    try {
-      // Append raw CSV line(s) to history file
-      const lines = body.trim();
-      if (lines) {
-        await appendFile(HISTORY_PATH, lines + '\n', 'utf-8');
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
     }
     return;
   }
@@ -277,11 +417,21 @@ const server = createServer(async (req, res) => {
 
 // ─── Start ───────────────────────────────────────
 
+server.on('upgrade', (req, socket) => {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  if (url.pathname === '/history-ws') {
+    handleUpgrade(req, socket);
+  } else {
+    socket.destroy();
+  }
+});
+
 server.listen(PORT, () => {
   console.log(`\n  depgraph server`);
   console.log(`  ───────────────`);
   console.log(`  http://localhost:${PORT}/`);
   console.log(`  SSE:     /history-events`);
+  console.log(`  WS:      /history-ws`);
   console.log(`  History: ${HISTORY_PATH}`);
   if (WATCH_DIR) console.log(`  Watch:   ${resolve(WATCH_DIR)}`);
   console.log('');
@@ -292,12 +442,19 @@ const stopHistoryWatch = watchHistory();
 watchSources();
 
 // Graceful shutdown
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('\nShutting down...');
   if (stopHistoryWatch) stopHistoryWatch();
   if (watchAbort) watchAbort.abort();
+  // Drain any pending WS-buffered lines before exiting.
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  try { await flush(); } catch {}
+  if (flushing) { try { await flushing; } catch {} }
   for (const res of sseClients) {
     try { res.end(); } catch {}
+  }
+  for (const sock of wsClients) {
+    try { sock.end(); } catch {}
   }
   server.close(() => process.exit(0));
 });
