@@ -110,17 +110,43 @@ function clusterStructuralEdges(clusterId, graph) {
 export function setClusterStretchRule(clusterId, stretch, graph, meta) {
   const edges = clusterStructuralEdges(clusterId, graph);
   const action = meta && meta.action;
-  return edges.map((e) => ({
-    type: 'EDGE',
-    op: 'update',
-    id: e.id,
-    payload: {
-      stretch,
-      author: 'user',
-      action: action || 'cluster-stretch',
-      cluster: clusterId,
-    },
-  }));
+  const rows = [];
+  for (const e of edges) {
+    // Primary: an EDGE update that touches nothing on the row itself — the
+    // prop:stretch edge below is what actually carries the scalar. The
+    // bare update still fires so row-appended subscribers react.
+    rows.push({
+      type: 'EDGE',
+      op: 'update',
+      id: e.id,
+      _payload: {
+        author: 'user',
+        action: action || 'cluster-stretch',
+        cluster: clusterId,
+      },
+    });
+    // Property-edge: prop:stretch with a value-node target. applyRow in
+    // state.js mirrors the number back onto the target edge's .stretch.
+    const canonical = Number(stretch).toFixed(3);
+    rows.push({
+      type: 'NODE',
+      op: 'add',
+      id: `value:stretch:${canonical}`,
+      kind: 'value',
+      weight: 0.1,
+      label: String(stretch),
+    });
+    rows.push({
+      type: 'EDGE',
+      op: 'add',
+      id: `prop:${e.id}:stretch`,
+      source: e.id,
+      target: `value:stretch:${canonical}`,
+      layer: 'prop:stretch',
+      weight: 1,
+    });
+  }
+  return rows;
 }
 
 /** Collapse shortcut: stretch = STRETCH_COLLAPSED. */

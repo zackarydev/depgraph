@@ -1,15 +1,16 @@
 /**
  * RFC 4180 CSV parser + writer for the unified history format.
  *
- * History schema: t,type,op,id,kind,source,target,layer,weight,label,payload
- * - payload is a JSON blob, stored as a quoted CSV field
+ * History schema: t,type,op,id,kind,source,target,layer,weight,label
  * - All fields are strings in CSV; numeric fields (t, weight) are parsed on read
+ * - Legacy files carrying an 11th `payload` column are silently ignored on read
+ *   (the migrator converts them to prop/value/agent rows).
  *
  * @module data/csv
  */
 
 /** The canonical history CSV header. */
-export const HEADER = 't,type,op,id,kind,source,target,layer,weight,label,payload';
+export const HEADER = 't,type,op,id,kind,source,target,layer,weight,label';
 
 /** Column names in order. */
 export const COLUMNS = HEADER.split(',');
@@ -107,15 +108,6 @@ export function writeLine(fields) {
  * @returns {import('../core/types.js').HistoryRow}
  */
 export function fieldsToRow(fields) {
-  let payload = null;
-  if (fields[10]) {
-    try {
-      payload = JSON.parse(fields[10]);
-    } catch {
-      payload = null;
-    }
-  }
-
   const weight = fields[8] !== '' ? Number(fields[8]) : undefined;
 
   return {
@@ -129,7 +121,6 @@ export function fieldsToRow(fields) {
     layer: fields[7] || undefined,
     weight: isNaN(weight) ? undefined : weight,
     label: fields[9] || undefined,
-    payload,
   };
 }
 
@@ -150,7 +141,6 @@ export function rowToFields(row) {
     row.layer || '',
     row.weight != null ? String(row.weight) : '',
     row.label || '',
-    row.payload ? JSON.stringify(row.payload) : '',
   ];
 }
 

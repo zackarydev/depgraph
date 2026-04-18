@@ -50,6 +50,8 @@ import { loadFromLocal, wirePersistence } from './stream/local-persistence.js';
 import { tryConnectSSE } from './stream/sse.js';
 import { toCSV } from './data/history.js';
 import { writeRowLine } from './data/csv.js';
+import { expandPayload, agentSeedRows } from './data/payload-expand.js';
+import { createHLC } from './core/clock.js';
 import { startCinematic, stopCinematic } from './stream/cinematic.js';
 
 /**
@@ -91,6 +93,21 @@ export function init(opts = {}) {
       historyAppend(history, row);
     }
   }
+
+  // --- Agent singletons ---
+  // Every authored-by / produced-by edge references one of these nodes. Seed
+  // them idempotently (NODE add overwrites identically if already present).
+  for (const seed of agentSeedRows()) {
+    if (!history.state.nodes.has(seed.id)) {
+      historyAppend(history, seed);
+    }
+  }
+
+  // --- HLC clock for position moments ---
+  // Each drag/reset mints a `moment:pos:<hlc>` node whose id embeds the HLC
+  // coordinate. The substrate's dispatcher uses 'ui' as its producer id;
+  // we match that so ordering is consistent across moments.
+  const hlc = createHLC('ui');
 
   // --- Graph (state + derivation) ---
   const eff = effectiveRows(history);
@@ -285,7 +302,7 @@ export function init(opts = {}) {
       target: targetId,
       layer: CLICK_EDGE_LAYER,
       weight: 0,
-      payload: {
+      _payload: {
         author: 'user',
         action: 'click',
         target: targetId,
@@ -295,7 +312,19 @@ export function init(opts = {}) {
   }
 
   // --- Append row to history + update graph ---
+  // `_payload` on an incoming row is legacy-style metadata (author, action,
+  // x/y, …). The CSV schema no longer has a payload column; instead we strip
+  // `_payload` before the row goes to history and expand it into a burst of
+  // property-edge + value-node + agent-edge rows via expandPayload.
   function appendRow(row) {
+    const payload = row._payload;
+    const userAuthoredHint = row._userAuthored === true;
+    if (payload !== undefined) delete row._payload;
+    if (row._userAuthored !== undefined) delete row._userAuthored;
+
+    const isUserAuthored = userAuthoredHint
+      || (payload && payload.author === 'user');
+
     const fullRow = historyAppend(history, row);
     applyRowToGraph(graph, fullRow, context.weights.affinity);
 
@@ -308,8 +337,7 @@ export function init(opts = {}) {
     // POST endpoint. This turns `yarn stream` into a bidirectional log: file
     // watchers append rows, the UI appends rows, both land in the same CSV.
     // SSE echoes come back stamped with the same `t` → dedup skips them.
-    const author = fullRow.payload && fullRow.payload.author;
-    if (author === 'user' && typeof fetch === 'function') {
+    if (isUserAuthored && typeof fetch === 'function') {
       try {
         fetch('/history-append', {
           method: 'POST',
@@ -320,6 +348,18 @@ export function init(opts = {}) {
     }
 
     bus.emit('row-appended', { row: fullRow });
+
+    // Expand the legacy payload into graph-native rows. Each expanded row
+    // inherits the user-authored flag so it also mirrors to the server.
+    // Expansion rows carry no `_payload` — the base case for the recursion.
+    if (payload) {
+      const expanded = expandPayload({ subjectId: fullRow.id, payload, hlc });
+      for (const extra of expanded) {
+        extra._userAuthored = isUserAuthored;
+        appendRow(extra);
+      }
+    }
+
     return fullRow;
   }
 
@@ -563,7 +603,7 @@ export function init(opts = {}) {
                 type: 'NODE',
                 op: 'update',
                 id,
-                payload: { x: p.x, y: p.y, author: 'user', action: 'cluster-drag', cluster: clusterDragState.clusterId },
+                _payload: { x: p.x, y: p.y, author: 'user', action: 'cluster-drag', cluster: clusterDragState.clusterId },
               });
             }
           }
@@ -884,15 +924,22 @@ export function init(opts = {}) {
     graph.state.nodes.clear();
     graph.state.edges.clear();
     graph.state.cursor = -1;
+
+    // Position-moment replay. Each drag/reset emits a `moment:pos:<hlc>`
+    // node plus `prop:subject` + `prop:x` + `prop:y` edges. To restore a
+    // subject's last-known position we remember the most-recently-added
+    // moment pointing at it, then resolve its prop:x / prop:y value-node
+    // ids back to numbers.
+    /** @type {Map<string, string>} subjectId -> momentId */
+    const latestMomentBySubject = new Map();
+    /** @type {Map<string, {x?: number, y?: number}>} momentId -> {x,y} */
+    const momentXY = new Map();
+
     for (const r of rows) {
       const { type, op, id } = r;
       if (type === 'NODE') {
         if (op === 'add') {
-          graph.state.nodes.set(id, { id, kind: r.kind || 'unknown', label: r.label || id, importance: r.weight != null ? r.weight : 1, payload: r.payload || null });
-          // Apply persisted coordinates if the add row carries them.
-          if (r.payload && typeof r.payload.x === 'number' && typeof r.payload.y === 'number') {
-            updatePosMapCoord(id, r.payload.x, r.payload.y);
-          }
+          graph.state.nodes.set(id, { id, kind: r.kind || 'unknown', label: r.label || id, importance: r.weight != null ? r.weight : 1 });
         } else if (op === 'update') {
           const existing = graph.state.nodes.get(id);
           if (existing) {
@@ -900,16 +947,33 @@ export function init(opts = {}) {
             if (r.label != null) existing.label = r.label;
             if (r.weight != null) existing.importance = r.weight;
           }
-          // Position replay: drag/reset rows carry x,y in payload.
-          if (r.payload && typeof r.payload.x === 'number' && typeof r.payload.y === 'number') {
-            updatePosMapCoord(id, r.payload.x, r.payload.y);
-          }
         } else if (op === 'remove') {
           graph.state.nodes.delete(id);
         }
       } else if (type === 'EDGE') {
         if (op === 'add') {
-          graph.state.edges.set(id, { id, source: r.source, target: r.target, layer: r.layer || 'unknown', weight: r.weight != null ? r.weight : 1, directed: true });
+          graph.state.edges.set(id, { id, source: r.source, target: r.target, layer: r.layer || 'unknown', weight: r.weight != null ? r.weight : 1, stretch: 0, directed: true });
+          if (r.layer === 'prop:stretch' && r.source && typeof r.target === 'string') {
+            const tgt = graph.state.edges.get(r.source);
+            if (tgt && r.target.startsWith('value:stretch:')) {
+              const n = Number(r.target.slice('value:stretch:'.length));
+              if (!Number.isNaN(n)) tgt.stretch = n;
+            }
+          }
+          if (r.layer === 'prop:subject' && r.source && r.target) {
+            latestMomentBySubject.set(r.target, r.source);
+          } else if ((r.layer === 'prop:x' || r.layer === 'prop:y') && r.source && typeof r.target === 'string') {
+            const axis = r.layer === 'prop:x' ? 'x' : 'y';
+            const prefix = `value:${axis}:`;
+            if (r.target.startsWith(prefix)) {
+              const n = Number(r.target.slice(prefix.length));
+              if (!Number.isNaN(n)) {
+                let rec = momentXY.get(r.source);
+                if (!rec) { rec = {}; momentXY.set(r.source, rec); }
+                rec[axis] = n;
+              }
+            }
+          }
         } else if (op === 'update') {
           const existing = graph.state.edges.get(id);
           if (existing) {
@@ -922,6 +986,15 @@ export function init(opts = {}) {
       }
       graph.state.cursor = r.t;
     }
+
+    // Resolve subject → latest-moment → (x, y) and apply to posMap.
+    for (const [subjectId, momentId] of latestMomentBySubject) {
+      const rec = momentXY.get(momentId);
+      if (rec && typeof rec.x === 'number' && typeof rec.y === 'number') {
+        updatePosMapCoord(subjectId, rec.x, rec.y);
+      }
+    }
+
     rederive(graph, context.weights.affinity);
     fullRender();
   }

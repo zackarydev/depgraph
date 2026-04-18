@@ -44,7 +44,6 @@
  * @property {string} [layer]
  * @property {number} [weight]
  * @property {string} [label]
- * @property {Object} [payload] - JSON blob for producer-specific extras
  */
 
 // ─── Working Context ───
