@@ -22,6 +22,14 @@ import {
   liveMoments,
 } from '../src/core/dispatcher.js';
 import { gatherRule, gatherCentroid, neighborsOf } from '../src/rules/gather.js';
+import { dragRule, nodeDragOffsets, clusterDragOffsets } from '../src/rules/drag.js';
+import { relaxRule } from '../src/rules/relax.js';
+import { arrangementPullRule } from '../src/rules/arrangement-pull.js';
+import { descentStep } from '../src/layout/gradient.js';
+import {
+  createArrangementStack,
+  pushArrangement,
+} from '../src/interact/arrangements.js';
 import {
   createPositionMap,
   updatePosition,
@@ -476,5 +484,268 @@ describe('click events as graph edges', () => {
     const after = buildFromHistory(history.rows);
     const afterMembers = new Set(after.derivation.clusters.get('cluster:C').members);
     assert.deepEqual(afterMembers, beforeMembers, 'cluster membership unchanged by clicks');
+  });
+});
+
+describe('rules/drag', () => {
+  it('primary snaps to anchor; group members follow rigidly', () => {
+    const pm = createPositionMap();
+    updatePosition(pm, 'p', 10, 10);
+    updatePosition(pm, 'g1', 20, 10); // +10 in x from primary
+    updatePosition(pm, 'g2', 10, 30); // +20 in y from primary
+
+    const offsets = nodeDragOffsets('p', pm, ['g1', 'g2']);
+    assert.deepEqual(offsets.get('p'), { dx: 0, dy: 0 });
+    assert.deepEqual(offsets.get('g1'), { dx: 10, dy: 0 });
+    assert.deepEqual(offsets.get('g2'), { dx: 0, dy: 20 });
+
+    const d = createDispatcher();
+    registerRule(d, dragRule);
+    emit(d, {
+      rule: 'drag',
+      members: ['p', 'g1', 'g2'],
+      payload: { anchorX: 100, anchorY: 50, offsets },
+    });
+    tick(d, 16, { posMap: pm });
+
+    assert.deepEqual(
+      { x: pm.positions.get('p').x, y: pm.positions.get('p').y },
+      { x: 100, y: 50 },
+    );
+    assert.deepEqual(
+      { x: pm.positions.get('g1').x, y: pm.positions.get('g1').y },
+      { x: 110, y: 50 },
+    );
+    assert.deepEqual(
+      { x: pm.positions.get('g2').x, y: pm.positions.get('g2').y },
+      { x: 100, y: 70 },
+    );
+  });
+
+  it('locked members skip drag updates', () => {
+    const pm = createPositionMap();
+    updatePosition(pm, 'p', 0, 0);
+    updatePosition(pm, 'g', 5, 0);
+    setLocked(pm, 'g', true);
+
+    const offsets = nodeDragOffsets('p', pm, ['g']);
+    const d = createDispatcher();
+    registerRule(d, dragRule);
+    emit(d, {
+      rule: 'drag',
+      members: ['p', 'g'],
+      payload: { anchorX: 100, anchorY: 0, offsets },
+    });
+    tick(d, 16, { posMap: pm });
+
+    assert.equal(pm.positions.get('p').x, 100);
+    assert.equal(pm.positions.get('g').x, 5); // unchanged
+  });
+
+  it('cluster drag: all members translate by the anchor delta', () => {
+    const pm = createPositionMap();
+    updatePosition(pm, 'a', 10, 10);
+    updatePosition(pm, 'b', 20, 30);
+    updatePosition(pm, 'c', -5, 0);
+
+    const anchorX0 = 0, anchorY0 = 0;
+    const offsets = clusterDragOffsets(['a', 'b', 'c'], anchorX0, anchorY0, pm);
+    // Each offset is (pos - anchor0), so anchor1 + offset == pos + (anchor1 - anchor0)
+    const d = createDispatcher();
+    registerRule(d, dragRule);
+    emit(d, {
+      rule: 'drag',
+      members: ['a', 'b', 'c'],
+      payload: { anchorX: 50, anchorY: 7, offsets },
+    });
+    tick(d, 16, { posMap: pm });
+
+    assert.equal(pm.positions.get('a').x, 60);
+    assert.equal(pm.positions.get('a').y, 17);
+    assert.equal(pm.positions.get('b').x, 70);
+    assert.equal(pm.positions.get('b').y, 37);
+    assert.equal(pm.positions.get('c').x, 45);
+    assert.equal(pm.positions.get('c').y, 7);
+  });
+
+  it('drag moment is idempotent under unchanged anchor', () => {
+    const pm = createPositionMap();
+    updatePosition(pm, 'p', 0, 0);
+    const offsets = nodeDragOffsets('p', pm);
+
+    const d = createDispatcher();
+    registerRule(d, dragRule);
+    emit(d, {
+      rule: 'drag',
+      members: ['p'],
+      payload: { anchorX: 42, anchorY: -7, offsets },
+    });
+    tick(d, 16, { posMap: pm });
+    const after1 = { x: pm.positions.get('p').x, y: pm.positions.get('p').y };
+    tick(d, 16, { posMap: pm });
+    const after2 = { x: pm.positions.get('p').x, y: pm.positions.get('p').y };
+    assert.deepEqual(after1, after2);
+  });
+});
+
+describe('rules/relax — parity with direct descentStep', () => {
+  it('relax trajectory matches descentStep trajectory step-for-step', () => {
+    const edges = new Map([
+      ['e1', { id: 'e1', source: 'a', target: 'b', layer: 'calls', weight: 1 }],
+      ['e2', { id: 'e2', source: 'b', target: 'c', layer: 'calls', weight: 1 }],
+    ]);
+    const W = { physics: 1 };
+
+    const pmDirect = createPositionMap();
+    const pmSub = createPositionMap();
+    for (const pm of [pmDirect, pmSub]) {
+      updatePosition(pm, 'a', 10, 0);
+      updatePosition(pm, 'b', 0, 10);
+      updatePosition(pm, 'c', -10, 0);
+    }
+
+    const d = createDispatcher();
+    registerRule(d, relaxRule);
+    emit(d, {
+      rule: 'relax',
+      members: ['a', 'b', 'c'],
+      payload: { eta: 0.1 },
+    });
+
+    for (let i = 0; i < 20; i++) {
+      descentStep(pmDirect, edges, W, { eta: 0.1 });
+      tick(d, 16, { posMap: pmSub, edges, weights: W });
+    }
+
+    for (const id of ['a', 'b', 'c']) {
+      const L = pmDirect.positions.get(id);
+      const S = pmSub.positions.get(id);
+      assert.ok(Math.abs(L.x - S.x) < 1e-9, `${id}.x parity: direct=${L.x} sub=${S.x}`);
+      assert.ok(Math.abs(L.y - S.y) < 1e-9, `${id}.y parity: direct=${L.y} sub=${S.y}`);
+    }
+  });
+
+  it('clearSticky temporarily unsticks nodes for the step, restoring after', () => {
+    const edges = new Map([
+      ['e1', { id: 'e1', source: 'a', target: 'b', layer: 'calls', weight: 1 }],
+    ]);
+    const W = { physics: 1 };
+    const pm = createPositionMap();
+    updatePosition(pm, 'a', 100, 0);
+    updatePosition(pm, 'b', 0, 0);
+    // Mark a as sticky — without clearSticky, its step would be dampened 20x.
+    pm.positions.get('a').sticky = true;
+
+    const d = createDispatcher();
+    registerRule(d, relaxRule);
+    emit(d, {
+      rule: 'relax',
+      members: ['a', 'b'],
+      payload: { eta: 0.1, clearSticky: true },
+    });
+    tick(d, 16, { posMap: pm, edges, weights: W });
+    // sticky flag must be restored after the tick
+    assert.equal(pm.positions.get('a').sticky, true);
+    // a moved meaningfully (not damped): compare against sticky-dampened baseline
+    const pmDamped = createPositionMap();
+    updatePosition(pmDamped, 'a', 100, 0);
+    updatePosition(pmDamped, 'b', 0, 0);
+    pmDamped.positions.get('a').sticky = true;
+    descentStep(pmDamped, edges, W, { eta: 0.1 });
+    const movedLive = Math.abs(pm.positions.get('a').x - 100);
+    const movedDamped = Math.abs(pmDamped.positions.get('a').x - 100);
+    assert.ok(movedLive > movedDamped * 5, 'clearSticky must overpower sticky damping');
+  });
+
+  it('scope restricts motion to scope members only', () => {
+    const edges = new Map([
+      ['e1', { id: 'e1', source: 'a', target: 'b', layer: 'calls', weight: 1 }],
+      ['e2', { id: 'e2', source: 'a', target: 'outside', layer: 'calls', weight: 1 }],
+    ]);
+    const W = { physics: 1 };
+    const pm = createPositionMap();
+    updatePosition(pm, 'a', 100, 0);
+    updatePosition(pm, 'b', 0, 100);
+    updatePosition(pm, 'outside', 500, 500);
+
+    const d = createDispatcher();
+    registerRule(d, relaxRule);
+    emit(d, {
+      rule: 'relax',
+      members: ['a', 'b'],
+      payload: { eta: 0.1, scope: new Set(['a', 'b']) },
+    });
+    tick(d, 16, { posMap: pm, edges, weights: W });
+    // outside must not have moved — it's not in scope
+    assert.equal(pm.positions.get('outside').x, 500);
+    assert.equal(pm.positions.get('outside').y, 500);
+  });
+});
+
+describe('rules/arrangement-pull — cursor walks over time', () => {
+  it('walks cursor back through the stack as elapsed crosses stepMs', () => {
+    const pm = createPositionMap();
+    updatePosition(pm, 'a', 0, 0);
+    const st = createArrangementStack();
+
+    // Three snapshots: a at (0,0), (50,0), (100,0). Cursor lands on the last.
+    pushArrangement(st, 's0', pm);
+    pm.positions.get('a').x = 50;
+    pushArrangement(st, 's1', pm);
+    pm.positions.get('a').x = 100;
+    pushArrangement(st, 's2', pm);
+    assert.equal(st.cursor, 2);
+
+    const d = createDispatcher();
+    registerRule(d, arrangementPullRule);
+    emit(d, {
+      rule: 'arrangement-pull',
+      members: [],
+      payload: { direction: 'back', stepMs: 100 },
+    });
+
+    // First sub-stepMs frame: no step.
+    tick(d, 50, { posMap: pm, arrangements: st });
+    assert.equal(st.cursor, 2);
+    assert.equal(pm.positions.get('a').x, 100);
+
+    // Cross stepMs: cursor advances back one, posMap snaps to s1.
+    tick(d, 60, { posMap: pm, arrangements: st });
+    assert.equal(st.cursor, 1);
+    assert.equal(pm.positions.get('a').x, 50);
+
+    // Another full step: lands on s0.
+    tick(d, 100, { posMap: pm, arrangements: st });
+    assert.equal(st.cursor, 0);
+    assert.equal(pm.positions.get('a').x, 0);
+
+    // Already at start: further ticks are no-ops.
+    tick(d, 100, { posMap: pm, arrangements: st });
+    assert.equal(st.cursor, 0);
+    assert.equal(pm.positions.get('a').x, 0);
+  });
+
+  it('fwd direction walks cursor forward', () => {
+    const pm = createPositionMap();
+    updatePosition(pm, 'a', 0, 0);
+    const st = createArrangementStack();
+    pushArrangement(st, 's0', pm);
+    pm.positions.get('a').x = 50;
+    pushArrangement(st, 's1', pm);
+    // Rewind cursor to 0 so fwd has somewhere to go.
+    st.cursor = 0;
+    pm.positions.get('a').x = 0;
+
+    const d = createDispatcher();
+    registerRule(d, arrangementPullRule);
+    emit(d, {
+      rule: 'arrangement-pull',
+      members: [],
+      payload: { direction: 'fwd', stepMs: 100 },
+    });
+
+    tick(d, 120, { posMap: pm, arrangements: st });
+    assert.equal(st.cursor, 1);
+    assert.equal(pm.positions.get('a').x, 50);
   });
 });

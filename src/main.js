@@ -27,14 +27,16 @@ import {
 import { generateDemoHistory } from './data/demo-history.js';
 import { EDGE_LAYERS, setLayerVisible, getLayer } from './edges/layers.js';
 import { createSelection, selectNode, toggleSelection, clearSelection } from './interact/select.js';
-import { startDrag, onDrag, endDrag } from './interact/drag.js';
+import { endDrag } from './interact/drag.js';
 import { toggleClusterStretchRule, clusterMembers as resolveClusterMembers } from './rules/cluster-rules.js';
-import { descentStep, setStretchBias } from './layout/gradient.js';
+import { setStretchBias } from './layout/gradient.js';
 import { createKeyState, keyDown, keyUp } from './interact/keyboard.js';
 import { startTrace, updateTrace, revealedNodes, releaseTrace, holdTrace, changeDirection } from './interact/trace.js';
-import { startGather, startStrangerGather, updateGather, stopGather } from './interact/gather.js';
 import { createDispatcher, registerRule, emit as emitMoment, retract as retractMoment, tick as tickDispatcher } from './core/dispatcher.js';
 import { gatherRule, gatherCentroid, neighborsOf } from './rules/gather.js';
+import { dragRule, nodeDragOffsets, clusterDragOffsets } from './rules/drag.js';
+import { relaxRule } from './rules/relax.js';
+import { arrangementPullRule } from './rules/arrangement-pull.js';
 import {
   SENTINEL_MOUSE_CLICKED,
   CLICK_EDGE_LAYER,
@@ -43,9 +45,8 @@ import {
   lastClickTarget,
 } from './rules/click-events.js';
 import { updatePosition, setLocked } from './layout/positions.js';
-import { startReset, updateReset, stopReset } from './interact/reset.js';
 import { startTimeTravel, updateTimeTravel, stopTimeTravel, stepOnce, switchBranchByDirection } from './interact/time-travel.js';
-import { createArrangementStack, pushArrangement, startTravel as startArrangementTravel, updateTravel as updateArrangementTravel, stopTravel as stopArrangementTravel } from './interact/arrangements.js';
+import { createArrangementStack, pushArrangement, startTravel as startArrangementTravel, stopTravel as stopArrangementTravel } from './interact/arrangements.js';
 import { loadFromLocal, wirePersistence } from './stream/local-persistence.js';
 import { tryConnectSSE } from './stream/sse.js';
 import { toCSV } from './data/history.js';
@@ -132,16 +133,26 @@ export function init(opts = {}) {
   // --- Selection & interaction state ---
   let selection = createSelection();
   let keyState = createKeyState();
-  let dragState = null;
   let traceState = null;
-  let gatherState = null;
-  let activeGatherMoment = null;
-  let resetState = null;
   let timeTravelState = null;
-  let arrangementTravelState = null;
   const arrangements = createArrangementStack();
   let currentZoom = 1;
   let highlightedSearchIds = new Set();
+
+  // Live moments — every motion-producing interaction is a moment under the
+  // dispatcher substrate. Kept as handles so handlers can retract precisely.
+  /** @type {import('./core/moment.js').Moment|null} */
+  let activeGatherMoment = null;
+  /** @type {import('./core/moment.js').Moment|null} */
+  let activeDragMoment = null;
+  /** @type {null | { moment: import('./core/moment.js').Moment, primaryId: string|null, memberIds: string[], flavor: 'node'|'cluster', isGroup: boolean, clusterId: string|null }} */
+  let activeDragContext = null;
+  /** @type {import('./core/moment.js').Moment|null} */
+  let activeRelaxMoment = null;
+  /** @type {import('./core/moment.js').Moment|null} */
+  let activeArrangementMoment = null;
+  /** @type {'back' | 'fwd' | null} */
+  let activeArrangementDirection = null;
 
   // --- Moment dispatcher (phase-12 substrate) ---
   // Holds live moments emitted by user interactions, file watchers, agents,
@@ -149,6 +160,23 @@ export function init(opts = {}) {
   // moment's rule to contribute position deltas; they sum and apply in one pass.
   const dispatcher = createDispatcher({ producerId: 'ui' });
   registerRule(dispatcher, gatherRule);
+  registerRule(dispatcher, dragRule);
+  registerRule(dispatcher, relaxRule);
+  registerRule(dispatcher, arrangementPullRule);
+
+  // One always-on scheduler tick drives every live moment. Empty d.live is
+  // a fast no-op, so running it each frame costs nothing when nothing is
+  // interacting. Per-interaction scheduler entries are only needed for
+  // non-dispatcher loops (trace, time-travel) whose motion isn't position
+  // deltas.
+  scheduler.register('dispatcher', (dt) => {
+    tickDispatcher(dispatcher, dt, {
+      posMap,
+      edges: graph.state.edges,
+      weights: context.weights.physics,
+      arrangements,
+    });
+  });
 
   // --- Legacy render state (port of old_versions/index.html visuals) ---
   if (svgCtx) {
@@ -271,6 +299,44 @@ export function init(opts = {}) {
     rings.forEach(r => r.remove());
   }
 
+  // --- Build history rows from a completed drag gesture. The rule has already
+  // moved posMap into place; this function just snapshots final positions,
+  // marks the dragged nodes sticky (node-drag flavor), and computes spatial
+  // edges for the K-nearest neighbors. Cluster drags emit one position row
+  // per member with no stickiness or spatial edges — matching legacy behavior.
+  function buildDragRows(dctx, posMap) {
+    if (!dctx) return [];
+    if (dctx.flavor === 'cluster') {
+      const rows = [];
+      for (const id of dctx.memberIds) {
+        const ps = posMap.positions.get(id);
+        if (ps) {
+          rows.push({
+            type: 'NODE', op: 'update', id,
+            payload: {
+              x: ps.x, y: ps.y,
+              author: 'user', action: 'cluster-drag',
+              cluster: dctx.clusterId,
+            },
+          });
+        }
+      }
+      return rows;
+    }
+    // Node drag: reuse endDrag for sticky + spatial-edge logic via a
+    // synthesized legacy dragState shape (endDrag reads moved/nodeId/isGroup/offsets).
+    const offsets = new Map();
+    for (const id of dctx.memberIds) {
+      if (id !== dctx.primaryId) offsets.set(id, {});
+    }
+    return endDrag({
+      moved: true,
+      nodeId: dctx.primaryId,
+      isGroup: dctx.isGroup,
+      offsets,
+    }, posMap);
+  }
+
   // --- Emit a click event as an edge from the mouse-clicked sentinel to
   //     the target node. Persists to history; downstream consumers query the
   //     graph's edges for the most recent `event:click` to learn selection.
@@ -379,33 +445,43 @@ export function init(opts = {}) {
     return el.getAttribute('data-cluster');
   }
 
-  // --- Descent burst: run N frames of gradient descent so stretch changes
-  // (or any weight mutation) propagate visibly. Scoped bursts freeze everything
-  // outside the scope — cluster-local collapse/expand must not pull bridge
-  // nodes around. The global X-reset key is what drives global descent; this
-  // burst is intentionally narrower.
+  // --- Descent burst: emit a scoped relax moment and auto-retract it after N
+  // frames. Scoped bursts freeze everything outside the scope — cluster-local
+  // collapse/expand must not pull bridge nodes around. The global X-reset key
+  // emits a different, global relax moment; this burst is intentionally narrower.
   let descentBurstFrames = 0;
-  /** @type {Set<string> | null} */
-  let descentBurstScope = null;
-  let descentBurstCollapse = false;
+  /** @type {import('./core/moment.js').Moment|null} */
+  let descentBurstMoment = null;
   function kickDescentBurst(frames = 60, scope = null, collapse = false) {
     descentBurstFrames = Math.max(descentBurstFrames, frames);
-    descentBurstScope = scope;
-    descentBurstCollapse = collapse;
-    if (scheduler.tickNames.includes('descent-burst')) return;
-    scheduler.register('descent-burst', () => {
+    const zoomEta = 0.25 / Math.max(0.5, Math.min(2, currentZoom));
+    if (descentBurstMoment) {
+      // A prior burst is still live — update its scope to the latest gesture
+      // and extend its lifetime via the shared frame counter above.
+      descentBurstMoment.payload.eta = zoomEta;
+      descentBurstMoment.payload.scope = scope || undefined;
+      descentBurstMoment.payload.collapse = !!collapse;
+      return;
+    }
+    descentBurstMoment = emitMoment(dispatcher, {
+      rule: 'relax',
+      members: scope ? [...scope] : [],
+      payload: {
+        eta: zoomEta,
+        scope: scope || undefined,
+        collapse: !!collapse,
+      },
+      author: 'user',
+    });
+    scheduler.register('descent-burst-timer', () => {
       if (descentBurstFrames <= 0) {
-        scheduler.unregister('descent-burst');
-        descentBurstScope = null;
-        descentBurstCollapse = false;
+        if (descentBurstMoment) {
+          retractMoment(dispatcher, descentBurstMoment.id);
+          descentBurstMoment = null;
+        }
+        scheduler.unregister('descent-burst-timer');
         return;
       }
-      const zoomEta = 0.25 / Math.max(0.5, Math.min(2, currentZoom));
-      descentStep(posMap, graph.state.edges, context.weights.physics, {
-        eta: zoomEta,
-        scope: descentBurstScope || undefined,
-        collapse: descentBurstCollapse,
-      });
       descentBurstFrames--;
     });
   }
@@ -418,11 +494,11 @@ export function init(opts = {}) {
     let mouseDownTarget = null;
     let mouseDownPos = null;
     let isDragging = false;
-    // Active cluster-label drag, if any. Distinct from dragState (node drag)
-    // because it moves all members as a rigid group with no history rows per
-    // node — one summary row is written on release.
-    /** @type {null | { clusterId: string, startWx: number, startWy: number, offsets: Map<string,{dx:number,dy:number}>, moved: boolean }} */
-    let clusterDragState = null;
+    // Drag setup captured at mousedown. We emit the drag moment only once
+    // the gesture crosses the click-vs-drag threshold, so bare clicks never
+    // perturb posMap. Flavor selects between node / cluster-label drags.
+    /** @type {null | { flavor: 'node'|'cluster', primaryId: string|null, clusterId: string|null, isGroup: boolean, memberIds: string[], offsets: Map<string,{dx:number,dy:number}> }} */
+    let pendingDragSetup = null;
 
     // Track zoom changes for fractal LOD
     if (typeof d3 !== 'undefined' && d3.zoom) {
@@ -477,22 +553,15 @@ export function init(opts = {}) {
       // rendered above nodes and the user explicitly grabbed the text.
       const clusterId = clusterLabelFromEvent(e);
       if (clusterId) {
-        const members = legacyState && legacyState.clusterMembers.get(clusterId);
-        const offsets = new Map();
-        if (members) {
-          for (const mid of members) {
-            const mp = posMap.positions.get(mid);
-            if (mp && !mp.locked) {
-              offsets.set(mid, { dx: mp.x - world.x, dy: mp.y - world.y });
-            }
-          }
-        }
-        clusterDragState = {
+        const memberSet = resolveClusterMembers(clusterId, graph);
+        const offsets = clusterDragOffsets(memberSet, world.x, world.y, posMap);
+        pendingDragSetup = {
+          flavor: 'cluster',
+          primaryId: null,
           clusterId,
-          startWx: world.x,
-          startWy: world.y,
+          isGroup: false,
+          memberIds: [...offsets.keys()],
           offsets,
-          moved: false,
         };
         mouseDownTarget = clusterId;
         mouseDownPos = { sx, sy, wx: world.x, wy: world.y };
@@ -508,7 +577,16 @@ export function init(opts = {}) {
       isDragging = false;
 
       if (nodeId) {
-        dragState = startDrag(nodeId, posMap, selection, e.shiftKey);
+        const isGroup = e.shiftKey && selection.selected.size > 1 && selection.selected.has(nodeId);
+        const offsets = nodeDragOffsets(nodeId, posMap, isGroup ? selection.selected : null);
+        pendingDragSetup = {
+          flavor: 'node',
+          primaryId: nodeId,
+          clusterId: null,
+          isGroup,
+          memberIds: [...offsets.keys()],
+          offsets,
+        };
         emitClickEvent(nodeId, { kind: 'node', shiftKey: e.shiftKey });
       }
     }, true);
@@ -527,50 +605,67 @@ export function init(opts = {}) {
         isDragging = true;
       }
 
-      if (dragState && isDragging) {
-        onDrag(dragState, world.x, world.y, posMap);
-      } else if (clusterDragState && isDragging) {
-        clusterDragState.moved = true;
-        for (const [id, off] of clusterDragState.offsets) {
-          const p = posMap.positions.get(id);
-          if (p && !p.locked) {
-            p.x = world.x + off.dx;
-            p.y = world.y + off.dy;
-          }
+      if (pendingDragSetup && isDragging) {
+        if (!activeDragMoment) {
+          // First frame past the click-vs-drag threshold: promote the pending
+          // setup into a live drag moment. Dispatcher ticks will snap
+          // members to anchor+offset thereafter.
+          const setup = pendingDragSetup;
+          activeDragMoment = emitMoment(dispatcher, {
+            rule: 'drag',
+            members: setup.memberIds,
+            payload: {
+              anchorX: world.x,
+              anchorY: world.y,
+              offsets: setup.offsets,
+            },
+            author: 'user',
+          });
+          activeDragContext = {
+            moment: activeDragMoment,
+            primaryId: setup.primaryId,
+            memberIds: setup.memberIds,
+            flavor: setup.flavor,
+            isGroup: setup.isGroup,
+            clusterId: setup.clusterId,
+          };
+        } else {
+          activeDragMoment.payload.anchorX = world.x;
+          activeDragMoment.payload.anchorY = world.y;
         }
       }
     });
 
     window.addEventListener('mouseup', (e) => {
       if (!mouseDownPos) return;
-      if (dragState && isDragging) {
-        const rows = endDrag(dragState, posMap);
-        for (const row of rows) {
-          appendRow(row);
-        }
+      if (activeDragMoment && isDragging) {
+        // Snap to the final cursor position before we retract, so posMap
+        // reflects the gesture end even if no rAF fired since last move.
+        const rect = svg.getBoundingClientRect();
+        const sx = e.clientX - rect.left;
+        const sy = e.clientY - rect.top;
+        const world = screenToWorld(sx, sy);
+        activeDragMoment.payload.anchorX = world.x;
+        activeDragMoment.payload.anchorY = world.y;
+        tickDispatcher(dispatcher, 16, {
+          posMap,
+          edges: graph.state.edges,
+          weights: context.weights.physics,
+          arrangements,
+        });
+
+        const dctx = activeDragContext;
+        retractMoment(dispatcher, activeDragMoment.id);
+        activeDragMoment = null;
+        activeDragContext = null;
+
+        const rows = buildDragRows(dctx, posMap);
+        for (const row of rows) appendRow(row);
         if (rows.length > 0) {
-          pushArrangement(arrangements, 'drag', posMap);
+          pushArrangement(arrangements, dctx.flavor === 'cluster' ? 'cluster-drag' : 'drag', posMap);
           updateHud();
         }
-      } else if (clusterDragState && isDragging) {
-        // Persist the new positions of each moved member as history rows so
-        // time-travel and rebuild can restore them. One row per member.
-        if (clusterDragState.moved) {
-          for (const [id] of clusterDragState.offsets) {
-            const p = posMap.positions.get(id);
-            if (p) {
-              appendRow({
-                type: 'NODE',
-                op: 'update',
-                id,
-                payload: { x: p.x, y: p.y, author: 'user', action: 'cluster-drag', cluster: clusterDragState.clusterId },
-              });
-            }
-          }
-          pushArrangement(arrangements, 'cluster-drag', posMap);
-          updateHud();
-        }
-      } else if (mouseDownTarget && !isDragging && !clusterDragState) {
+      } else if (mouseDownTarget && !isDragging) {
         if (e.shiftKey) {
           selection = toggleSelection(selection, mouseDownTarget);
         } else {
@@ -585,8 +680,7 @@ export function init(opts = {}) {
       mouseDownPos = null;
       mouseDownTarget = null;
       isDragging = false;
-      dragState = null;
-      clusterDragState = null;
+      pendingDragSetup = null;
     });
 
     // Double-click: on a cluster label → cycle stretch (collapse/default/expand)
@@ -605,7 +699,9 @@ export function init(opts = {}) {
       // Trigger burst if we have edges to stretch OR members to centroid-pull.
       if (rows.length > 0 || memberScope.size > 0) {
         if (legacyState) legacyState.clusterLabelOffset.delete(clusterId);
-        const scope = resetState ? null : memberScope;
+        // If a global relax (X) is live, keep burst global so both reach
+        // equilibrium together; otherwise scope to the cluster members.
+        const scope = activeRelaxMoment ? null : memberScope;
         const isCollapse = next < -0.5;
         kickDescentBurst(200, scope, isCollapse);
         pushArrangement(arrangements, 'cluster-toggle', posMap);
@@ -659,9 +755,6 @@ export function init(opts = {}) {
               payload: { targetX: target.x, targetY: target.y, strength: 3.0 },
               author: 'user',
             });
-            scheduler.register('gather', (dt) => {
-              tickDispatcher(dispatcher, dt, { posMap, edges: graph.state.edges });
-            });
           }
           break;
         }
@@ -670,7 +763,6 @@ export function init(opts = {}) {
           if (activeGatherMoment) {
             retractMoment(dispatcher, activeGatherMoment.id);
             activeGatherMoment = null;
-            scheduler.unregister('gather');
             pushArrangement(arrangements, 'gather', posMap);
             updateHud();
             fullRender();
@@ -709,18 +801,24 @@ export function init(opts = {}) {
           break;
 
         case 'reset-start':
-          resetState = startReset(action.ctrl);
-          if (legacyState) legacyState.smoothMotion = true;
-          scheduler.register('reset', (dt) => {
-            if (resetState) updateReset(resetState, dt, posMap, graph.state.edges, context.weights.physics);
-          });
+          // X-key relaxation: global descent step per tick, unsticking as it
+          // goes. Ctrl+X is weights-reset and handled elsewhere; skip here.
+          if (action.ctrl) break;
+          if (!activeRelaxMoment) {
+            activeRelaxMoment = emitMoment(dispatcher, {
+              rule: 'relax',
+              members: [],
+              payload: { eta: 0.25, clearSticky: true },
+              author: 'user',
+            });
+            if (legacyState) legacyState.smoothMotion = true;
+          }
           break;
 
         case 'reset-stop':
-          if (resetState) {
-            stopReset(resetState, posMap);
-            scheduler.unregister('reset');
-            resetState = null;
+          if (activeRelaxMoment) {
+            retractMoment(dispatcher, activeRelaxMoment.id);
+            activeRelaxMoment = null;
             if (legacyState) legacyState.smoothMotion = false;
             pushArrangement(arrangements, 'x-relax', posMap);
             updateHud();
@@ -729,24 +827,36 @@ export function init(opts = {}) {
           break;
 
         case 'arrangement-back-start':
-          arrangementTravelState = startArrangementTravel(arrangements, posMap, 'back', 600);
-          if (arrangementTravelState) {
-            if (legacyState) legacyState.smoothMotion = true;
-            updateHud();
-            scheduler.register('arrangement-travel', (dt) => {
-              if (!arrangementTravelState) return;
-              if (updateArrangementTravel(arrangementTravelState, dt, arrangements, posMap)) {
-                updateHud();
-              }
-            });
+          // Delegate initial-step bookkeeping (push 'z-pending', snap one
+          // back) to the legacy helper, then emit the walker moment which
+          // advances the cursor every stepMs thereafter.
+          if (!activeArrangementMoment) {
+            const travel = startArrangementTravel(arrangements, posMap, 'back', 600);
+            if (travel) {
+              activeArrangementMoment = emitMoment(dispatcher, {
+                rule: 'arrangement-pull',
+                members: [],
+                payload: { direction: 'back', stepMs: 600 },
+                author: 'user',
+              });
+              activeArrangementDirection = 'back';
+              if (legacyState) legacyState.smoothMotion = true;
+              updateHud();
+            }
           }
           break;
 
         case 'arrangement-back-stop':
-          if (arrangementTravelState) {
-            stopArrangementTravel(arrangementTravelState, arrangements, posMap);
-            scheduler.unregister('arrangement-travel');
-            arrangementTravelState = null;
+          if (activeArrangementMoment) {
+            retractMoment(dispatcher, activeArrangementMoment.id);
+            activeArrangementMoment = null;
+            // Legacy stopTravel bookkeeping: rename or drop z-pending marker.
+            stopArrangementTravel(
+              { active: true, elapsed: 0, stepMs: 600, direction: activeArrangementDirection || 'back' },
+              arrangements,
+              posMap,
+            );
+            activeArrangementDirection = null;
             if (legacyState) legacyState.smoothMotion = false;
             updateHud();
             fullRender();
@@ -810,7 +920,6 @@ export function init(opts = {}) {
           if (activeGatherMoment) {
             retractMoment(dispatcher, activeGatherMoment.id);
             activeGatherMoment = null;
-            scheduler.unregister('gather');
             pushArrangement(arrangements, 'gather', posMap);
             updateHud();
             fullRender();
@@ -818,10 +927,9 @@ export function init(opts = {}) {
           break;
 
         case 'reset-stop':
-          if (resetState) {
-            stopReset(resetState, posMap);
-            scheduler.unregister('reset');
-            resetState = null;
+          if (activeRelaxMoment) {
+            retractMoment(dispatcher, activeRelaxMoment.id);
+            activeRelaxMoment = null;
             if (legacyState) legacyState.smoothMotion = false;
             pushArrangement(arrangements, 'x-relax', posMap);
             updateHud();
@@ -830,10 +938,15 @@ export function init(opts = {}) {
           break;
 
         case 'arrangement-back-stop':
-          if (arrangementTravelState) {
-            stopArrangementTravel(arrangementTravelState, arrangements, posMap);
-            scheduler.unregister('arrangement-travel');
-            arrangementTravelState = null;
+          if (activeArrangementMoment) {
+            retractMoment(dispatcher, activeArrangementMoment.id);
+            activeArrangementMoment = null;
+            stopArrangementTravel(
+              { active: true, elapsed: 0, stepMs: 600, direction: activeArrangementDirection || 'back' },
+              arrangements,
+              posMap,
+            );
+            activeArrangementDirection = null;
             if (legacyState) legacyState.smoothMotion = false;
             updateHud();
             fullRender();

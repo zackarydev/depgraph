@@ -9,6 +9,7 @@ Reference material, organized by audience.
 - [../SPEC.md](../SPEC.md) — the rebuild blueprint (start here)
 - [../VISION.md](../VISION.md) — long-term manifesto
 - [codegen.md](codegen.md) — how source code becomes a codemap
+- [rules.md](rules.md) — per-rule reference for the moment/rule dispatcher substrate
 - [graphgen-design.md](graphgen-design.md) — CSV-backed graph generation design
 - [graphgen-prompt.md](graphgen-prompt.md) — original design prompt for realtime CSV updates
 
