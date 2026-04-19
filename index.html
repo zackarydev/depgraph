@@ -15,7 +15,6 @@
 
     /* Top toolbar — mirrors old_versions/index.html */
     #toolbar {
-      display: hidden;
       overflow: hidden;
       position: fixed; top: 0; left: 0; right: 0; z-index: 10;
       background: #111118; border-bottom: 1px solid #2a2a35;
@@ -49,7 +48,7 @@
     #toolbar button:hover { color: #ccc; border-color: #555; }
     #toolbar .hint { color: #555; margin-left: auto; font-size: 11px; white-space: nowrap; }
 
-    #viewport { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
+    #viewport { position: fixed; top: 0; left: 0; right: 0; bottom: 0; }
     svg { width: 100%; height: 100%; }
 
     /* SVG node classes */
@@ -155,16 +154,33 @@
     }
     #pull-layers .pull-slider { width: 50px; height: 3px; accent-color: #666; cursor: pointer; }
     #pull-layers .pull-val { color: #666; font-size: 10px; min-width: 24px; text-align: right; }
+
+    #toolbartogglerui {
+      top: 0;
+      left: 0;
+      width: 20px;
+      height: 20px;
+      position: absolute;
+      z-index: 11;
+    }
+    #toolbartoggler { 
+      all: unset;
+      cursor: pointer;
+      color: #fff;
+    }
   </style>
 </head>
 <body>
+  <div id="toolbartogglerui">
+    <button data-arr="hidetoolbar" title="Toolbar Toggler" id="toolbartoggler">X</button>
+  </div>
   <div id="toolbar">
     <strong>depgraph</strong>
     <div class="sep"></div>
-    <div class="stat">nodes: <span data-hud="nodes">0</span></div>
+    <!-- <div class="stat">nodes: <span data-hud="nodes">0</span></div>
     <div class="stat">edges: <span data-hud="edges">0</span></div>
     <div class="stat">cursor: <span data-hud="cursor">t0</span></div>
-    <div class="stat">arr: <span data-hud="arr">0 / 0</span></div>
+    <div class="stat">arr: <span data-hud="arr">0 / 0</span></div> -->
     <div class="sep"></div>
     <label><input type="checkbox" id="show-labels" checked> Labels</label>
     <label><input type="checkbox" id="show-hulls" checked> Hulls</label>
@@ -172,7 +188,7 @@
     <label><input type="checkbox" id="show-boundary-labels" checked> Boundary</label>
     <label><input type="checkbox" id="show-meta-edges" checked> Meta</label>
     <div class="sep"></div>
-    <label>Search: <input type="text" id="search" placeholder="node id..." style="width:140px"></label>
+    <!-- <label>Search: <input type="text" id="search" placeholder="node id..." style="width:140px"></label>
     <div class="sep"></div>
     <label title="X-key rewind speed (ms)">X
       <input type="range" id="x-speed" min="200" max="5000" step="100" value="3000" style="width:56px">
@@ -185,7 +201,7 @@
     <label title="T-key trace speed (ms/edge)">T
       <input type="range" id="t-speed" min="100" max="3000" step="50" value="1000" style="width:56px">
       <span class="val" id="t-speed-val">1.0s</span>
-    </label>
+    </label> -->
     <div class="hint">hold Z · hold X · T = trace · Space = gather · drag</div>
   </div>
 
@@ -218,5 +234,24 @@
 
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script type="module" src="src/main.js"></script>
+
+  <script>
+    let isToolbarToggled = true;
+
+    const toggleToolbar = () => {
+      isToolbarToggled = !isToolbarToggled;
+
+      const ids = ['toolbar', 'pull-layers', 'focus-panel', 'arr-nav'];
+      const visibility = isToolbarToggled ? 'visible' : 'hidden';
+      ids.map((id) => {
+        document.getElementById(id).style.visibility = visibility;
+      })
+
+      document.getElementById('toolbartoggler').innerHTML = isToolbarToggled ? 'H' : 'S';
+    }
+
+    document.getElementById('toolbartoggler').addEventListener('click', toggleToolbar);
+    toggleToolbar();
+  </script>
 </body>
 </html>

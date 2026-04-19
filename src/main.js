@@ -13,7 +13,7 @@ import { createContext } from './core/context.js';
 import { createHistory, load as loadHistory, append as historyAppend, effectiveRows } from './data/history.js';
 import { buildFromHistory, applyRowToGraph, rederive } from './data/graph-builder.js';
 import { initialPlace } from './layout/placement.js';
-import { warmRestart } from './layout/warm-restart.js';
+import { isLayoutHub } from './layout/hub-policy.js';
 import { initSVG } from './render/svg.js';
 import {
   createLegacyRenderer,
@@ -23,6 +23,8 @@ import {
   setShowFlag as legacySetShowFlag,
   renderSelectionGlow as legacyRenderSelectionGlow,
   clusterColor,
+  LOD_SLOT_THRESHOLD,
+  isLowLodKind,
 } from './render/legacy.js';
 import { generateDemoHistory } from './data/demo-history.js';
 import { EDGE_LAYERS, setLayerVisible, getLayer } from './edges/layers.js';
@@ -52,7 +54,7 @@ import { tryConnectSSE } from './stream/sse.js';
 import { connectHistoryWS } from './stream/history-ws.js';
 import { toCSV } from './data/history.js';
 import { writeRowLine } from './data/csv.js';
-import { expandPayload, agentSeedRows } from './data/payload-expand.js';
+import { expandPayload, agentSeedRows, parseSlotId } from './data/payload-expand.js';
 import { createHLC } from './core/clock.js';
 import { startCinematic, stopCinematic } from './stream/cinematic.js';
 
@@ -164,6 +166,11 @@ export function init(opts = {}) {
   let dirtyGraph = false;
   let dirtyHud = false;
 
+  // BFS-N depth for local descent scoping. After collecting touched ids from
+  // appendRow, expand outward this many hops (terminating at hub kinds) to
+  // produce the movable set for the per-frame descent burst.
+  const BFS_DEPTH = 2;
+
   // --- Selection & interaction state ---
   let selection = createSelection();
   let keyState = createKeyState();
@@ -207,6 +214,7 @@ export function init(opts = {}) {
     tickDispatcher(dispatcher, dt, {
       posMap,
       edges: graph.state.edges,
+      nodes: graph.state.nodes,
       weights: context.weights.physics,
       arrangements,
     });
@@ -388,7 +396,6 @@ export function init(opts = {}) {
       _payload: {
         author: 'user',
         action: 'click',
-        target: targetId,
         ...(extra || {}),
       },
     });
@@ -408,12 +415,34 @@ export function init(opts = {}) {
     const isUserAuthored = userAuthoredHint
       || (payload && payload.author === 'user');
 
+    // Detect genuinely-new node BEFORE applyRowToGraph — idempotent re-adds
+    // (very common from payload expansion on clicks: action:click, kind:node,
+    // shiftKey:true re-land on every click) must not trigger layout work.
+    const isNewNodeRow = row.type === 'NODE' && row.op === 'add'
+      && !graph.state.nodes.has(row.id);
+
     const fullRow = historyAppend(history, row);
     applyRowToGraph(graph, fullRow, context.weights.affinity);
 
-    // Place new nodes
-    if (row.type === 'NODE' && row.op === 'add') {
-      warmRestart(posMap, graph.state.nodes, graph.state.edges, context.weights.physics);
+    // Collect descent seeds: genuinely-new non-hub nodes, plus the non-hub
+    // endpoints of any new edge. These get expanded via BFS-N once per frame
+    // and fed to a scoped descent burst — replaces per-row warmRestart.
+    if (isNewNodeRow) {
+      const node = graph.state.nodes.get(row.id);
+      seedNewNodePosition(row.id);
+      if (!isLayoutHub(node)) {
+        // Visibility branch: LOD-hidden kinds (slot) at low zoom don't need
+        // a descent burst — the user can't see them move. Park them on the
+        // centroid seed; the LOD-flip reveal burst will settle them later.
+        const hidden = isLowLodKind(node.kind) && currentZoom < LOD_SLOT_THRESHOLD;
+        if (hidden) pendingHiddenNew.add(row.id);
+        else pendingDescentSeeds.add(row.id);
+      }
+    } else if (row.type === 'EDGE' && row.op === 'add') {
+      const sn = graph.state.nodes.get(row.source);
+      const tn = graph.state.nodes.get(row.target);
+      if (sn && !isLayoutHub(sn)) pendingDescentSeeds.add(row.source);
+      if (tn && !isLayoutHub(tn)) pendingDescentSeeds.add(row.target);
     }
 
     // Mirror user-authored rows to runtime/history.csv over the WebSocket.
@@ -504,27 +533,34 @@ export function init(opts = {}) {
   // frames. Scoped bursts freeze everything outside the scope — cluster-local
   // collapse/expand must not pull bridge nodes around. The global X-reset key
   // emits a different, global relax moment; this burst is intentionally narrower.
+  // `movable` is an alternative narrowing for new-node placement: full gradient
+  // runs (so new nodes feel pull from existing neighbors) but only the movable
+  // set is displaced — the rest of the layout stays put.
   let descentBurstFrames = 0;
   /** @type {import('./core/moment.js').Moment|null} */
   let descentBurstMoment = null;
-  function kickDescentBurst(frames = 60, scope = null, collapse = false) {
+  function kickDescentBurst(frames = 60, scope = null, collapse = false, movable = null, etaOverride = null) {
     descentBurstFrames = Math.max(descentBurstFrames, frames);
-    const zoomEta = 0.25 / Math.max(0.5, Math.min(2, currentZoom));
+    const zoomEta = etaOverride != null
+      ? etaOverride
+      : 0.25 / Math.max(0.5, Math.min(2, currentZoom));
     if (descentBurstMoment) {
       // A prior burst is still live — update its scope to the latest gesture
       // and extend its lifetime via the shared frame counter above.
       descentBurstMoment.payload.eta = zoomEta;
       descentBurstMoment.payload.scope = scope || undefined;
       descentBurstMoment.payload.collapse = !!collapse;
+      descentBurstMoment.payload.movable = movable || undefined;
       return;
     }
     descentBurstMoment = emitMoment(dispatcher, {
       rule: 'relax',
-      members: scope ? [...scope] : [],
+      members: scope ? [...scope] : (movable ? [...movable] : []),
       payload: {
         eta: zoomEta,
         scope: scope || undefined,
         collapse: !!collapse,
+        movable: movable || undefined,
       },
       author: 'user',
     });
@@ -539,6 +575,66 @@ export function init(opts = {}) {
       }
       descentBurstFrames--;
     });
+  }
+
+  // --- Pending descent seeds ---
+  // Populated in appendRow with non-hub ids touched by NODE/EDGE adds. Once
+  // per frame the render pump expands these via BFS-N (terminating at hub
+  // kinds) and feeds the resulting movable set to a scoped descent burst.
+  // Hidden new nodes (LOD-low kinds at low zoom) defer to the LOD-flip reveal
+  // burst instead, since their motion isn't visible anyway.
+  const pendingDescentSeeds = new Set();
+  const pendingHiddenNew = new Set();
+
+  // BFS expansion from the seed set, terminating at hub-kind neighbors so a
+  // single click doesn't flood the graph through the singleton vocabulary
+  // hubs (action:click, kind:node, user, …). Returns a Set including the
+  // seeds themselves plus all non-hub nodes within `depth` hops.
+  function bfsLayoutScope(seeds, depth) {
+    const scope = new Set();
+    for (const id of seeds) {
+      const node = graph.state.nodes.get(id);
+      if (node && !isLayoutHub(node)) scope.add(id);
+    }
+    let frontier = [...scope];
+    for (let d = 0; d < depth && frontier.length > 0; d++) {
+      const next = [];
+      const inFrontier = new Set(frontier);
+      for (const [, edge] of graph.state.edges) {
+        let nbr = null;
+        if (inFrontier.has(edge.source)) nbr = edge.target;
+        else if (inFrontier.has(edge.target)) nbr = edge.source;
+        else continue;
+        if (scope.has(nbr)) continue;
+        const nbrNode = graph.state.nodes.get(nbr);
+        if (!nbrNode || isLayoutHub(nbrNode)) continue;
+        scope.add(nbr);
+        next.push(nbr);
+      }
+      frontier = next;
+    }
+    return scope;
+  }
+
+  function seedNewNodePosition(nodeId) {
+    let cx = 0, cy = 0, count = 0;
+    for (const [, edge] of graph.state.edges) {
+      let neighbor = null;
+      if (edge.source === nodeId) neighbor = edge.target;
+      else if (edge.target === nodeId) neighbor = edge.source;
+      else continue;
+      const ps = posMap.positions.get(neighbor);
+      if (ps) { cx += ps.x; cy += ps.y; count++; }
+    }
+    if (count > 0) {
+      cx /= count; cy /= count;
+    } else {
+      cx = (Math.random() - 0.5) * 400;
+      cy = (Math.random() - 0.5) * 400;
+    }
+    cx += (Math.random() - 0.5) * 20;
+    cy += (Math.random() - 0.5) * 20;
+    updatePosition(posMap, nodeId, cx, cy);
   }
 
   // --- Wire DOM events (6.5b) ---
@@ -588,7 +684,18 @@ export function init(opts = {}) {
               graph, posMap, derivation: graph.derivation, context, selection,
             }, currentZoom);
           }
-          if (Math.abs(currentZoom - prevZoom) / prevZoom > 0.25) {
+          // Crossing the LOD threshold flips whole classes of nodes/edges in
+          // or out of existence, so a full render (not just opacity tweaks)
+          // is required. Also trigger on any sizeable zoom change.
+          const lodFlipped = (prevZoom < LOD_SLOT_THRESHOLD) !== (currentZoom < LOD_SLOT_THRESHOLD);
+          // Zooming past the threshold reveals previously-hidden new nodes:
+          // kick a longer reveal burst so they lerp from their centroid seeds
+          // into final position rather than snapping in.
+          if (lodFlipped && currentZoom >= LOD_SLOT_THRESHOLD && pendingHiddenNew.size > 0) {
+            kickDescentBurst(30, null, false, new Set(pendingHiddenNew), 0.15);
+            pendingHiddenNew.clear();
+          }
+          if (lodFlipped || Math.abs(currentZoom - prevZoom) / prevZoom > 0.25) {
             fullRender();
           }
         });
@@ -705,6 +812,7 @@ export function init(opts = {}) {
         tickDispatcher(dispatcher, 16, {
           posMap,
           edges: graph.state.edges,
+          nodes: graph.state.nodes,
           weights: context.weights.physics,
           arrangements,
         });
@@ -720,25 +828,7 @@ export function init(opts = {}) {
           pushArrangement(arrangements, dctx.flavor === 'cluster' ? 'cluster-drag' : 'drag', posMap);
           updateHud();
         }
-      } else if (clusterDragState && isDragging) {
-        // Persist the new positions of each moved member as history rows so
-        // time-travel and rebuild can restore them. One row per member.
-        if (clusterDragState.moved) {
-          for (const [id] of clusterDragState.offsets) {
-            const p = posMap.positions.get(id);
-            if (p) {
-              appendRow({
-                type: 'NODE',
-                op: 'update',
-                id,
-                _payload: { x: p.x, y: p.y, author: 'user', action: 'cluster-drag', cluster: clusterDragState.clusterId },
-              });
-            }
-          }
-          pushArrangement(arrangements, 'cluster-drag', posMap);
-          updateHud();
-        }
-      } else if (mouseDownTarget && !isDragging && !clusterDragState) {
+      } else if (mouseDownTarget && !isDragging) {
         if (e.shiftKey) {
           selection = toggleSelection(selection, mouseDownTarget);
         } else {
@@ -1071,21 +1161,28 @@ export function init(opts = {}) {
     graph.state.edges.clear();
     graph.state.cursor = -1;
 
-    // Position-moment replay. Each drag/reset emits a `moment:pos:<hlc>`
-    // node plus `prop:subject` + `prop:x` + `prop:y` edges. To restore a
-    // subject's last-known position we remember the most-recently-added
-    // moment pointing at it, then resolve its prop:x / prop:y value-node
-    // ids back to numbers.
-    /** @type {Map<string, string>} subjectId -> momentId */
-    const latestMomentBySubject = new Map();
-    /** @type {Map<string, {x?: number, y?: number}>} momentId -> {x,y} */
-    const momentXY = new Map();
+    // Position replay. Drags/resets emit `<hlc>:x:<owner>` and `<hlc>:y:<owner>`
+    // slot NODE rows whose label is the scalar. Iterating in history order,
+    // the last (x, y) pair seen per owner is the one we apply to posMap.
+    /** @type {Map<string, {x?: number, y?: number}>} */
+    const ownerXY = new Map();
 
     for (const r of rows) {
       const { type, op, id } = r;
       if (type === 'NODE') {
         if (op === 'add') {
           graph.state.nodes.set(id, { id, kind: r.kind || 'unknown', label: r.label || id, importance: r.weight != null ? r.weight : 1 });
+          if (r.kind === 'slot') {
+            const parsed = parseSlotId(id);
+            if (parsed && (parsed.key === 'x' || parsed.key === 'y')) {
+              const n = Number(r.label);
+              if (!Number.isNaN(n)) {
+                let rec = ownerXY.get(parsed.owner);
+                if (!rec) { rec = {}; ownerXY.set(parsed.owner, rec); }
+                rec[parsed.key] = n;
+              }
+            }
+          }
         } else if (op === 'update') {
           const existing = graph.state.nodes.get(id);
           if (existing) {
@@ -1099,25 +1196,12 @@ export function init(opts = {}) {
       } else if (type === 'EDGE') {
         if (op === 'add') {
           graph.state.edges.set(id, { id, source: r.source, target: r.target, layer: r.layer || 'unknown', weight: r.weight != null ? r.weight : 1, stretch: 0, directed: true });
-          if (r.layer === 'prop:stretch' && r.source && typeof r.target === 'string') {
+          if (r.layer === 'stretch' && r.source && r.target) {
             const tgt = graph.state.edges.get(r.source);
-            if (tgt && r.target.startsWith('value:stretch:')) {
-              const n = Number(r.target.slice('value:stretch:'.length));
+            const slot = graph.state.nodes.get(r.target);
+            if (tgt && slot) {
+              const n = Number(slot.label);
               if (!Number.isNaN(n)) tgt.stretch = n;
-            }
-          }
-          if (r.layer === 'prop:subject' && r.source && r.target) {
-            latestMomentBySubject.set(r.target, r.source);
-          } else if ((r.layer === 'prop:x' || r.layer === 'prop:y') && r.source && typeof r.target === 'string') {
-            const axis = r.layer === 'prop:x' ? 'x' : 'y';
-            const prefix = `value:${axis}:`;
-            if (r.target.startsWith(prefix)) {
-              const n = Number(r.target.slice(prefix.length));
-              if (!Number.isNaN(n)) {
-                let rec = momentXY.get(r.source);
-                if (!rec) { rec = {}; momentXY.set(r.source, rec); }
-                rec[axis] = n;
-              }
             }
           }
         } else if (op === 'update') {
@@ -1133,11 +1217,10 @@ export function init(opts = {}) {
       graph.state.cursor = r.t;
     }
 
-    // Resolve subject → latest-moment → (x, y) and apply to posMap.
-    for (const [subjectId, momentId] of latestMomentBySubject) {
-      const rec = momentXY.get(momentId);
-      if (rec && typeof rec.x === 'number' && typeof rec.y === 'number') {
-        updatePosMapCoord(subjectId, rec.x, rec.y);
+    // Apply the latest x/y pair per owner to posMap.
+    for (const [owner, rec] of ownerXY) {
+      if (typeof rec.x === 'number' && typeof rec.y === 'number') {
+        updatePosMapCoord(owner, rec.x, rec.y);
       }
     }
 
@@ -1150,6 +1233,15 @@ export function init(opts = {}) {
   // expensive; position/selection renders are cheap and run every frame.
   if (legacyState) {
     scheduler.setRender(() => {
+      // Flush descent seeds once per frame, coalescing cascades of NODE/EDGE
+      // adds (payload expansion, drag end, watchers) into a single scoped
+      // relax moment. BFS-N expands the seeds outward, terminating at hub
+      // kinds, so the descent stays local to where work actually happened.
+      if (pendingDescentSeeds.size > 0) {
+        const scope = bfsLayoutScope(pendingDescentSeeds, BFS_DEPTH);
+        pendingDescentSeeds.clear();
+        if (scope.size > 0) kickDescentBurst(15, null, false, scope);
+      }
       if (dirtyGraph) {
         dirtyGraph = false;
         fullRender();

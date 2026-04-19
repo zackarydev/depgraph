@@ -50,7 +50,6 @@ export function clickRow(targetId, meta) {
     _payload: {
       author: 'user',
       action: 'click',
-      target: targetId,
       ...(meta || {}),
     },
   };

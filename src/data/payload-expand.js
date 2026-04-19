@@ -3,14 +3,22 @@
  * field lands in the hypergraph as a first-class node/edge instead of a
  * JSON blob on the primary row.
  *
- * Conventions:
- *   - Scalar field K → `value:K:<canonical>` NODE + `prop:<source-id>:K`
- *     EDGE in layer `prop:K`.
- *   - `author` / `producer` → `authored-by` / `produced-by` edge to a
- *     singleton agent node (`user`, `codemap`, `ast`, `repo-scanner`).
- *   - `x` + `y` pair → a `moment:pos:<hlc>` NODE that owns `prop:x` and
- *     `prop:y` value-node edges plus a `prop:subject` edge pointing at
- *     the original subject. Gives positions their own HLC moment.
+ * Id scheme (see docs/experiments/payload-expansion.md):
+ *   - Slot keys (runtime scalars: x, y, distance, stretch):
+ *     NODE id = `<hlc>:<key>:<owner>`, kind='slot', label=value.
+ *     EDGE id = `<hlc>:<key>:<owner>`, layer=<key>, source=owner, target=slot.
+ *     Every write is a distinct slot — two owners that both write x=100 do
+ *     NOT alias; slot nodes are memory cells, not interned values.
+ *   - Interned keys (categorical vocabulary: kind, action, path, …):
+ *     NODE id = `<key>:<canonical>`, kind='value'. Shared across subjects.
+ *     EDGE id = `<hlc>:<key>:<owner>`, layer=<key>.
+ *   - Reference keys (payload value IS a node id: cluster, target, author,
+ *     producer, file): no derived node; edge points straight at the referent.
+ *     EDGE id = `<hlc>:<key>:<owner>`, layer=<key>.
+ *
+ * The HLC's `<wallMs>:<producerId>:<counter>` format already guarantees
+ * global uniqueness, so no `value:`, `prop:`, `moment:pos:` sentinels are
+ * needed on derived ids.
  *
  * Rows returned are partial (no `t`) — the caller runs them through the
  * normal append path so each gets a monotonic timestamp.
@@ -22,26 +30,29 @@ import { EDGE_LAYERS } from '../edges/layers.js';
 
 export const AGENT_IDS = ['user', 'codemap', 'ast', 'repo-scanner', 'system', 'migrate'];
 
-const SYNTHETIC_LAYERS = [
-  ['authored-by',   '#4a90d9'],
-  ['produced-by',   '#50c878'],
-  ['prop:subject',  '#7b68ee'],
-  ['prop:x',        '#bdc3c7'],
-  ['prop:y',        '#bdc3c7'],
-  ['prop:stretch',  '#ff922b'],
-];
+const SLOT_KEYS = new Set(['x', 'y', 'distance', 'stretch']);
+const REFERENCE_KEYS = new Set(['cluster', 'target', 'author', 'producer', 'file']);
 
-for (const [id, color] of SYNTHETIC_LAYERS) {
+const LAYER_COLORS = {
+  x:        '#bdc3c7',
+  y:        '#bdc3c7',
+  distance: '#bdc3c7',
+  stretch:  '#ff922b',
+  author:   '#4a90d9',
+  producer: '#50c878',
+  cluster:  '#7b68ee',
+  target:   '#9b59b6',
+  file:     '#f39c12',
+  kind:     '#95a5a6',
+  action:   '#95a5a6',
+  path:     '#95a5a6',
+};
+for (const [id, color] of Object.entries(LAYER_COLORS)) {
   if (!EDGE_LAYERS.has(id)) {
     EDGE_LAYERS.set(id, { id, color, dash: '1,2', directed: true, visible: false });
   }
 }
 
-/**
- * Quantize a number to 3 decimal places so near-duplicates collapse onto
- * a single `value:*` node. Keeps cardinality bounded without losing
- * meaningful precision on positions.
- */
 function canonicalNumber(n) {
   return Number(n).toFixed(3);
 }
@@ -54,45 +65,9 @@ function canonicalValue(v) {
   try { return JSON.stringify(v); } catch { return String(v); }
 }
 
-function valueNodeRow(key, canonical, label) {
-  return {
-    type: 'NODE',
-    op: 'add',
-    id: `value:${key}:${canonical}`,
-    kind: 'value',
-    weight: 0.1,
-    label: String(label),
-  };
-}
-
-function propEdgeRow(sourceId, key, canonical) {
-  return {
-    type: 'EDGE',
-    op: 'add',
-    id: `prop:${sourceId}:${key}`,
-    source: sourceId,
-    target: `value:${key}:${canonical}`,
-    layer: `prop:${key}`,
-    weight: 1,
-  };
-}
-
-function agentEdgeRow(sourceId, layer, agentId) {
-  return {
-    type: 'EDGE',
-    op: 'add',
-    id: `${layer}:${sourceId}:${agentId}`,
-    source: sourceId,
-    target: agentId,
-    layer,
-    weight: 1,
-  };
-}
-
 /**
- * Rows that seed the singleton agent nodes referenced by authored-by /
- * produced-by edges. Idempotent — callers can safely emit these on every
- * boot; applyRow overwrites identically.
+ * Rows that seed the singleton agent nodes referenced by author/producer
+ * edges. Idempotent — callers can safely emit these on every boot.
  */
 export function agentSeedRows() {
   return AGENT_IDS.map((id) => ({
@@ -109,57 +84,87 @@ export function agentSeedRows() {
  * @param {Object} opts
  * @param {string} opts.subjectId - id of the node/edge the payload describes
  * @param {Object} opts.payload   - the legacy payload object
- * @param {{next: function(): string}} opts.hlc - HLC clock for minting position-moment ids
+ * @param {{next: function(): string}} opts.hlc - HLC clock for minting ids
  * @returns {Array<Partial<import('../core/types.js').HistoryRow>>}
  */
 export function expandPayload({ subjectId, payload, hlc }) {
   if (!payload || !subjectId) return [];
   const rows = [];
+  // One HLC per payload: all edges derived from this write share the prefix,
+  // so they read as facets of the same moment in the graph.
+  const hlcId = hlc ? hlc.next() : `${Date.now()}:local:0`;
 
-  const hasX = typeof payload.x === 'number';
-  const hasY = typeof payload.y === 'number';
-  const hasPosition = hasX && hasY;
+  for (const [key, raw] of Object.entries(payload)) {
+    if (raw == null) continue;
+    const edgeId = `${hlcId}:${key}:${subjectId}`;
 
-  let propSubject = subjectId;
+    if (SLOT_KEYS.has(key)) {
+      rows.push({
+        type: 'NODE',
+        op: 'add',
+        id: edgeId,
+        kind: 'slot',
+        weight: 0.1,
+        label: String(raw),
+      });
+      rows.push({
+        type: 'EDGE',
+        op: 'add',
+        id: edgeId,
+        source: subjectId,
+        target: edgeId,
+        layer: key,
+        weight: 1,
+      });
+      continue;
+    }
 
-  if (hasPosition) {
-    const hlcId = hlc ? hlc.next() : String(Date.now());
-    const momentId = `moment:pos:${hlcId}`;
+    if (REFERENCE_KEYS.has(key)) {
+      rows.push({
+        type: 'EDGE',
+        op: 'add',
+        id: edgeId,
+        source: subjectId,
+        target: String(raw),
+        layer: key,
+        weight: 1,
+      });
+      continue;
+    }
+
+    const canonical = canonicalValue(raw);
+    if (canonical == null) continue;
+    const internedId = `${key}:${canonical}`;
     rows.push({
       type: 'NODE',
       op: 'add',
-      id: momentId,
-      kind: 'moment',
-      weight: 0.2,
-      label: `pos@${hlcId}`,
+      id: internedId,
+      kind: 'value',
+      weight: 0.1,
+      label: String(raw),
     });
     rows.push({
       type: 'EDGE',
       op: 'add',
-      id: `prop:${momentId}:subject`,
-      source: momentId,
-      target: subjectId,
-      layer: 'prop:subject',
+      id: edgeId,
+      source: subjectId,
+      target: internedId,
+      layer: key,
       weight: 1,
     });
-    propSubject = momentId;
-  }
-
-  for (const [key, raw] of Object.entries(payload)) {
-    if (raw == null) continue;
-    if (key === 'author') {
-      rows.push(agentEdgeRow(propSubject, 'authored-by', String(raw)));
-      continue;
-    }
-    if (key === 'producer') {
-      rows.push(agentEdgeRow(propSubject, 'produced-by', String(raw)));
-      continue;
-    }
-    const canonical = canonicalValue(raw);
-    if (canonical == null) continue;
-    rows.push(valueNodeRow(key, canonical, raw));
-    rows.push(propEdgeRow(propSubject, key, canonical));
   }
 
   return rows;
+}
+
+/**
+ * Parse a slot node id into {key, owner}. Returns null if the id doesn't
+ * match the `<wallMs>:<producerId>:<counter>:<key>:<owner>` shape. Owner
+ * may itself contain colons; it's everything after the 4th colon.
+ */
+export function parseSlotId(id) {
+  if (typeof id !== 'string') return null;
+  const parts = id.split(':');
+  if (parts.length < 5) return null;
+  return { key: parts[3], owner: parts.slice(4).join(':') };
 }

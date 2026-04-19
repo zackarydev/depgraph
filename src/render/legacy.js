@@ -58,6 +58,29 @@ export function clusterShortName(clusterId) {
 }
 
 /**
+ * Zoom threshold below which low-level payload-expansion artifacts (slot and
+ * interned-value nodes, plus edges touching them) are *skipped entirely* —
+ * not drawn with opacity 0, not created in the DOM. These nodes explode in
+ * count (one per drag, per click, per file scan…) and at normal zoom they
+ * add thousands of SVG elements that slow rAF to a crawl without giving the
+ * user anything to see. Reveal them only when zoomed in close enough that
+ * inspecting individual runtime slots is useful.
+ */
+const LOD_SLOT_THRESHOLD = 3;
+
+export function isLowLodKind(kind) {
+  return kind === 'slot' || kind === 'value';
+}
+
+export { LOD_SLOT_THRESHOLD };
+
+function shouldSkipForLod(node, k) {
+  if (!node) return false;
+  if (k >= LOD_SLOT_THRESHOLD) return false;
+  return isLowLodKind(node.kind);
+}
+
+/**
  * Node kind → base color. Used when a node has no cluster assignment.
  * Cluster colors take precedence when derivation groups the node.
  */
@@ -239,11 +262,17 @@ function renderEdgesDiff(state, graph, posMap) {
   const gLinks = svgCtx.layers.gLinks;
   const defs = svgCtx.defs;
   const seen = new Set();
+  const k = state.currentK || 1;
 
   for (const [id, edge] of graph.state.edges) {
     const layerDef = getLayer(edge.layer);
     // Skip edges whose layer is toggled off — the edge will be GC'd below.
     if (layerDef && layerDef.visible === false) continue;
+    // LOD skip: an edge touching a low-level runtime/vocab node is pruned
+    // below the zoom threshold, since the endpoint itself isn't rendered.
+    const srcNode = graph.state.nodes.get(edge.source);
+    const tgtNode = graph.state.nodes.get(edge.target);
+    if (shouldSkipForLod(srcNode, k) || shouldSkipForLod(tgtNode, k)) continue;
     const ps = posMap.positions.get(edge.source);
     const pt = posMap.positions.get(edge.target);
     if (!ps || !pt) continue;
@@ -358,11 +387,20 @@ function updateGradient(grad, sx, sy, tx, ty) {
   grad.grad.setAttribute('y2', ty);
   const dist = Math.hypot(tx - sx, ty - sy);
   const midOp = edgeMidOpacity(dist);
-  grad.stops[0].setAttribute('stop-opacity', '1');
-  grad.stops[1].setAttribute('stop-opacity', String(midOp));
-  grad.stops[2].setAttribute('stop-opacity', String(midOp * 0.7));
-  grad.stops[3].setAttribute('stop-opacity', String(midOp));
-  grad.stops[4].setAttribute('stop-opacity', '1');
+  // End stops are always 1 — write them only on first update, then skip.
+  // Mid stops change with distance; cache so we skip identical writes during
+  // the many frames where an edge's length barely budges.
+  if (!grad._endSet) {
+    grad.stops[0].setAttribute('stop-opacity', '1');
+    grad.stops[4].setAttribute('stop-opacity', '1');
+    grad._endSet = true;
+  }
+  if (grad._midOp !== midOp) {
+    grad.stops[1].setAttribute('stop-opacity', String(midOp));
+    grad.stops[2].setAttribute('stop-opacity', String(midOp * 0.7));
+    grad.stops[3].setAttribute('stop-opacity', String(midOp));
+    grad._midOp = midOp;
+  }
 }
 
 function updateArrow(arrow, sx, sy, tx, ty) {
@@ -386,8 +424,10 @@ function renderNodesDiff(state, graph, posMap, derivation) {
   const { svgCtx, nodeElements, nodeCircleElements, clusterIndex } = state;
   const gNodes = svgCtx.layers.gNodes;
   const seen = new Set();
+  const k = state.currentK || 1;
 
   for (const [id, node] of graph.state.nodes) {
+    if (shouldSkipForLod(node, k)) continue;
     const ps = posMap.positions.get(id);
     if (!ps) continue;
     seen.add(id);
@@ -479,8 +519,10 @@ function renderLabelsDiff(state, graph, posMap) {
   const { svgCtx, labelElements } = state;
   const gLabels = svgCtx.layers.gLabels;
   const seen = new Set();
+  const k = state.currentK || 1;
 
   for (const [id, node] of graph.state.nodes) {
+    if (shouldSkipForLod(node, k)) continue;
     const ps = posMap.positions.get(id);
     if (!ps) continue;
     seen.add(id);
@@ -637,17 +679,23 @@ function renderClusterLabelsFull(state, graph, posMap) {
 
       gClusterLabels.appendChild(text);
       clusterLabelElements.set(cid, text);
+      text._needsSize = true;
     }
     text.setAttribute('transform', `translate(${cx + off.dx},${cy + off.dy})`);
 
-    // Size the hit rect to match the text bounding box (+ padding).
-    if (text._hitRect && text._label) {
+    // Size the hit rect once — text content is static per cluster, so the bbox
+    // is stable. getBBox forces a synchronous layout, so only call it on the
+    // first pass after the element is in the DOM.
+    if (text._needsSize && text._hitRect && text._label) {
       const bbox = text._label.getBBox();
-      const pad = 6;
-      text._hitRect.setAttribute('x', bbox.x - pad);
-      text._hitRect.setAttribute('y', bbox.y - pad);
-      text._hitRect.setAttribute('width', bbox.width + pad * 2);
-      text._hitRect.setAttribute('height', bbox.height + pad * 2);
+      if (bbox.width > 0) {
+        const pad = 6;
+        text._hitRect.setAttribute('x', bbox.x - pad);
+        text._hitRect.setAttribute('y', bbox.y - pad);
+        text._hitRect.setAttribute('width', bbox.width + pad * 2);
+        text._hitRect.setAttribute('height', bbox.height + pad * 2);
+        text._needsSize = false;
+      }
     }
   }
 
@@ -780,6 +828,10 @@ export function renderPositionsOnly(state, deps) {
   const display = state.displayPositions;
   const smooth = !!state.smoothMotion;
   const LERP = 0.18;
+  // Pixel-level tolerance for skipping DOM writes. Once the lerp converges
+  // within this much of the target, we stop touching the element — that's
+  // where the setAttribute hotspot collapses.
+  const EPS = 0.05;
 
   // Nodes
   for (const [id, g] of state.nodeElements) {
@@ -793,60 +845,98 @@ export function renderPositionsOnly(state, deps) {
     } else {
       dp.x = ps.x; dp.y = ps.y;
     }
-    g.setAttribute('transform', `translate(${dp.x},${dp.y})`);
+    if (Math.abs(dp.x - g._lastX) >= EPS || Math.abs(dp.y - g._lastY) >= EPS
+        || g._lastX === undefined) {
+      g.setAttribute('transform', `translate(${dp.x},${dp.y})`);
+      g._lastX = dp.x; g._lastY = dp.y;
+    }
   }
 
-  // Labels
+  // Labels — one transform attribute beats two x/y attributes
   for (const [id, text] of state.labelElements) {
     const dp = display.get(id);
     if (!dp) continue;
-    text.setAttribute('x', dp.x);
-    text.setAttribute('y', dp.y);
+    if (Math.abs(dp.x - text._lastX) >= EPS || Math.abs(dp.y - text._lastY) >= EPS
+        || text._lastX === undefined) {
+      text.setAttribute('x', dp.x);
+      text.setAttribute('y', dp.y);
+      text._lastX = dp.x; text._lastY = dp.y;
+    }
   }
 
-  // Edges — update endpoints + gradient stops
+  // Edges — update endpoints + gradient stops, skipping when unchanged
   for (const [id, line] of state.edgeElements) {
     const sid = line.getAttribute('data-source');
     const tid = line.getAttribute('data-target');
     const ds = display.get(sid) || posMap.positions.get(sid);
     const dt = display.get(tid) || posMap.positions.get(tid);
     if (!ds || !dt) continue;
-    line.setAttribute('x1', ds.x); line.setAttribute('y1', ds.y);
-    line.setAttribute('x2', dt.x); line.setAttribute('y2', dt.y);
+    const sMoved = Math.abs(ds.x - line._sx) >= EPS || Math.abs(ds.y - line._sy) >= EPS
+      || line._sx === undefined;
+    const tMoved = Math.abs(dt.x - line._tx) >= EPS || Math.abs(dt.y - line._ty) >= EPS
+      || line._tx === undefined;
+    if (!sMoved && !tMoved) continue;
+    if (sMoved) {
+      line.setAttribute('x1', ds.x); line.setAttribute('y1', ds.y);
+      line._sx = ds.x; line._sy = ds.y;
+    }
+    if (tMoved) {
+      line.setAttribute('x2', dt.x); line.setAttribute('y2', dt.y);
+      line._tx = dt.x; line._ty = dt.y;
+    }
     const grad = state.gradientElements.get(id);
     if (grad) updateGradient(grad, ds.x, ds.y, dt.x, dt.y);
     const arrow = state.arrowElements.get(id);
     if (arrow) updateArrow(arrow, ds.x, ds.y, dt.x, dt.y);
   }
 
+  // Meta-edges and hulls/cluster labels all need per-cluster centroids in
+  // display space. Compute once and share across the three consumers.
+  const centroids = buildClusterCentroids(state);
+
   // Meta-edges: follow cluster centroids via member display positions.
   for (const [key, ml] of state.metaLinkElements) {
-    const [a, b] = key.split('\0');
-    const s = centroidFromDisplay(state, a);
-    const t = centroidFromDisplay(state, b);
-    ml.line.setAttribute('x1', s.x); ml.line.setAttribute('y1', s.y);
-    ml.line.setAttribute('x2', t.x); ml.line.setAttribute('y2', t.y);
-    ml.grad.setAttribute('x1', s.x); ml.grad.setAttribute('y1', s.y);
-    ml.grad.setAttribute('x2', t.x); ml.grad.setAttribute('y2', t.y);
+    const sep = key.indexOf('\0');
+    const a = key.slice(0, sep);
+    const b = key.slice(sep + 1);
+    const s = centroids.get(a) || ZERO_PT;
+    const t = centroids.get(b) || ZERO_PT;
+    const sMoved = Math.abs(s.x - ml._sx) >= EPS || Math.abs(s.y - ml._sy) >= EPS
+      || ml._sx === undefined;
+    const tMoved = Math.abs(t.x - ml._tx) >= EPS || Math.abs(t.y - ml._ty) >= EPS
+      || ml._tx === undefined;
+    if (!sMoved && !tMoved) continue;
+    if (sMoved) {
+      ml.line.setAttribute('x1', s.x); ml.line.setAttribute('y1', s.y);
+      ml.grad.setAttribute('x1', s.x); ml.grad.setAttribute('y1', s.y);
+      ml._sx = s.x; ml._sy = s.y;
+    }
+    if (tMoved) {
+      ml.line.setAttribute('x2', t.x); ml.line.setAttribute('y2', t.y);
+      ml.grad.setAttribute('x2', t.x); ml.grad.setAttribute('y2', t.y);
+      ml._tx = t.x; ml._ty = t.y;
+    }
   }
 
-  // Hulls & cluster labels — structure-dependent, but positions drift every
-  // frame while dragging, so rebuild paths from display positions.
   rebuildHullPaths(state);
-  positionClusterLabelsFromDisplay(state);
+  positionClusterLabelsFromDisplay(state, centroids);
 }
 
-function centroidFromDisplay(state, cid) {
-  const members = state.clusterMembers.get(cid);
-  if (!members || members.length === 0) return { x: 0, y: 0 };
-  let cx = 0, cy = 0, n = 0;
-  for (const mid of members) {
-    const dp = state.displayPositions.get(mid);
-    if (!dp) continue;
-    cx += dp.x; cy += dp.y; n++;
+const ZERO_PT = { x: 0, y: 0 };
+
+function buildClusterCentroids(state) {
+  const out = new Map();
+  for (const [cid, members] of state.clusterMembers) {
+    if (!members || members.length === 0) continue;
+    let cx = 0, cy = 0, n = 0;
+    for (const mid of members) {
+      const dp = state.displayPositions.get(mid);
+      if (!dp) continue;
+      cx += dp.x; cy += dp.y; n++;
+    }
+    if (n) out.set(cid, { x: cx / n, y: cy / n });
   }
-  if (!n) return { x: 0, y: 0 };
-  return { x: cx / n, y: cy / n };
+  return out;
 }
 
 function rebuildHullPaths(state) {
@@ -863,25 +953,23 @@ function rebuildHullPaths(state) {
     if (!hull || hull.length < 3) continue;
     const expanded = expandHull(hull, 20);
     const d = `M${expanded.map(p => p.join(',')).join('L')}Z`;
+    if (he._lastD === d) continue;
     he.path.setAttribute('d', d);
     he.pathDef.setAttribute('d', d);
+    he._lastD = d;
   }
 }
 
-function positionClusterLabelsFromDisplay(state) {
+function positionClusterLabelsFromDisplay(state, centroids) {
   for (const [cid, text] of state.clusterLabelElements) {
-    const members = state.clusterMembers.get(cid);
-    if (!members) continue;
-    let cx = 0, cy = 0, n = 0;
-    for (const mid of members) {
-      const dp = state.displayPositions.get(mid);
-      if (!dp) continue;
-      cx += dp.x; cy += dp.y; n++;
-    }
-    if (!n) continue;
-    cx /= n; cy /= n;
+    const c = centroids.get(cid);
+    if (!c) continue;
     const off = state.clusterLabelOffset.get(cid) || { dx: 0, dy: -30 };
-    text.setAttribute('transform', `translate(${cx + off.dx},${cy + off.dy})`);
+    const tx = c.x + off.dx;
+    const ty = c.y + off.dy;
+    if (Math.abs(tx - text._lastX) < 0.05 && Math.abs(ty - text._lastY) < 0.05) continue;
+    text.setAttribute('transform', `translate(${tx},${ty})`);
+    text._lastX = tx; text._lastY = ty;
   }
 }
 

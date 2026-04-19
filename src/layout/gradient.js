@@ -15,6 +15,7 @@
 
 import { rebuild, approximateRepulsion } from './quadtree.js';
 import { toPointArray } from './positions.js';
+import { isLayoutHub } from './hub-policy.js';
 
 const DEFAULT_ETA = 0.1;
 const STICKY_DAMPEN = 0.05;
@@ -99,7 +100,7 @@ export function energy(posMap, edges, W) {
  * @param {import('../core/types.js').WeightVector} [W]
  * @returns {Map<string, { gx: number, gy: number }>}
  */
-export function gradEnergy(posMap, edges, W) {
+export function gradEnergy(posMap, edges, W, nodes) {
   const grad = new Map();
   const positions = posMap.positions;
 
@@ -110,6 +111,7 @@ export function gradEnergy(posMap, edges, W) {
 
   // Edge attraction gradient: dE/dx_s = 2 * w * (1 - target/dist) * (x_s - x_t)
   for (const [, edge] of edges) {
+    if (nodes && (isLayoutHub(nodes.get(edge.source)) || isLayoutHub(nodes.get(edge.target)))) continue;
     const ps = positions.get(edge.source);
     const pt = positions.get(edge.target);
     if (!ps || !pt) continue;
@@ -183,26 +185,35 @@ export function gradNorm(grad) {
  * boundary are ignored for the duration of the step, so they cannot drag
  * members back out during a collapse burst.
  *
+ * If `options.movable` is provided (and `scope` is not), the full gradient is
+ * computed but only nodes in `movable` are displaced. Everything else stays
+ * put but still contributes forces. Use this when a small set of new nodes
+ * needs to settle without perturbing the rest of the layout.
+ *
  * @param {import('./positions.js').PositionMap} posMap
  * @param {Map<string, import('../core/types.js').Edge>} edges
  * @param {import('../core/types.js').WeightVector} [W]
  * @param {Object} [options]
  * @param {number} [options.eta] - step size
  * @param {Set<string>} [options.scope] - cluster-local mode
+ * @param {Set<string>} [options.movable] - full gradient, constrained displacement
  * @returns {{ gradMag: number }} gradient magnitude after step
  */
 export function descentStep(posMap, edges, W, options) {
   const eta = (options && options.eta) || DEFAULT_ETA;
   const scope = options && options.scope;
   const collapse = options && options.collapse;
+  const movable = options && options.movable;
+  const nodes = options && options.nodes;
 
   const grad = scope
-    ? scopedGradEnergy(posMap, edges, W, scope, collapse)
-    : gradEnergy(posMap, edges, W);
+    ? scopedGradEnergy(posMap, edges, W, scope, collapse, nodes)
+    : gradEnergy(posMap, edges, W, nodes);
 
   for (const [id, ps] of posMap.positions) {
     if (ps.locked) continue;
     if (scope && !scope.has(id)) continue;
+    if (movable && !movable.has(id)) continue;
 
     const g = grad.get(id);
     if (!g) continue;
@@ -230,11 +241,14 @@ export function descentStep(posMap, edges, W, options) {
  * repulsion only between scope pairs. Used for cluster-local collapse/expand
  * bursts so bridge edges to outside nodes cannot fight the rule.
  */
-function scopedGradEnergy(posMap, edges, W, scope, collapse) {
+function scopedGradEnergy(posMap, edges, W, scope, collapse, nodes) {
   const grad = new Map();
   const positions = posMap.positions;
 
-  for (const id of scope) grad.set(id, { gx: 0, gy: 0 });
+  for (const id of scope) {
+    if (nodes && isLayoutHub(nodes.get(id))) continue;
+    grad.set(id, { gx: 0, gy: 0 });
+  }
 
   // Compute centroid for centroid-pull during collapse.
   let cx = 0, cy = 0, cn = 0;
@@ -250,6 +264,7 @@ function scopedGradEnergy(posMap, edges, W, scope, collapse) {
 
   for (const [, edge] of edges) {
     if (!scope.has(edge.source) || !scope.has(edge.target)) continue;
+    if (nodes && (isLayoutHub(nodes.get(edge.source)) || isLayoutHub(nodes.get(edge.target)))) continue;
     const ps = positions.get(edge.source);
     const pt = positions.get(edge.target);
     if (!ps || !pt) continue;

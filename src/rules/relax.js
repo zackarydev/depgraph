@@ -30,9 +30,9 @@ export const relaxRule = {
   name: 'relax',
 
   tick(moment, ctx) {
-    const { posMap, edges, weights } = ctx;
+    const { posMap, edges, weights, nodes } = ctx;
     if (!posMap || !edges) return null;
-    const { eta, scope, collapse, clearSticky } = moment.payload;
+    const { eta, scope, collapse, clearSticky, movable } = moment.payload;
 
     const before = new Map();
     for (const [id, ps] of posMap.positions) before.set(id, { x: ps.x, y: ps.y });
@@ -49,6 +49,8 @@ export const relaxRule = {
       eta,
       scope: scope || undefined,
       collapse: !!collapse,
+      movable: movable || undefined,
+      nodes,
     });
 
     if (prevSticky) {

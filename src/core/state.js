@@ -71,13 +71,14 @@ export function applyRow(state, row) {
         directed: true,
         label: row.label || null,
       });
-      // Property-edge mirror: `prop:stretch` edges cache the scalar back onto
-      // the edge they describe, so layout can read edge.stretch without
-      // querying the graph per frame.
-      if (row.layer === 'prop:stretch' && row.source && typeof row.target === 'string') {
+      // Stretch mirror: a `stretch` layer edge points at a slot node whose
+      // label carries the scalar. Cache it back onto the edge identified by
+      // row.source so layout can read edge.stretch without a graph query.
+      if (row.layer === 'stretch' && row.source && row.target) {
         const target = state.edges.get(row.source);
-        if (target && row.target.startsWith('value:stretch:')) {
-          const n = Number(row.target.slice('value:stretch:'.length));
+        const slot = state.nodes.get(row.target);
+        if (target && slot) {
+          const n = Number(slot.label);
           if (!Number.isNaN(n)) target.stretch = n;
         }
       }
