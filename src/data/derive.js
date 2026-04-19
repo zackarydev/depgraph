@@ -192,7 +192,13 @@ export function deriveClusters(nodes, edges, affinities) {
     }
 
     if (bestGroup) {
-      const clusterId = `cluster:${bestGroup}`;
+      // bestGroup may already be a cluster id (when affinities are re-derived
+      // with a clusterIndex, groupId is the cluster id of the other endpoint).
+      // Re-prefixing would turn `cluster:foo` into `cluster:cluster:foo` and
+      // compound on every rederive, producing long `cluster:cluster:…` labels.
+      const clusterId = String(bestGroup).startsWith('cluster:')
+        ? bestGroup
+        : `cluster:${bestGroup}`;
       let cluster = clusters.get(clusterId);
       if (!cluster) {
         cluster = {

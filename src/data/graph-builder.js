@@ -8,17 +8,19 @@
  * @module data/graph-builder
  */
 
-import { applyRow, replayRows } from '../core/state.js';
+import { applyRow, createState } from '../core/state.js';
 import {
   deriveAll,
   invalidateEdge,
   recompute,
 } from './derive.js';
+import { notifyRow, resetProperties } from '../core/properties.js';
 
 /**
  * @typedef {Object} Graph
  * @property {import('../core/state.js').State} state - raw nodes + edges
  * @property {import('./derive.js').Derivation} derivation - hyperedges, affinities, clusters
+ * @property {import('../core/properties.js').PropertyRegistry} [properties] - optional system-property listeners
  */
 
 /**
@@ -27,12 +29,18 @@ import {
  *
  * @param {import('../core/types.js').HistoryRow[]} rows
  * @param {import('../core/types.js').WeightVector} [W]
+ * @param {import('../core/properties.js').PropertyRegistry} [properties]
  * @returns {Graph}
  */
-export function buildFromHistory(rows, W) {
-  const state = replayRows(rows);
+export function buildFromHistory(rows, W, properties) {
+  const state = createState();
+  if (properties) resetProperties(properties);
+  for (const row of rows) {
+    applyRow(state, row);
+    if (properties) notifyRow(properties, row, state);
+  }
   const derivation = deriveAll(state.nodes, state.edges, W);
-  return { state, derivation };
+  return { state, derivation, properties };
 }
 
 /**
@@ -45,6 +53,7 @@ export function buildFromHistory(rows, W) {
  */
 export function applyRowToGraph(graph, row, W) {
   applyRow(graph.state, row);
+  if (graph.properties) notifyRow(graph.properties, row, graph.state);
 
   if (row.type === 'EDGE') {
     // Mark endpoints dirty for incremental recompute

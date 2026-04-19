@@ -98,20 +98,24 @@ export function stopReset(reset, posMap) {
  *
  * @param {string} nodeId
  * @param {import('../layout/positions.js').PositionMap} posMap
- * @returns {import('../core/types.js').HistoryRow|null}
+ * @param {{next: function(): string}} [hlc] - HLC for position slot ids
+ * @returns {import('../core/types.js').HistoryRow[]}
  */
-export function resetSingleNode(nodeId, posMap) {
+export function resetSingleNode(nodeId, posMap, hlc) {
   const ps = posMap.positions.get(nodeId);
-  if (!ps || ps.locked) return null;
+  if (!ps || ps.locked) return [];
 
   resetToT0(posMap, nodeId);
 
-  return {
-    type: 'NODE',
-    op: 'update',
-    id: nodeId,
-    _payload: { x: ps.x, y: ps.y, author: 'user', action: 'reset-single' },
-  };
+  const rows = [{ type: 'NODE', op: 'update', id: nodeId }];
+  if (hlc) {
+    for (const [key, value] of [['x', ps.x], ['y', ps.y]]) {
+      const id = `${hlc.next()}:${key}:${nodeId}`;
+      rows.push({ type: 'NODE', op: 'add', id, kind: 'slot', weight: 0.1, label: String(value) });
+      rows.push({ type: 'EDGE', op: 'add', id, source: nodeId, target: id, layer: key, weight: 1 });
+    }
+  }
+  return rows;
 }
 
 /**

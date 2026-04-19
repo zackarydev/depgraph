@@ -101,48 +101,43 @@ function clusterStructuralEdges(clusterId, graph) {
  * `clusterId` to `stretch`. Caller is responsible for appending these
  * through the normal history pipeline (so rederive + descent fire).
  *
+ * Each target edge gets a slot NODE holding the scalar plus a `stretch`-layer
+ * EDGE (source=targetEdge.id, target=slot). applyRow's stretch mirror caches
+ * the scalar back onto the target edge.
+ *
  * @param {string} clusterId
  * @param {number} stretch
  * @param {import('../data/graph-builder.js').Graph} graph
- * @param {Object} [meta] - optional metadata recorded on each row's payload
+ * @param {{next: function(): string}} [hlc] - HLC for slot id minting
  * @returns {import('../core/types.js').HistoryRow[]}
  */
-export function setClusterStretchRule(clusterId, stretch, graph, meta) {
+export function setClusterStretchRule(clusterId, stretch, graph, hlc) {
   const edges = clusterStructuralEdges(clusterId, graph);
-  const action = meta && meta.action;
   const rows = [];
   for (const e of edges) {
-    // Single EDGE update with `stretch` in the payload. expandPayload sees
-    // `stretch` as a slot key and emits the slot node + stretch-layer edge;
-    // applyRow's stretch mirror caches the scalar back onto this edge.
-    rows.push({
-      type: 'EDGE',
-      op: 'update',
-      id: e.id,
-      _payload: {
-        author: 'user',
-        action: action || 'cluster-stretch',
-        cluster: clusterId,
-        stretch,
-      },
-    });
+    rows.push({ type: 'EDGE', op: 'update', id: e.id });
+    if (hlc) {
+      const slotId = `${hlc.next()}:stretch:${e.id}`;
+      rows.push({ type: 'NODE', op: 'add', id: slotId, kind: 'slot', weight: 0.1, label: String(stretch) });
+      rows.push({ type: 'EDGE', op: 'add', id: slotId, source: e.id, target: slotId, layer: 'stretch', weight: 1 });
+    }
   }
   return rows;
 }
 
 /** Collapse shortcut: stretch = STRETCH_COLLAPSED. */
-export function collapseClusterRule(clusterId, graph) {
-  return setClusterStretchRule(clusterId, STRETCH_COLLAPSED, graph, { action: 'cluster-collapse' });
+export function collapseClusterRule(clusterId, graph, hlc) {
+  return setClusterStretchRule(clusterId, STRETCH_COLLAPSED, graph, hlc);
 }
 
 /** Expand shortcut: stretch = STRETCH_EXPANDED. */
-export function expandClusterRule(clusterId, graph) {
-  return setClusterStretchRule(clusterId, STRETCH_EXPANDED, graph, { action: 'cluster-expand' });
+export function expandClusterRule(clusterId, graph, hlc) {
+  return setClusterStretchRule(clusterId, STRETCH_EXPANDED, graph, hlc);
 }
 
 /** Reset shortcut: stretch = 0 (identity). */
-export function resetClusterStretchRule(clusterId, graph) {
-  return setClusterStretchRule(clusterId, STRETCH_DEFAULT, graph, { action: 'cluster-reset' });
+export function resetClusterStretchRule(clusterId, graph, hlc) {
+  return setClusterStretchRule(clusterId, STRETCH_DEFAULT, graph, hlc);
 }
 
 /**
@@ -170,13 +165,13 @@ export function readClusterStretch(clusterId, graph) {
  * @param {import('../data/graph-builder.js').Graph} graph
  * @returns {{ rows: import('../core/types.js').HistoryRow[], next: number }}
  */
-export function toggleClusterStretchRule(clusterId, graph) {
+export function toggleClusterStretchRule(clusterId, graph, hlc) {
   const cur = readClusterStretch(clusterId, graph);
   let next;
   if (cur > 0.5) next = STRETCH_COLLAPSED;
   else if (cur < -0.5) next = STRETCH_DEFAULT;
   else next = STRETCH_EXPANDED;
-  const rows = setClusterStretchRule(clusterId, next, graph, { action: 'cluster-toggle' });
+  const rows = setClusterStretchRule(clusterId, next, graph, hlc);
   // Track state for edgeless clusters so the toggle cycle works.
   if (rows.length === 0) edgelessClusterStretch.set(clusterId, next);
   return { rows, next };

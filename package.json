@@ -22,7 +22,8 @@
   "license": "ISC",
   "dependencies": {
     "acorn": "^8.16.0",
-    "acorn-walk": "^8.3.5"
+    "acorn-walk": "^8.3.5",
+    "mdast-util-from-markdown": "^2.0.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",

@@ -12,6 +12,7 @@
  */
 
 import { updatePosition, setSticky } from '../layout/positions.js';
+import { rebuild as rebuildQuadtree, nearest as quadtreeNearest } from '../layout/quadtree.js';
 
 /**
  * @typedef {Object} DragState
@@ -81,14 +82,34 @@ export function onDrag(drag, worldX, worldY, posMap) {
   }
 }
 
+// Emit an x/y position for `ownerId` as a slot node + edge pair. The edge's
+// `source=owner, target=slot` shape means replay can discover positions by
+// scanning edges (layer=x/y) — no string-parsing of slot ids required.
+function positionRows(hlc, ownerId, x, y) {
+  const rows = [];
+  for (const [key, value] of [['x', x], ['y', y]]) {
+    const id = `${hlc.next()}:${key}:${ownerId}`;
+    rows.push({ type: 'NODE', op: 'add', id, kind: 'slot', weight: value, label: String(value) });
+    rows.push({ type: 'EDGE', op: 'add', id, source: ownerId, target: id, layer: key, weight: 1 });
+  }
+  return rows;
+}
+
 /**
  * End a drag. Makes the dragged node(s) sticky and returns history rows
- * to append (NODE update with new position in payload + spatial EDGE rows).
+ * to append (NODE update + x/y slot nodes/edges + spatial EDGE rows).
+ *
+ * Neighbor search runs over the `spatial` property listener's node set —
+ * the subset of nodes known to have x/y slot edges, not every entry in
+ * posMap (which includes slot and sentinel nodes). A quadtree over that
+ * set is built once per drag and reused across dragged nodes.
  *
  * @param {DragState} drag
  * @param {import('../layout/positions.js').PositionMap} posMap
  * @param {Object} [opts]
  * @param {number} [opts.spatialK=5] - number of nearest neighbors for spatial edges
+ * @param {{next: function(): string}} [opts.hlc] - HLC for slot id minting
+ * @param {import('../core/properties.js').PropertyListener} [opts.spatial] - spatial listener (required for spatial edges)
  * @returns {import('../core/types.js').HistoryRow[]} rows to append to history
  */
 export function endDrag(drag, posMap, opts) {
@@ -96,37 +117,27 @@ export function endDrag(drag, posMap, opts) {
 
   const rows = [];
   const spatialK = (opts && opts.spatialK) || 5;
+  const hlc = opts && opts.hlc;
+  const spatial = opts && opts.spatial;
 
-  // Make dragged node sticky
+  const tree = spatial ? buildSpatialTree(spatial, posMap) : null;
+
   setSticky(posMap, drag.nodeId, true);
   const ps = posMap.positions.get(drag.nodeId);
   if (ps) {
-    rows.push({
-      type: 'NODE',
-      op: 'update',
-      id: drag.nodeId,
-      _payload: { x: ps.x, y: ps.y, author: 'user', action: 'drag' },
-    });
-
-    // Emit spatial edges to K nearest neighbors
-    const spatialRows = computeSpatialEdges(drag.nodeId, posMap, spatialK);
-    rows.push(...spatialRows);
+    rows.push({ type: 'NODE', op: 'update', id: drag.nodeId });
+    if (hlc) rows.push(...positionRows(hlc, drag.nodeId, ps.x, ps.y));
+    if (tree) rows.push(...computeSpatialEdges(drag.nodeId, posMap, tree, spatialK));
   }
 
-  // Group drag: make all moved nodes sticky, record positions
   if (drag.isGroup) {
     for (const [id] of drag.offsets) {
       setSticky(posMap, id, true);
       const other = posMap.positions.get(id);
       if (other) {
-        rows.push({
-          type: 'NODE',
-          op: 'update',
-          id,
-          _payload: { x: other.x, y: other.y, author: 'user', action: 'group-drag' },
-        });
-        const spatialRows = computeSpatialEdges(id, posMap, spatialK);
-        rows.push(...spatialRows);
+        rows.push({ type: 'NODE', op: 'update', id });
+        if (hlc) rows.push(...positionRows(hlc, id, other.x, other.y));
+        if (tree) rows.push(...computeSpatialEdges(id, posMap, tree, spatialK));
       }
     }
   }
@@ -135,33 +146,41 @@ export function endDrag(drag, posMap, opts) {
 }
 
 /**
+ * Build a quadtree over the spatial listener's node set, using current
+ * positions from posMap. Nodes in the listener without a live position
+ * are skipped (should be rare — listener admits on x/y slot edges, which
+ * are emitted alongside position updates).
+ *
+ * @param {import('../core/properties.js').PropertyListener} spatial
+ * @param {import('../layout/positions.js').PositionMap} posMap
+ */
+function buildSpatialTree(spatial, posMap) {
+  const pts = [];
+  for (const id of spatial.nodes.keys()) {
+    const ps = posMap.positions.get(id);
+    if (ps) pts.push({ id, x: ps.x, y: ps.y });
+  }
+  return rebuildQuadtree(pts);
+}
+
+/**
  * Compute spatial EDGE rows for a node's K nearest neighbors.
  * Distance becomes the edge weight (inverse: closer = higher weight).
+ * Excludes the node itself from candidates.
  *
  * @param {string} nodeId
  * @param {import('../layout/positions.js').PositionMap} posMap
+ * @param {import('../layout/quadtree.js').QTNode} tree - prebuilt over spatial set
  * @param {number} k
  * @returns {import('../core/types.js').HistoryRow[]}
  */
-function computeSpatialEdges(nodeId, posMap, k) {
+function computeSpatialEdges(nodeId, posMap, tree, k) {
   const ps = posMap.positions.get(nodeId);
   if (!ps) return [];
 
-  // Find distances to all other nodes
-  const distances = [];
-  for (const [otherId, otherPs] of posMap.positions) {
-    if (otherId === nodeId) continue;
-    const dx = ps.x - otherPs.x;
-    const dy = ps.y - otherPs.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    distances.push({ id: otherId, dist });
-  }
+  const neighbors = quadtreeNearest(tree, ps, k, (p) => p.id !== nodeId);
 
-  // Sort by distance, take K nearest
-  distances.sort((a, b) => a.dist - b.dist);
-  const nearest = distances.slice(0, k);
-
-  return nearest.map(({ id: otherId, dist }) => ({
+  return neighbors.map(({ id: otherId, dist }) => ({
     type: 'EDGE',
     op: 'add',
     id: `spatial:${nodeId}->${otherId}`,
@@ -169,7 +188,6 @@ function computeSpatialEdges(nodeId, posMap, k) {
     target: otherId,
     layer: 'spatial',
     weight: Math.max(0.1, 1 / (1 + dist / 100)),
-    _payload: { distance: Math.round(dist), author: 'user', action: 'drag-spatial' },
   }));
 }
 

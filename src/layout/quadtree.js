@@ -172,22 +172,90 @@ export function approximateRepulsion(node, point, theta = 0.7, repulsionK = 1000
 
 /**
  * Find k nearest neighbors to a probe point.
+ *
+ * Prunes quads whose bounding box cannot contain any point closer than the
+ * current worst-of-k. Maintains a max-heap of size ≤ k so the k-th best is
+ * O(1) to read and O(log k) to replace.
+ *
  * @param {QTNode} node
  * @param {{ x: number, y: number }} probe
  * @param {number} k
+ * @param {(p: { id: string, x: number, y: number }) => boolean} [filter] - optional inclusion test
  * @returns {{ id: string, x: number, y: number, dist: number }[]}
  */
-export function nearest(node, probe, k) {
-  const candidates = [];
-  collectAll(node, candidates);
+export function nearest(node, probe, k, filter) {
+  if (k <= 0 || node.count === 0) return [];
 
-  const withDist = candidates.map(p => ({
-    ...p,
-    dist: Math.sqrt((p.x - probe.x) ** 2 + (p.y - probe.y) ** 2),
-  }));
-  withDist.sort((a, b) => a.dist - b.dist);
+  /** @type {{ id: string, x: number, y: number, dist: number }[]} */
+  const heap = []; // max-heap by dist, size ≤ k
 
-  return withDist.slice(0, k);
+  function heapPush(item) {
+    heap.push(item);
+    let i = heap.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (heap[parent].dist < heap[i].dist) {
+        [heap[parent], heap[i]] = [heap[i], heap[parent]];
+        i = parent;
+      } else break;
+    }
+  }
+
+  function heapReplaceTop(item) {
+    heap[0] = item;
+    const n = heap.length;
+    let i = 0;
+    while (true) {
+      const l = i * 2 + 1;
+      const r = l + 1;
+      let largest = i;
+      if (l < n && heap[l].dist > heap[largest].dist) largest = l;
+      if (r < n && heap[r].dist > heap[largest].dist) largest = r;
+      if (largest === i) break;
+      [heap[largest], heap[i]] = [heap[i], heap[largest]];
+      i = largest;
+    }
+  }
+
+  function worstDist() {
+    return heap.length < k ? Infinity : heap[0].dist;
+  }
+
+  // Minimum possible distance from probe to any point within a quad.
+  function minDistToQuad(q) {
+    const dx = Math.max(0, Math.abs(probe.x - q.cx) - q.halfW);
+    const dy = Math.max(0, Math.abs(probe.y - q.cy) - q.halfH);
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function visit(q) {
+    if (q.count === 0) return;
+    if (minDistToQuad(q) >= worstDist()) return;
+
+    if (q.children) {
+      // Visit children in order of proximity for better pruning.
+      const order = q.children
+        .map((c, i) => ({ i, d: minDistToQuad(c) }))
+        .sort((a, b) => a.d - b.d);
+      for (const { i } of order) visit(q.children[i]);
+      return;
+    }
+
+    for (const p of q.points) {
+      if (filter && !filter(p)) continue;
+      const dx = p.x - probe.x;
+      const dy = p.y - probe.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (heap.length < k) {
+        heapPush({ id: p.id, x: p.x, y: p.y, dist });
+      } else if (dist < heap[0].dist) {
+        heapReplaceTop({ id: p.id, x: p.x, y: p.y, dist });
+      }
+    }
+  }
+
+  visit(node);
+  return heap.sort((a, b) => a.dist - b.dist);
 }
 
 // ─── Internal helpers ───
@@ -247,10 +315,3 @@ function recalcAggregate(node) {
   }
 }
 
-function collectAll(node, out) {
-  if (node.children) {
-    for (const child of node.children) collectAll(child, out);
-  } else {
-    for (const p of node.points) out.push(p);
-  }
-}

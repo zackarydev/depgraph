@@ -29,29 +29,20 @@ export function clickEdgeId(t, targetId) {
 
 /**
  * Build a history EDGE row representing a click. Caller appends it through
- * the normal pipeline so localStorage + SSE + rebuild all see it.
+ * the normal pipeline so localStorage + SSE + rebuild all see it. The edge's
+ * existence on the `event:click` layer IS the click record; no metadata blob.
  *
  * @param {string} targetId - node the user clicked
- * @param {Object} [meta] - extra payload fields (e.g. shiftKey)
  * @returns {import('../core/types.js').HistoryRow}
  */
-export function clickRow(targetId, meta) {
+export function clickRow(targetId) {
   return {
     type: 'EDGE',
     op: 'add',
-    // id is filled in by the caller using clickEdgeId(t, targetId) once the
-    // history timestamp is known. History.append assigns t, so we leave a
-    // placeholder and let the caller rewrite — but to keep this helper pure,
-    // we pass targetId twice and let appendRow's id fall through.
     source: SENTINEL_MOUSE_CLICKED,
     target: targetId,
     layer: CLICK_EDGE_LAYER,
     weight: 0,
-    _payload: {
-      author: 'user',
-      action: 'click',
-      ...(meta || {}),
-    },
   };
 }
 
@@ -88,6 +79,5 @@ export function sentinelRow() {
     kind: 'sentinel',
     label: SENTINEL_MOUSE_CLICKED,
     weight: 0.1,
-    _payload: { author: 'system', action: 'sentinel-init' },
   };
 }

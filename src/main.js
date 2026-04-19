@@ -10,13 +10,15 @@
 import { createBus } from './core/bus.js';
 import { createScheduler } from './core/animation.js';
 import { createContext } from './core/context.js';
+import { createPropertyRegistry, registerProperty, getProperty } from './core/properties.js';
+import { createSpatialProperty, SPATIAL_PROPERTY } from './rules/spatial.js';
 import { createHistory, load as loadHistory, append as historyAppend, effectiveRows } from './data/history.js';
 import { buildFromHistory, applyRowToGraph, rederive } from './data/graph-builder.js';
 import { initialPlace } from './layout/placement.js';
 import { isLayoutHub } from './layout/hub-policy.js';
 import { initSVG } from './render/svg.js';
 import {
-  createLegacyRenderer,
+  createRenderer as createLegacyRenderer,
   renderFull as legacyRenderFull,
   renderPositionsOnly as legacyRenderPositions,
   applySemanticZoom as legacyApplySemanticZoom,
@@ -25,7 +27,7 @@ import {
   clusterColor,
   LOD_SLOT_THRESHOLD,
   isLowLodKind,
-} from './render/legacy.js';
+} from './render/v3.js';
 import { generateDemoHistory } from './data/demo-history.js';
 import { EDGE_LAYERS, setLayerVisible, getLayer } from './edges/layers.js';
 import { createSelection, selectNode, toggleSelection, clearSelection } from './interact/select.js';
@@ -54,7 +56,6 @@ import { tryConnectSSE } from './stream/sse.js';
 import { connectHistoryWS } from './stream/history-ws.js';
 import { toCSV } from './data/history.js';
 import { writeRowLine } from './data/csv.js';
-import { expandPayload, agentSeedRows, parseSlotId } from './data/payload-expand.js';
 import { createHLC } from './core/clock.js';
 import { startCinematic, stopCinematic } from './stream/cinematic.js';
 
@@ -108,24 +109,24 @@ export function init(opts = {}) {
     }
   }
 
-  // --- Agent singletons ---
-  // Every authored-by / produced-by edge references one of these nodes. Seed
-  // them idempotently (NODE add overwrites identically if already present).
-  for (const seed of agentSeedRows()) {
-    if (!history.state.nodes.has(seed.id)) {
-      historyAppend(history, seed);
-    }
-  }
-
   // --- HLC clock for position moments ---
   // Each drag/reset mints a `moment:pos:<hlc>` node whose id embeds the HLC
   // coordinate. The substrate's dispatcher uses 'ui' as its producer id;
   // we match that so ordering is consistent across moments.
   const hlc = createHLC('ui');
 
-  // --- Graph (state + derivation) ---
+  // --- System-property listeners ---
+  // Hardcoded JS-side predicates that index nodes as history rows flow
+  // through. Consumers (renderer, spatial-edge generator) read the
+  // listener's live Map<id, Node> — references into graph.state.nodes —
+  // instead of scanning every entry in state or posMap.
+  const properties = createPropertyRegistry();
+  registerProperty(properties, createSpatialProperty());
+
+  // --- Graph (state + derivation + properties) ---
   const eff = effectiveRows(history);
-  const graph = buildFromHistory(eff, context.weights.affinity);
+  const graph = buildFromHistory(eff, context.weights.affinity, properties);
+  const spatialProperty = getProperty(properties, SPATIAL_PROPERTY);
 
   // --- Layout ---
   const { posMap } = initialPlace(graph.state.nodes, graph.state.edges, context.weights.physics);
@@ -352,15 +353,12 @@ export function init(opts = {}) {
       const rows = [];
       for (const id of dctx.memberIds) {
         const ps = posMap.positions.get(id);
-        if (ps) {
-          rows.push({
-            type: 'NODE', op: 'update', id,
-            payload: {
-              x: ps.x, y: ps.y,
-              author: 'user', action: 'cluster-drag',
-              cluster: dctx.clusterId,
-            },
-          });
+        if (!ps) continue;
+        rows.push({ type: 'NODE', op: 'update', id });
+        for (const [key, value] of [['x', ps.x], ['y', ps.y]]) {
+          const slotId = `${hlc.next()}:${key}:${id}`;
+          rows.push({ type: 'NODE', op: 'add', id: slotId, kind: 'slot', weight: 0.1, label: String(value) });
+          rows.push({ type: 'EDGE', op: 'add', id: slotId, source: id, target: slotId, layer: key, weight: 1 });
         }
       }
       return rows;
@@ -376,13 +374,13 @@ export function init(opts = {}) {
       nodeId: dctx.primaryId,
       isGroup: dctx.isGroup,
       offsets,
-    }, posMap);
+    }, posMap, { hlc, spatial: spatialProperty });
   }
 
   // --- Emit a click event as an edge from the mouse-clicked sentinel to
   //     the target node. Persists to history; downstream consumers query the
   //     graph's edges for the most recent `event:click` to learn selection.
-  function emitClickEvent(targetId, extra) {
+  function emitClickEvent(targetId) {
     if (!targetId) return;
     const t = history.nextT;
     return appendRow({
@@ -393,31 +391,20 @@ export function init(opts = {}) {
       target: targetId,
       layer: CLICK_EDGE_LAYER,
       weight: 0,
-      _payload: {
-        author: 'user',
-        action: 'click',
-        ...(extra || {}),
-      },
+      _userAuthored: true,
     });
   }
 
   // --- Append row to history + update graph ---
-  // `_payload` on an incoming row is legacy-style metadata (author, action,
-  // x/y, …). The CSV schema no longer has a payload column; instead we strip
-  // `_payload` before the row goes to history and expand it into a burst of
-  // property-edge + value-node + agent-edge rows via expandPayload.
+  // Rows that represent a user action carry `_userAuthored: true`; we strip
+  // the flag before persistence but use it to decide whether to mirror the
+  // row to the server. All payload-like metadata (positions, stretch, etc.)
+  // lives directly in the hypergraph as slot NODEs + property EDGEs — the
+  // emitting callsite is responsible for producing those rows.
   function appendRow(row) {
-    const payload = row._payload;
-    const userAuthoredHint = row._userAuthored === true;
-    if (payload !== undefined) delete row._payload;
+    const isUserAuthored = row._userAuthored === true;
     if (row._userAuthored !== undefined) delete row._userAuthored;
 
-    const isUserAuthored = userAuthoredHint
-      || (payload && payload.author === 'user');
-
-    // Detect genuinely-new node BEFORE applyRowToGraph — idempotent re-adds
-    // (very common from payload expansion on clicks: action:click, kind:node,
-    // shiftKey:true re-land on every click) must not trigger layout work.
     const isNewNodeRow = row.type === 'NODE' && row.op === 'add'
       && !graph.state.nodes.has(row.id);
 
@@ -449,23 +436,11 @@ export function init(opts = {}) {
     // Fire-and-forget: no ack, no await. The server batches writes. SSE still
     // echoes each appended line; the dedup-by-`t` path in the SSE handler
     // ignores our own echo.
-    const author = fullRow.payload && fullRow.payload.author;
-    if (author === 'user' && historyWS) {
+    if (isUserAuthored && historyWS) {
       historyWS.send(writeRowLine(fullRow));
     }
 
     bus.emit('row-appended', { row: fullRow });
-
-    // Expand the legacy payload into graph-native rows. Each expanded row
-    // inherits the user-authored flag so it also mirrors to the server.
-    // Expansion rows carry no `_payload` — the base case for the recursion.
-    if (payload) {
-      const expanded = expandPayload({ subjectId: fullRow.id, payload, hlc });
-      for (const extra of expanded) {
-        extra._userAuthored = isUserAuthored;
-        appendRow(extra);
-      }
-    }
 
     return fullRow;
   }
@@ -502,14 +477,27 @@ export function init(opts = {}) {
   }
 
   // --- Find node at world position ---
+  // Per-node visible radius + a few screen-pixels of slop (converted to world
+  // units via currentZoom). Layout hubs (sentinel, value, agent) and LOD-
+  // hidden kinds aren't rendered as clickable circles, so they're skipped —
+  // otherwise the locked sentinel at (0,0) and off-screen vocabulary nodes
+  // would register as hits.
   function hitTest(worldX, worldY) {
     let closest = null;
     let closestDist = Infinity;
+    const k = Math.max(0.1, currentZoom);
+    const slop = 4 / k;
     for (const [id, ps] of posMap.positions) {
+      const node = graph.state.nodes.get(id);
+      if (!node) continue;
+      if (isLayoutHub(node)) continue;
+      if (isLowLodKind(node.kind) && currentZoom < LOD_SLOT_THRESHOLD) continue;
       const dx = ps.x - worldX;
       const dy = ps.y - worldY;
       const d = Math.sqrt(dx * dx + dy * dy);
-      if (d < 20 && d < closestDist) {
+      const imp = (node.importance != null) ? node.importance : 1;
+      const r = (3 + Math.min(6, Math.sqrt(imp) * 2.2)) + slop;
+      if (d < r && d < closestDist) {
         closest = id;
         closestDist = d;
       }
@@ -540,6 +528,8 @@ export function init(opts = {}) {
   /** @type {import('./core/moment.js').Moment|null} */
   let descentBurstMoment = null;
   function kickDescentBurst(frames = 60, scope = null, collapse = false, movable = null, etaOverride = null) {
+    return;
+    
     descentBurstFrames = Math.max(descentBurstFrames, frames);
     const zoomEta = etaOverride != null
       ? etaOverride
@@ -710,9 +700,30 @@ export function init(opts = {}) {
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
       const world = screenToWorld(sx, sy);
+      mouseDownPos = { sx, sy, wx: world.x, wy: world.y };
+      isDragging = false;
 
-      // Cluster label takes priority over node hit-test — labels are
-      // rendered above nodes and the user explicitly grabbed the text.
+      // Node hit-test takes priority. Cluster-label <g> is the topmost layer
+      // and its transparent hit-rect extends past the visible glyphs, so a
+      // DOM-ordering check would swallow clicks on nodes that sit under the
+      // label — causing the wrong thing to move.
+      const nodeId = hitTest(world.x, world.y);
+      if (nodeId) {
+        mouseDownTarget = nodeId;
+        const isGroup = e.shiftKey && selection.selected.size > 1 && selection.selected.has(nodeId);
+        const offsets = nodeDragOffsets(nodeId, posMap, isGroup ? selection.selected : null);
+        pendingDragSetup = {
+          flavor: 'node',
+          primaryId: nodeId,
+          clusterId: null,
+          isGroup,
+          memberIds: [...offsets.keys()],
+          offsets,
+        };
+        emitClickEvent(nodeId);
+        return;
+      }
+
       const clusterId = clusterLabelFromEvent(e);
       if (clusterId) {
         const memberSet = resolveClusterMembers(clusterId, graph);
@@ -726,31 +737,11 @@ export function init(opts = {}) {
           offsets,
         };
         mouseDownTarget = clusterId;
-        mouseDownPos = { sx, sy, wx: world.x, wy: world.y };
-        isDragging = false;
-        emitClickEvent(clusterId, { kind: 'cluster', shiftKey: e.shiftKey });
+        emitClickEvent(clusterId);
         return;
       }
 
-      const nodeId = hitTest(world.x, world.y);
-
-      mouseDownTarget = nodeId;
-      mouseDownPos = { sx, sy, wx: world.x, wy: world.y };
-      isDragging = false;
-
-      if (nodeId) {
-        const isGroup = e.shiftKey && selection.selected.size > 1 && selection.selected.has(nodeId);
-        const offsets = nodeDragOffsets(nodeId, posMap, isGroup ? selection.selected : null);
-        pendingDragSetup = {
-          flavor: 'node',
-          primaryId: nodeId,
-          clusterId: null,
-          isGroup,
-          memberIds: [...offsets.keys()],
-          offsets,
-        };
-        emitClickEvent(nodeId, { kind: 'node', shiftKey: e.shiftKey });
-      }
+      mouseDownTarget = null;
     }, true);
 
     // Window-level move/up so releases off-svg still finalize the gesture.
@@ -857,7 +848,7 @@ export function init(opts = {}) {
       // from the pre-mutation derivation — safer against any rederive side
       // effects that might touch cluster membership.
       const memberScope = resolveClusterMembers(clusterId, graph);
-      const { rows, next } = toggleClusterStretchRule(clusterId, graph);
+      const { rows, next } = toggleClusterStretchRule(clusterId, graph, hlc);
       for (const row of rows) appendRow(row);
       // Trigger burst if we have edges to stretch OR members to centroid-pull.
       if (rows.length > 0 || memberScope.size > 0) {
@@ -1161,9 +1152,9 @@ export function init(opts = {}) {
     graph.state.edges.clear();
     graph.state.cursor = -1;
 
-    // Position replay. Drags/resets emit `<hlc>:x:<owner>` and `<hlc>:y:<owner>`
-    // slot NODE rows whose label is the scalar. Iterating in history order,
-    // the last (x, y) pair seen per owner is the one we apply to posMap.
+    // Position replay. Drag/reset emit an x/y slot NODE (label = scalar) plus
+    // an EDGE with source=owner, target=slot, layer=x|y. We discover positions
+    // by scanning the x/y edges — no id parsing.
     /** @type {Map<string, {x?: number, y?: number}>} */
     const ownerXY = new Map();
 
@@ -1172,17 +1163,6 @@ export function init(opts = {}) {
       if (type === 'NODE') {
         if (op === 'add') {
           graph.state.nodes.set(id, { id, kind: r.kind || 'unknown', label: r.label || id, importance: r.weight != null ? r.weight : 1 });
-          if (r.kind === 'slot') {
-            const parsed = parseSlotId(id);
-            if (parsed && (parsed.key === 'x' || parsed.key === 'y')) {
-              const n = Number(r.label);
-              if (!Number.isNaN(n)) {
-                let rec = ownerXY.get(parsed.owner);
-                if (!rec) { rec = {}; ownerXY.set(parsed.owner, rec); }
-                rec[parsed.key] = n;
-              }
-            }
-          }
         } else if (op === 'update') {
           const existing = graph.state.nodes.get(id);
           if (existing) {
@@ -1196,7 +1176,17 @@ export function init(opts = {}) {
       } else if (type === 'EDGE') {
         if (op === 'add') {
           graph.state.edges.set(id, { id, source: r.source, target: r.target, layer: r.layer || 'unknown', weight: r.weight != null ? r.weight : 1, stretch: 0, directed: true });
-          if (r.layer === 'stretch' && r.source && r.target) {
+          if ((r.layer === 'x' || r.layer === 'y') && r.source && r.target) {
+            const slot = graph.state.nodes.get(r.target);
+            if (slot) {
+              const n = Number(slot.label);
+              if (!Number.isNaN(n)) {
+                let rec = ownerXY.get(r.source);
+                if (!rec) { rec = {}; ownerXY.set(r.source, rec); }
+                rec[r.layer] = n;
+              }
+            }
+          } else if (r.layer === 'stretch' && r.source && r.target) {
             const tgt = graph.state.edges.get(r.source);
             const slot = graph.state.nodes.get(r.target);
             if (tgt && slot) {
