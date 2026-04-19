@@ -9,6 +9,30 @@
 
 import { parseLine, fieldsToRow } from '../data/csv.js';
 
+
+
+const buffer = [];
+
+// Your "Replay" logic handles the 10s timing
+async function startProcessing() {
+  while (true) {
+    if (buffer.length > 0) {
+      const nextFn = buffer.shift();
+      nextFn();
+      
+      // This is where the 10s wait actually works
+      await new Promise(r => setTimeout(r, 50));
+    } else {
+      // Wait a bit if the buffer is empty before checking again
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+}
+
+startProcessing();
+
+
+
 /**
  * @typedef {Object} SSEConnection
  * @property {EventSource|null} source - the underlying EventSource
@@ -61,7 +85,7 @@ export function connectSSE(url, onRow, options = {}) {
         const fields = parseLine(data.line);
         if (fields.length >= 4) {
           const row = fieldsToRow(fields);
-          onRow(row);
+          buffer.push(() => onRow(row)); // Just drop it in the bucket and leave
         }
       }
 

@@ -34,10 +34,10 @@ import { notifyRow, resetProperties } from '../core/properties.js';
  */
 export function buildFromHistory(rows, W, properties) {
   const state = createState();
-  if (properties) resetProperties(properties);
+  resetProperties(properties);
   for (const row of rows) {
     applyRow(state, row);
-    if (properties) notifyRow(properties, row, state);
+    notifyRow(properties, row, state);
   }
   const derivation = deriveAll(state.nodes, state.edges, W);
   return { state, derivation, properties };

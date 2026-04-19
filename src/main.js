@@ -31,7 +31,8 @@ import {
 import { generateDemoHistory } from './data/demo-history.js';
 import { EDGE_LAYERS, setLayerVisible, getLayer } from './edges/layers.js';
 import { createSelection, selectNode, toggleSelection, clearSelection } from './interact/select.js';
-import { endDrag } from './interact/drag.js';
+import { endDrag, positionRows } from './interact/drag.js';
+import { applyRow } from './core/state.js';
 import { toggleClusterStretchRule, clusterMembers as resolveClusterMembers } from './rules/cluster-rules.js';
 import { setStretchBias } from './layout/gradient.js';
 import { createKeyState, keyDown, keyUp } from './interact/keyboard.js';
@@ -48,7 +49,7 @@ import {
   sentinelRow,
   lastClickTarget,
 } from './rules/click-events.js';
-import { updatePosition, setLocked } from './layout/positions.js';
+import { updatePosition, setLocked, createPositionMap } from './layout/positions.js';
 import { startTimeTravel, updateTimeTravel, stopTimeTravel, stepOnce, switchBranchByDirection } from './interact/time-travel.js';
 import { createArrangementStack, pushArrangement, startTravel as startArrangementTravel, stopTravel as stopArrangementTravel } from './interact/arrangements.js';
 import { loadFromLocal, wirePersistence } from './stream/local-persistence.js';
@@ -85,9 +86,13 @@ export function init(opts = {}) {
   }
 
   // --- History ---
-  // Priority: explicit CSV > localStorage > demo
+  // Priority: streamReplay > explicit CSV > localStorage > demo
+  // streamReplay starts empty; rows arrive via SSE replay and fill the
+  // history + graph + posMap progressively.
   let history;
-  if (opts.csv) {
+  if (opts.streamReplay) {
+    history = createHistory();
+  } else if (opts.csv) {
     history = loadHistory(opts.csv);
   } else if (typeof window !== 'undefined' && opts.localStorage !== false) {
     const stored = loadFromLocal();
@@ -129,7 +134,12 @@ export function init(opts = {}) {
   const spatialProperty = getProperty(properties, SPATIAL_PROPERTY);
 
   // --- Layout ---
-  const { posMap } = initialPlace(graph.state.nodes, graph.state.edges, context.weights.physics);
+  // streamReplay starts with an empty posMap; positions arrive as x/y slot
+  // edges during the SSE replay phase, and finishReplayBoot() seeds anything
+  // that's still missing once the stream completes.
+  const posMap = opts.streamReplay
+    ? createPositionMap()
+    : initialPlace(graph.state.nodes, graph.state.edges, context.weights.physics).posMap;
 
   // --- Click-event sentinel ---
   // The `mouse-clicked` sentinel node is how we record user clicks as edges
@@ -137,16 +147,18 @@ export function init(opts = {}) {
   // screen so it never participates in layout. Every click becomes an
   // `event:click` edge from this sentinel to the clicked node — gather-start
   // and other interactions can then query the graph instead of a parallel
-  // selection object.
-  if (!graph.state.nodes.has(SENTINEL_MOUSE_CLICKED)) {
-    const seeded = historyAppend(history, sentinelRow());
-    applyRowToGraph(graph, seeded, context.weights.affinity);
+  // selection object. Deferred under streamReplay until finishReplayBoot.
+  if (!opts.streamReplay) {
+    if (!graph.state.nodes.has(SENTINEL_MOUSE_CLICKED)) {
+      const seeded = historyAppend(history, sentinelRow());
+      applyRowToGraph(graph, seeded, context.weights.affinity);
+    }
+    // Place the sentinel at the world origin and lock it. It renders like any
+    // other node so the user can see which node/cluster was last clicked via
+    // the outgoing event:click edge. Locked so physics can't drag it around.
+    updatePosition(posMap, SENTINEL_MOUSE_CLICKED, 0, 0);
+    setLocked(posMap, SENTINEL_MOUSE_CLICKED, true);
   }
-  // Place the sentinel at the world origin and lock it. It renders like any
-  // other node so the user can see which node/cluster was last clicked via
-  // the outgoing event:click edge. Locked so physics can't drag it around.
-  updatePosition(posMap, SENTINEL_MOUSE_CLICKED, 0, 0);
-  setLocked(posMap, SENTINEL_MOUSE_CLICKED, true);
 
   // --- SVG (browser only) ---
   let svgCtx = null;
@@ -171,6 +183,15 @@ export function init(opts = {}) {
   // appendRow, expand outward this many hops (terminating at hub kinds) to
   // produce the movable set for the per-frame descent burst.
   const BFS_DEPTH = 2;
+
+  // --- Streaming replay state ---
+  // While true, SSE rows are routed to applyReplayRow (which preserves the
+  // disk t and reconstructs posMap from x/y slot edges) instead of the
+  // user-authored appendRow path. Flips false on `replay-done`, after which
+  // SSE rows go through the normal live-update dedup-by-t path.
+  let replaying = opts.streamReplay === true;
+  /** @type {Map<string, {x?: number, y?: number}>} */
+  const replayOwnerXY = new Map();
 
   // --- Selection & interaction state ---
   let selection = createSelection();
@@ -443,6 +464,87 @@ export function init(opts = {}) {
     bus.emit('row-appended', { row: fullRow });
 
     return fullRow;
+  }
+
+  // --- Apply a row arriving from SSE replay ---
+  // Diverges from appendRow on three points: (1) preserves the disk-assigned
+  // `t` (instead of minting a fresh one via historyAppend, which would let
+  // local cursor and disk cursor diverge); (2) reconstructs posMap from x/y
+  // slot edges as they stream in, so nodes paint at their persisted
+  // coordinates rather than waiting on layout; (3) does not mirror back to
+  // the WebSocket and does not seed pendingDescentSeeds — the rows are
+  // already on disk and the layout for them already converged in a prior
+  // session. Sets the dirty flags directly so the render pump picks them up
+  // each frame; we deliberately skip `bus.emit('row-appended')` so persistence
+  // doesn't re-serialize the full CSV on every replay row.
+  function applyReplayRow(row) {
+    history.rows.push(row);
+    if (row.t != null && row.t >= history.nextT) history.nextT = row.t + 1;
+    history.cursor = history.rows.length - 1;
+    applyRow(history.state, row);
+    applyRowToGraph(graph, row, context.weights.affinity);
+
+    if (row.type === 'EDGE' && row.op === 'add'
+        && (row.layer === 'x' || row.layer === 'y')
+        && row.source && row.target) {
+      const slot = graph.state.nodes.get(row.target);
+      if (slot) {
+        const n = Number(slot.label);
+        if (!Number.isNaN(n)) {
+          let rec = replayOwnerXY.get(row.source);
+          if (!rec) { rec = {}; replayOwnerXY.set(row.source, rec); }
+          rec[row.layer] = n;
+          if (rec.x != null && rec.y != null) {
+            updatePosMapCoord(row.source, rec.x, rec.y);
+          }
+        }
+      }
+    }
+
+    dirtyGraph = true;
+    dirtyHud = true;
+  }
+
+  // --- Finish the replay boot ---
+  // Runs once the SSE server emits `replay-done`. Plants the click-event
+  // sentinel, seeds positions for any node still missing one (file-watcher-
+  // derived nodes, demo data without prior persistence, etc.), snapshots
+  // those seeded positions back to history.csv via the WebSocket so the next
+  // reload finds them on disk, and finally pushes the initial arrangement.
+  function finishReplayBoot() {
+    if (!replaying) return;
+    replaying = false;
+    replayOwnerXY.clear();
+
+    if (!graph.state.nodes.has(SENTINEL_MOUSE_CLICKED)) {
+      appendRow({ ...sentinelRow(), _userAuthored: true });
+    }
+    updatePosition(posMap, SENTINEL_MOUSE_CLICKED, 0, 0);
+    setLocked(posMap, SENTINEL_MOUSE_CLICKED, true);
+
+    // Seed + persist a position for any node that arrived without one.
+    // Hub kinds (sentinel, value, agent) and slot/value LOD-low kinds are
+    // skipped — they don't render as draggable circles. Position rows go
+    // through appendRow so they hit the WS and land in history.csv.
+    let seededCount = 0;
+    for (const [id, node] of graph.state.nodes) {
+      if (isLayoutHub(node)) continue;
+      if (isLowLodKind(node.kind)) continue;
+      if (posMap.positions.has(id)) continue;
+      seedNewNodePosition(id);
+      const ps = posMap.positions.get(id);
+      if (!ps) continue;
+      const rows = positionRows(hlc, id, ps.x, ps.y);
+      for (const r of rows) appendRow({ ...r, _userAuthored: true });
+      seededCount++;
+    }
+
+    pushArrangement(arrangements, 'initial', posMap);
+    dirtyHud = true;
+    dirtyGraph = true;
+    if (seededCount > 0) {
+      console.log(`[replay] seeded + persisted ${seededCount} missing positions`);
+    }
   }
 
   // --- Bus wiring ---
@@ -1444,7 +1546,11 @@ export function init(opts = {}) {
   }
 
   // --- Initial render ---
-  pushArrangement(arrangements, 'initial', posMap);
+  // Under streamReplay the posMap is empty here; the initial arrangement is
+  // pushed by finishReplayBoot once positions have actually arrived.
+  if (!opts.streamReplay) {
+    pushArrangement(arrangements, 'initial', posMap);
+  }
   updateHud();
   fullRender();
 
@@ -1461,19 +1567,30 @@ export function init(opts = {}) {
     persistenceUnsub = wirePersistence(bus, history, toCSV);
   }
 
-  // 7c: Connect SSE for live updates (if URL provided or auto-detect)
+  // 7c: Connect SSE — server replays history.csv from row 0 then tails for
+  // live updates. Under streamReplay, replay rows go through applyReplayRow
+  // (preserves disk t, reconstructs posMap from x/y edges); after the
+  // server emits `replay-done`, the same connection switches to live mode
+  // and rows go through the dedup-by-t path.
   const sseUrl = opts.sseUrl || (typeof window !== 'undefined' ? '/history-events' : null);
   if (typeof window !== 'undefined' && sseUrl) {
-    sseConnection = tryConnectSSE(sseUrl, (row) => {
-      // Only apply rows we haven't seen (check timestamp)
+    sseConnection = tryConnectSSE(sseUrl, async (row) => {
+      if (replaying) {
+        applyReplayRow(row);
+        return;
+      }
+      // Live update path: only apply rows we haven't seen.
       const eff = effectiveRows(history);
       const maxT = eff.length > 0 ? eff[eff.length - 1].t : -1;
       if (row.t > maxT) {
         appendRow(row);
       }
+
     }, {
       onOpen: () => console.log('[sse] connected'),
       onError: () => {}, // silent — offline-first
+      onReplayDone: opts.streamReplay ? finishReplayBoot : undefined,
+      replay: opts.streamReplay === true,
     });
   }
 
@@ -1524,20 +1641,11 @@ export function init(opts = {}) {
   return runtime;
 }
 
-// Auto-init when loaded in the browser
+// Auto-init when loaded in the browser. Boots empty and streams the server's
+// history.csv via SSE replay, so rows paint as they arrive instead of waiting
+// for a one-shot `/history` fetch + synchronous parse + initialPlace pass.
 if (typeof window !== 'undefined') {
-  // Try to load history.csv from the server before falling back to demo data.
-  (async () => {
-    let csv = null;
-    try {
-      const res = await fetch('/history');
-      if (res.ok) csv = await res.text();
-    } catch {
-      // offline or no server — fall through to demo
-    }
-    const opts = csv ? { csv } : {};
-    const runtime = init(opts);
-    window.__depgraph = runtime;
-    console.log('depgraph runtime initialized', csv ? '(from history.csv)' : '(demo)', runtime);
-  })();
+  const runtime = init({ streamReplay: true });
+  window.__depgraph = runtime;
+  console.log('depgraph runtime initialized (stream replay)', runtime);
 }

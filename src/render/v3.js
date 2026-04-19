@@ -735,7 +735,7 @@ export function applySemanticZoom(state, deps, k) {
 
 // Epsilon for k-equality. Below this, re-derived zoom values are
 // indistinguishable at integer-ish SVG attribute precision.
-const K_EPS = 1e-3;
+const K_EPS = 1e-4;
 
 // Cache the last applied attribute value on the element. SVG setAttribute
 // is the expensive step here (style recalc + paint); the branch is free.

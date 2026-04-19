@@ -85,7 +85,7 @@ export function onDrag(drag, worldX, worldY, posMap) {
 // Emit an x/y position for `ownerId` as a slot node + edge pair. The edge's
 // `source=owner, target=slot` shape means replay can discover positions by
 // scanning edges (layer=x/y) — no string-parsing of slot ids required.
-function positionRows(hlc, ownerId, x, y) {
+export function positionRows(hlc, ownerId, x, y) {
   const rows = [];
   for (const [key, value] of [['x', x], ['y', y]]) {
     const id = `${hlc.next()}:${key}:${ownerId}`;
