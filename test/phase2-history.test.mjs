@@ -107,6 +107,7 @@ describe('data/csv — quoteField + writeLine', () => {
 
 describe('data/csv — fieldsToRow / rowToFields round-trip', () => {
   it('converts fields to a HistoryRow', () => {
+    // Legacy 11th `payload` column is silently ignored (migrated to expansion rows).
     const fields = ['42', 'NODE', 'add', 'myNode', 'function', '', '', '', '5', 'My Node', '{"line":10}'];
     const row = fieldsToRow(fields);
     assert.equal(row.t, 42);
@@ -116,14 +117,13 @@ describe('data/csv — fieldsToRow / rowToFields round-trip', () => {
     assert.equal(row.kind, 'function');
     assert.equal(row.weight, 5);
     assert.equal(row.label, 'My Node');
-    assert.deepEqual(row.payload, { line: 10 });
+    assert.equal(row.payload, undefined);
   });
 
   it('round-trips a NODE row through fields', () => {
     const original = {
       t: 7, type: 'NODE', op: 'add', id: 'x',
       kind: 'function', label: 'X func', weight: 3,
-      payload: { author: 'human' },
     };
     const fields = rowToFields(original);
     const restored = fieldsToRow(fields);
@@ -131,7 +131,7 @@ describe('data/csv — fieldsToRow / rowToFields round-trip', () => {
     assert.equal(restored.type, original.type);
     assert.equal(restored.id, original.id);
     assert.equal(restored.weight, original.weight);
-    assert.deepEqual(restored.payload, original.payload);
+    assert.equal(restored.label, original.label);
   });
 
   it('round-trips an EDGE row through fields', () => {
@@ -151,7 +151,7 @@ describe('data/csv — fieldsToRow / rowToFields round-trip', () => {
     const fields = ['0', 'NODE', 'add', 'x', '', '', '', '', '', '', ''];
     const row = fieldsToRow(fields);
     assert.equal(row.kind, undefined);
-    assert.equal(row.payload, null);
+    assert.equal(row.payload, undefined);
     assert.equal(row.weight, undefined);
   });
 });
@@ -177,16 +177,16 @@ describe('data/csv — parseCSV + writeCSV round-trip', () => {
     assert.equal(parsed[99].weight, 99);
   });
 
-  it('handles JSON payload with commas and quotes', () => {
+  it('handles labels with commas and quotes', () => {
+    // Payload column was removed from the schema; labels still need to survive
+    // CSV round-trip when they contain delimiters and quote chars.
     const rows = [{
       t: 0, type: 'NODE', op: 'add', id: 'tricky',
-      kind: 'function', label: 'has, comma',
-      payload: { note: 'say "hello", world' },
+      kind: 'function', label: 'has, "comma" and quotes',
     }];
     const csv = writeCSV(rows);
     const parsed = parseCSV(csv);
-    assert.equal(parsed[0].label, 'has, comma');
-    assert.equal(parsed[0].payload.note, 'say "hello", world');
+    assert.equal(parsed[0].label, 'has, "comma" and quotes');
   });
 
   it('round-trips 1000 rows', () => {

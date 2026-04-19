@@ -204,9 +204,12 @@ describe('interact/drag', () => {
     const drag = startDrag('a', pm, sel, false);
     onDrag(drag, 50, 60, pm);
     const rows = endDrag(drag, pm);
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].type, 'NODE');
-    assert.equal(rows[0].payload.action, 'drag');
+    // One NODE update for 'a'. No other nodes → no spatial edges.
+    const nodeRows = rows.filter(r => r.type === 'NODE');
+    assert.equal(nodeRows.length, 1);
+    assert.equal(nodeRows[0].id, 'a');
+    // Payload is carried under `_payload` — main.js's appendRow strips + expands it.
+    assert.equal(nodeRows[0]._payload.action, 'drag');
     assert.ok(pm.positions.get('a').sticky);
   });
 
@@ -234,7 +237,12 @@ describe('interact/drag', () => {
     assert.equal(pm.positions.get('b').y, 10);
 
     const rows = endDrag(drag, pm);
-    assert.equal(rows.length, 3); // a + b + c
+    // One NODE update per dragged node (a + b + c). Spatial edges are also
+    // emitted but we only assert on the NODE rows here.
+    const nodeRows = rows.filter(r => r.type === 'NODE');
+    assert.equal(nodeRows.length, 3);
+    const ids = new Set(nodeRows.map(r => r.id));
+    assert.ok(ids.has('a') && ids.has('b') && ids.has('c'));
   });
 
   it('draggedNodes returns all affected ids', () => {
