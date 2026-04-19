@@ -668,45 +668,81 @@ export function applySemanticZoom(state, deps, k) {
   if (!state.svgCtx) return;
   state.currentK = k;
 
+  // Top-level short-circuit. On a stable wheel-idle frame, nothing about
+  // k or flags changes — but the zoom handler still fires this on every
+  // pointer event. Signature-compare and bail before touching the DOM.
+  const f = state.flags;
+  const sig = (state._zoomSig ||= {});
+  const sameK = typeof sig.k === 'number' && Math.abs(sig.k - k) < K_EPS;
+  const sameFlags = sig.hulls === f.hulls && sig.labels === f.labels
+    && sig.clusterLabels === f.clusterLabels && sig.metaEdges === f.metaEdges
+    && sig.edges === f.edges;
+  const sameCounts = sig.nHulls === state.hullElements.size
+    && sig.nClusterLabels === state.clusterLabelElements.size
+    && sig.nLabels === state.labelElements.size;
+  if (sameK && sameFlags && sameCounts) return;
+
   const hullOp = k < 0.5 ? 0.15 : k < 1.5 ? 0.08 : 0.04;
+  const hullFill = f.hulls ? String(hullOp) : '0';
+  const hullStroke = f.hulls ? '0.25' : '0';
   for (const [, he] of state.hullElements) {
-    if (state.flags.hulls) {
-      he.path.setAttribute('fill-opacity', String(hullOp));
-      he.path.setAttribute('stroke-opacity', '0.25');
-    } else {
-      he.path.setAttribute('fill-opacity', '0');
-      he.path.setAttribute('stroke-opacity', '0');
-    }
+    setAttrIfChanged(he.path, 'fill-opacity', hullFill, '_lastFillOp');
+    setAttrIfChanged(he.path, 'stroke-opacity', hullStroke, '_lastStrokeOp');
   }
 
-  const fLabOp = !state.flags.clusterLabels ? 0
+  const fLabOp = !f.clusterLabels ? 0
     : k < 0.7 ? 0.4 : k < 2.5 ? 0.7 : Math.max(0.2, 0.7 - (k - 2.5) * 0.7);
   const fFont = k <= 2 ? 13 / Math.max(0.3, k) : 13 / (2 * Math.pow(k / 2, 0.75));
+  const fLabOpStr = String(fLabOp);
+  const fFontStr = String(fFont);
   for (const [, text] of state.clusterLabelElements) {
-    text.setAttribute('opacity', String(fLabOp));
-    text.setAttribute('font-size', String(fFont));
+    setAttrIfChanged(text, 'opacity', fLabOpStr, '_lastOp');
+    setAttrIfChanged(text, 'font-size', fFontStr, '_lastFs');
   }
 
+  const screenR = 5 * k;
+  const labelOp = !f.labels ? 0
+    : screenR < 6 ? 0 : Math.min(1, (screenR - 6) / 10);
+  const labelFs = Math.max(2, Math.min(8, 7 / k));
+  const labelOpStr = String(labelOp);
+  const labelFsStr = String(labelFs);
+  const labelsOff = !f.labels;
   for (const [, text] of state.labelElements) {
-    if (!state.flags.labels) { text.setAttribute('opacity', '0'); continue; }
-    const screenR = 5 * k;
-    const opacity = screenR < 6 ? 0 : Math.min(1, (screenR - 6) / 10);
-    text.setAttribute('opacity', String(opacity));
-    const fs = Math.max(2, Math.min(8, 7 / k));
-    text.setAttribute('font-size', String(fs));
+    setAttrIfChanged(text, 'opacity', labelOpStr, '_lastOp');
+    if (!labelsOff) setAttrIfChanged(text, 'font-size', labelFsStr, '_lastFs');
   }
 
   const gMeta = state.svgCtx.layers.gMetaLinks;
-  if (state.flags.metaEdges && k < 1.5) {
-    gMeta.style.display = '';
+  if (f.metaEdges && k < 1.5) {
+    if (gMeta.style.display !== '') gMeta.style.display = '';
     const op = k < 0.3 ? 0.25 : k < 0.7 ? 0.45 : 0.6;
-    gMeta.setAttribute('opacity', String(op));
-  } else {
+    setAttrIfChanged(gMeta, 'opacity', String(op), '_lastOp');
+  } else if (gMeta.style.display !== 'none') {
     gMeta.style.display = 'none';
   }
 
   const gLinks = state.svgCtx.layers.gLinks;
-  gLinks.style.display = state.flags.edges ? '' : 'none';
+  const linksDisplay = f.edges ? '' : 'none';
+  if (gLinks.style.display !== linksDisplay) gLinks.style.display = linksDisplay;
+
+  sig.k = k;
+  sig.hulls = f.hulls; sig.labels = f.labels;
+  sig.clusterLabels = f.clusterLabels; sig.metaEdges = f.metaEdges; sig.edges = f.edges;
+  sig.nHulls = state.hullElements.size;
+  sig.nClusterLabels = state.clusterLabelElements.size;
+  sig.nLabels = state.labelElements.size;
+}
+
+// Epsilon for k-equality. Below this, re-derived zoom values are
+// indistinguishable at integer-ish SVG attribute precision.
+const K_EPS = 1e-3;
+
+// Cache the last applied attribute value on the element. SVG setAttribute
+// is the expensive step here (style recalc + paint); the branch is free.
+function setAttrIfChanged(el, name, value, cacheKey) {
+  if (el[cacheKey] === value) return;
+  el.setAttribute(name, value);
+  el[cacheKey] = value;
 }
 
 /* =====================================================================
