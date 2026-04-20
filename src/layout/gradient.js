@@ -52,7 +52,8 @@ export function energy(posMap, edges, W) {
   let E = 0;
   const positions = posMap.positions;
 
-  // Edge attraction: w * (dist - target)^2
+  // Edge attraction: w * (dist - target)^2, or w * ||Δ - rest||^2 when
+  // a directional rest vector is set on the edge.
   for (const [, edge] of edges) {
     const ps = positions.get(edge.source);
     const pt = positions.get(edge.target);
@@ -60,11 +61,18 @@ export function energy(posMap, edges, W) {
 
     const dx = ps.x - pt.x;
     const dy = ps.y - pt.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
     const layerW = (W && W[edge.layer] != null) ? W[edge.layer] : 1.0;
     const w = (edge.weight || 1) * layerW;
-    const target = stretchedTarget(edge, w);
-    E += w * (dist - target) ** 2;
+
+    if (edge.restDx != null || edge.restDy != null) {
+      const rdx = edge.restDx || 0;
+      const rdy = edge.restDy || 0;
+      E += w * ((dx - rdx) ** 2 + (dy - rdy) ** 2);
+    } else {
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const target = stretchedTarget(edge, w);
+      E += w * (dist - target) ** 2;
+    }
   }
 
   // Repulsion (brute force for energy calculation — not used per-frame)
@@ -109,7 +117,18 @@ export function gradEnergy(posMap, edges, W, nodes) {
     grad.set(id, { gx: 0, gy: 0 });
   }
 
-  // Edge attraction gradient: dE/dx_s = 2 * w * (1 - target/dist) * (x_s - x_t)
+  // Edge attraction gradient.
+  //
+  // Scalar spring (default): E = w * (dist - target)^2, rotation-invariant,
+  // pulls endpoints to a fixed distance.
+  //   dE/dx_s = 2 * w * (1 - target/dist) * (x_s - x_t)
+  //
+  // Directional spring (edge.restDx/restDy set): E = w * ||Δ - rest||^2,
+  // rotation-locked, pulls source to a specific offset from target.
+  //   dE/dx_s = 2 * w * ((x_s - x_t) - restDx)
+  //
+  // Used by the markdown handler to encode indent (memberOf rest = (DX, 0))
+  // and sibling stack (next rest = (0, -DY)) directly into the edge physics.
   for (const [, edge] of edges) {
     if (nodes && (isLayoutHub(nodes.get(edge.source)) || isLayoutHub(nodes.get(edge.target)))) continue;
     const ps = positions.get(edge.source);
@@ -118,14 +137,22 @@ export function gradEnergy(posMap, edges, W, nodes) {
 
     const dx = ps.x - pt.x;
     const dy = ps.y - pt.y;
-    const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
     const layerW = (W && W[edge.layer] != null) ? W[edge.layer] : 1.0;
     const w = (edge.weight || 1) * layerW;
-    const target = stretchedTarget(edge, w);
 
-    const factor = 2 * w * (1 - target / dist);
-    const gx = factor * dx;
-    const gy = factor * dy;
+    let gx, gy;
+    if (edge.restDx != null || edge.restDy != null) {
+      const rdx = edge.restDx || 0;
+      const rdy = edge.restDy || 0;
+      gx = 2 * w * (dx - rdx);
+      gy = 2 * w * (dy - rdy);
+    } else {
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
+      const target = stretchedTarget(edge, w);
+      const factor = 2 * w * (1 - target / dist);
+      gx = factor * dx;
+      gy = factor * dy;
+    }
 
     const gs = grad.get(edge.source);
     const gt = grad.get(edge.target);
@@ -274,14 +301,22 @@ function scopedGradEnergy(posMap, edges, W, scope, collapse, nodes) {
 
     const dx = ps.x - pt.x;
     const dy = ps.y - pt.y;
-    const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
     const layerW = (W && W[edge.layer] != null) ? W[edge.layer] : 1.0;
     const w = (edge.weight || 1) * layerW;
-    const target = stretchedTarget(edge, w);
 
-    const factor = 2 * w * (1 - target / dist);
-    const gx = factor * dx;
-    const gy = factor * dy;
+    let gx, gy;
+    if (edge.restDx != null || edge.restDy != null) {
+      const rdx = edge.restDx || 0;
+      const rdy = edge.restDy || 0;
+      gx = 2 * w * (dx - rdx);
+      gy = 2 * w * (dy - rdy);
+    } else {
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
+      const target = stretchedTarget(edge, w);
+      const factor = 2 * w * (1 - target / dist);
+      gx = factor * dx;
+      gy = factor * dy;
+    }
 
     const gs = grad.get(edge.source);
     const gt = grad.get(edge.target);

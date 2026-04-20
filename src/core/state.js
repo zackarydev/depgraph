@@ -82,6 +82,20 @@ export function applyRow(state, row) {
           if (!Number.isNaN(n)) target.stretch = n;
         }
       }
+      // Directional rest mirror: a `rest-x` / `rest-y` edge from a structural
+      // edge id to a slot. Caches edge.restDx / edge.restDy so descent can use
+      // the edge's spring as a vector rather than a scalar distance.
+      if ((row.layer === 'rest-x' || row.layer === 'rest-y') && row.source && row.target) {
+        const target = state.edges.get(row.source);
+        const slot = state.nodes.get(row.target);
+        if (target && slot) {
+          const n = Number(slot.label);
+          if (!Number.isNaN(n)) {
+            if (row.layer === 'rest-x') target.restDx = n;
+            else target.restDy = n;
+          }
+        }
+      }
     } else if (op === 'update') {
       const existing = state.edges.get(id);
       if (existing) {

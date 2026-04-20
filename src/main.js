@@ -450,6 +450,8 @@ export function init(opts = {}) {
       // x/y slot edges (from codegen handlers or drag persistence) carry an
       // explicit position. Apply to posMap now so the owner snaps to its
       // rule-based coord instead of riding out the random centroid seed.
+      // Also refresh t0 so X-reset returns to the canonical position instead
+      // of the pre-edge random seed seedNewNodePosition wrote.
       if ((row.layer === 'x' || row.layer === 'y') && row.source && row.target) {
         const slot = graph.state.nodes.get(row.target);
         if (slot) {
@@ -458,7 +460,9 @@ export function init(opts = {}) {
             const ps = posMap.positions.get(row.source);
             const cx = row.layer === 'x' ? n : (ps ? ps.x : 0);
             const cy = row.layer === 'y' ? n : (ps ? ps.y : 0);
-            updatePosition(posMap, row.source, cx, cy);
+            const updated = updatePosition(posMap, row.source, cx, cy);
+            updated.t0x = cx;
+            updated.t0y = cy;
           }
         }
       }
@@ -1255,6 +1259,8 @@ export function init(opts = {}) {
     } else {
       ps.x = x;
       ps.y = y;
+      ps.t0x = x;
+      ps.t0y = y;
     }
   }
 

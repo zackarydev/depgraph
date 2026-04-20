@@ -173,20 +173,39 @@ function emitPosition(ctx, ownerId, x, y) {
 }
 
 function pushChild(ctx, parentId, childId, weight) {
+  const memberId = `${childId}->memberOf->${parentId}`;
   ctx.rows.push({
     type: 'EDGE', op: 'add',
-    id: `${childId}->memberOf->${parentId}`,
+    id: memberId,
     source: childId, target: parentId, layer: 'memberOf', weight,
   });
+  // Directional rest: child sits one indent to the right of parent.
+  emitRestX(ctx, memberId, DX);
+
   const prev = ctx.lastChild.get(parentId);
   if (prev) {
+    const nextId = `${prev}->next->${childId}`;
     ctx.rows.push({
       type: 'EDGE', op: 'add',
-      id: `${prev}->next->${childId}`,
+      id: nextId,
       source: prev, target: childId, layer: 'next', weight: 1,
     });
+    // Directional rest: source=prev is one line above target=child → dy = -DY.
+    emitRestY(ctx, nextId, -DY);
   }
   ctx.lastChild.set(parentId, childId);
+}
+
+function emitRestX(ctx, edgeId, dx) {
+  const slotId = `${edgeId}:rest-x`;
+  ctx.rows.push({ type: 'NODE', op: 'add', id: slotId, kind: 'slot', weight: dx, label: String(dx) });
+  ctx.rows.push({ type: 'EDGE', op: 'add', id: slotId, source: edgeId, target: slotId, layer: 'rest-x', weight: 1 });
+}
+
+function emitRestY(ctx, edgeId, dy) {
+  const slotId = `${edgeId}:rest-y`;
+  ctx.rows.push({ type: 'NODE', op: 'add', id: slotId, kind: 'slot', weight: dy, label: String(dy) });
+  ctx.rows.push({ type: 'EDGE', op: 'add', id: slotId, source: edgeId, target: slotId, layer: 'rest-y', weight: 1 });
 }
 
 // ─── misc helpers ────────────────────────────────────
