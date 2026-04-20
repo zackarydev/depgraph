@@ -104,36 +104,46 @@ export function* walk(root) {
 // ─── Scanning ──────────────────────────────────────
 
 /**
- * Scan a single file and return its untimestamped {nodes, edges}.
+ * Scan a single file. Returns either {rows} (ordered, interleaved) or legacy
+ * {nodes, edges}, depending on what the handler produced. scanRepo normalizes
+ * either shape into a single row stream.
+ *
  * Always also emits a directory→file `contains` edge to the immediate parent.
  *
  * @param {string} absPath
  * @param {string} rootPath
- * @returns {{nodes:Array,edges:Array}}
+ * @param {Object} [scanState] - mutable cross-file state (e.g. yCursor)
+ * @returns {{rows?:Array, nodes?:Array, edges?:Array}}
  */
-export function scanFile(absPath, rootPath) {
+export function scanFile(absPath, rootPath, scanState) {
   const relPath = relative(rootPath, absPath);
   const handler = handlerFor(absPath);
   let result;
   try {
-    result = handler.handle(absPath, relPath);
+    result = handler.handle(absPath, relPath, scanState);
   } catch (err) {
-    // Never let a producer crash the scan — fall back to a bare file node.
-    result = FALLBACK.handle(absPath, relPath);
-    result.nodes[0].payload = { ...(result.nodes[0].payload || {}), error: err.message };
+    result = FALLBACK.handle(absPath, relPath, scanState);
+    if (result.nodes && result.nodes[0]) {
+      result.nodes[0].payload = { ...(result.nodes[0].payload || {}), error: err.message };
+    }
   }
   // Wire to parent directory.
   const parent = dirname(relPath);
   if (parent && parent !== '.' && parent !== '') {
     const dirId = `dir:${parent}`;
     const fileId = `file:${relPath}`;
-    result.edges.push({
+    const containsEdge = {
       id: `${dirId}->contains->${fileId}`,
       source: dirId,
       target: fileId,
       layer: 'contains',
       weight: 2,
-    });
+    };
+    if (result.rows) {
+      result.rows.push({ type: 'EDGE', op: 'add', ...containsEdge });
+    } else {
+      result.edges.push(containsEdge);
+    }
   }
   return result;
 }
@@ -172,6 +182,12 @@ export function scanRepo(root = '.') {
       payload: e.payload || null,
     });
   }
+  function pushRow(r) {
+    const key = `${r.type}::${r.id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    collected.push(r);
+  }
 
   // Root project node.
   const rootName = basename(absRoot);
@@ -183,6 +199,8 @@ export function scanRepo(root = '.') {
     payload: { path: '.', isRoot: true },
   });
   dirs.add('.');
+
+  const scanState = { yCursor: 0 };
 
   for (const entry of walk(absRoot)) {
     if (entry.isDir) {
@@ -205,7 +223,7 @@ export function scanRepo(root = '.') {
         weight: 2,
       });
     } else {
-      const { nodes, edges } = scanFile(entry.abs, absRoot);
+      const result = scanFile(entry.abs, absRoot, scanState);
       // If the parent directory wasn't yielded yet (file at root), connect to root.
       const parent = dirname(entry.rel);
       if (parent === '.' || parent === '') {
@@ -217,8 +235,12 @@ export function scanRepo(root = '.') {
           weight: 2,
         });
       }
-      for (const n of nodes) pushNode(n);
-      for (const e of edges) pushEdge(e);
+      if (result.rows) {
+        for (const r of result.rows) pushRow(r);
+      } else {
+        for (const n of result.nodes) pushNode(n);
+        for (const e of result.edges) pushEdge(e);
+      }
     }
   }
 

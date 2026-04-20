@@ -447,6 +447,21 @@ export function init(opts = {}) {
         else pendingDescentSeeds.add(row.id);
       }
     } else if (row.type === 'EDGE' && row.op === 'add') {
+      // x/y slot edges (from codegen handlers or drag persistence) carry an
+      // explicit position. Apply to posMap now so the owner snaps to its
+      // rule-based coord instead of riding out the random centroid seed.
+      if ((row.layer === 'x' || row.layer === 'y') && row.source && row.target) {
+        const slot = graph.state.nodes.get(row.target);
+        if (slot) {
+          const n = Number(slot.label);
+          if (!Number.isNaN(n)) {
+            const ps = posMap.positions.get(row.source);
+            const cx = row.layer === 'x' ? n : (ps ? ps.x : 0);
+            const cy = row.layer === 'y' ? n : (ps ? ps.y : 0);
+            updatePosition(posMap, row.source, cx, cy);
+          }
+        }
+      }
       const sn = graph.state.nodes.get(row.source);
       const tn = graph.state.nodes.get(row.target);
       if (sn && !isLayoutHub(sn)) pendingDescentSeeds.add(row.source);
