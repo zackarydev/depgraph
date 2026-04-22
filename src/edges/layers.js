@@ -30,6 +30,9 @@ const EDGE_LAYERS = new Map([
   ['memberOf',    { id: 'memberOf',    color: '#95a5a6', dash: '8,4',   directed: true,  visible: true }],
   ['spatial',     { id: 'spatial',     color: '#bdc3c7', dash: '1,3',   directed: false, visible: true }],
   ['event:click', { id: 'event:click', color: '#ff00ff', dash: '',       directed: true,  visible: true }],
+  ['next-x',      { id: 'next-x',      color: '#ffffff', dash: '',       directed: true,  visible: true }],
+  ['next-y',      { id: 'next-y',      color: '#ffffff', dash: '',       directed: true,  visible: true }],
+  ['image-root',  { id: 'image-root',  color: '#888888', dash: '4,2',   directed: true,  visible: true }],
 ]);
 
 /**

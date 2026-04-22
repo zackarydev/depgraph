@@ -30,6 +30,7 @@
 
 import { getLayer } from '../edges/layers.js';
 import { buildClusterIndex } from '../data/derive.js';
+import { PIXEL_PITCH, parsePixelColor } from './image-constants.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -157,6 +158,8 @@ export function createRenderer(svgCtx) {
     svgCtx,
     nodeElements:        new Map(), // id -> <g class=node>
     nodeCircleElements:  new Map(), // id -> <circle>
+    nodeRectElements:    new Map(), // id -> <rect>   (pixel-kind nodes)
+    pixelNodeIds:        new Set(), // ids currently painted as pixels
     labelElements:       new Map(), // id -> <text>
     edgeElements:        new Map(), // edgeKey -> <line>
     arrowElements:       new Map(), // edgeKey -> <path>
@@ -377,7 +380,7 @@ function updateArrow(arrow, sx, sy, tx, ty) {
  * =================================================================== */
 
 function renderNodesDiff(state, graph, posMap) {
-  const { svgCtx, nodeElements, nodeCircleElements, clusterIndex } = state;
+  const { svgCtx, nodeElements, nodeCircleElements, nodeRectElements, pixelNodeIds, clusterIndex } = state;
   const gNodes = svgCtx.layers.gNodes;
   const seen = new Set();
   const k = state.currentK || 1;
@@ -388,10 +391,6 @@ function renderNodesDiff(state, graph, posMap) {
     if (!ps) continue;
     seen.add(id);
 
-    const cid = clusterIndex.get(id);
-    const baseColor = cid ? clusterColor(cid) : nodeKindColor(node.kind);
-    const r = nodeRadius(node);
-
     let g = nodeElements.get(id);
     if (!g) {
       g = document.createElementNS(SVG_NS, 'g');
@@ -401,6 +400,51 @@ function renderNodesDiff(state, graph, posMap) {
       nodeElements.set(id, g);
     }
     g.setAttribute('transform', `translate(${ps.x},${ps.y})`);
+
+    // Pixel path: the node paints as a PIXEL_PITCH square filled with its
+    // RGB label. A tiny circle is drawn on top but kept hidden at low zoom;
+    // applySemanticZoom fades the rect out and the circle in so the user
+    // "peeks behind" the image as they zoom in.
+    if (node.kind === 'pixel') {
+      pixelNodeIds.add(id);
+      const fill = parsePixelColor(node.label);
+
+      let rect = nodeRectElements.get(id);
+      if (!rect) {
+        rect = document.createElementNS(SVG_NS, 'rect');
+        rect.setAttribute('class', 'pixel-rect');
+        rect.setAttribute('pointer-events', 'none');
+        // Painted below the circle so the circle can appear on top at high k.
+        g.insertBefore(rect, g.firstChild);
+        nodeRectElements.set(id, rect);
+        const half = PIXEL_PITCH / 2;
+        rect.setAttribute('x', -half);
+        rect.setAttribute('y', -half);
+        rect.setAttribute('width', PIXEL_PITCH);
+        rect.setAttribute('height', PIXEL_PITCH);
+        rect._baseHalf = half;
+      }
+      setAttrIfChanged(rect, 'fill', fill, '_lastFill');
+
+      let circle = nodeCircleElements.get(id);
+      if (!circle) {
+        circle = document.createElementNS(SVG_NS, 'circle');
+        circle.setAttribute('class', 'node-circle');
+        g.appendChild(circle);
+        nodeCircleElements.set(id, circle);
+      }
+      setAttrIfChanged(circle, 'r', '3', '_lastR');
+      setAttrIfChanged(circle, 'fill', fill, '_lastFill');
+      setAttrIfChanged(circle, 'stroke', '#fff', '_lastStroke');
+      setAttrIfChanged(circle, 'stroke-width', '0.5', '_lastSW');
+      continue;
+    }
+
+    pixelNodeIds.delete(id);
+
+    const cid = clusterIndex.get(id);
+    const baseColor = cid ? clusterColor(cid) : nodeKindColor(node.kind);
+    const r = nodeRadius(node);
 
     let circle = nodeCircleElements.get(id);
     if (!circle) {
@@ -420,6 +464,8 @@ function renderNodesDiff(state, graph, posMap) {
       el.remove();
       nodeElements.delete(id);
       nodeCircleElements.delete(id);
+      nodeRectElements.delete(id);
+      pixelNodeIds.delete(id);
     }
   }
 }
@@ -679,7 +725,8 @@ export function applySemanticZoom(state, deps, k) {
     && sig.edges === f.edges;
   const sameCounts = sig.nHulls === state.hullElements.size
     && sig.nClusterLabels === state.clusterLabelElements.size
-    && sig.nLabels === state.labelElements.size;
+    && sig.nLabels === state.labelElements.size
+    && sig.nPixels === state.pixelNodeIds.size;
   if (sameK && sameFlags && sameCounts) return;
 
   const hullOp = k < 0.5 ? 0.15 : k < 1.5 ? 0.08 : 0.04;
@@ -725,12 +772,48 @@ export function applySemanticZoom(state, deps, k) {
   const linksDisplay = f.edges ? '' : 'none';
   if (gLinks.style.display !== linksDisplay) gLinks.style.display = linksDisplay;
 
+  // Pixel "peek-behind" transition. Below k=1.2 the rect tiles seamlessly
+  // and the circle is hidden; as the user zooms in the rect shrinks + fades
+  // and a small color-matched circle emerges so the linked-list edges
+  // running between pixel centers become visible.
+  if (state.pixelNodeIds.size > 0) {
+    const rectOp = k <= 1.2 ? 1
+      : k >= 4 ? 0.1
+      : 1 - ((k - 1.2) / (4 - 1.2)) * 0.9;
+    const shrink = k <= 1.2 ? 1
+      : k >= 4 ? 0.55
+      : 1 - ((k - 1.2) / (4 - 1.2)) * 0.45;
+    const circleOp = k <= 1.5 ? 0
+      : k >= 3.5 ? 1
+      : (k - 1.5) / (3.5 - 1.5);
+    const rectOpStr = String(rectOp);
+    const circleOpStr = String(circleOp);
+
+    for (const id of state.pixelNodeIds) {
+      const rect = state.nodeRectElements.get(id);
+      if (rect) {
+        const half = rect._baseHalf * shrink;
+        const w = half * 2;
+        setAttrIfChanged(rect, 'x', String(-half), '_lastX');
+        setAttrIfChanged(rect, 'y', String(-half), '_lastY');
+        setAttrIfChanged(rect, 'width', String(w), '_lastW');
+        setAttrIfChanged(rect, 'height', String(w), '_lastH');
+        setAttrIfChanged(rect, 'opacity', rectOpStr, '_lastOp');
+      }
+      const circle = state.nodeCircleElements.get(id);
+      if (circle) {
+        setAttrIfChanged(circle, 'opacity', circleOpStr, '_lastOp');
+      }
+    }
+  }
+
   sig.k = k;
   sig.hulls = f.hulls; sig.labels = f.labels;
   sig.clusterLabels = f.clusterLabels; sig.metaEdges = f.metaEdges; sig.edges = f.edges;
   sig.nHulls = state.hullElements.size;
   sig.nClusterLabels = state.clusterLabelElements.size;
   sig.nLabels = state.labelElements.size;
+  sig.nPixels = state.pixelNodeIds.size;
 }
 
 // Epsilon for k-equality. Below this, re-derived zoom values are

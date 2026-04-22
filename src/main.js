@@ -59,6 +59,44 @@ import { toCSV } from './data/history.js';
 import { writeRowLine } from './data/csv.js';
 import { createHLC } from './core/clock.js';
 import { startCinematic, stopCinematic } from './stream/cinematic.js';
+import { PIXEL_PITCH } from './render/image-constants.js';
+
+/**
+ * Pin a pixel node at its grid coordinate and lock it out of layout.
+ * Returns false if the id doesn't match the `px:X,Y` pattern.
+ *
+ * @param {import('./layout/positions.js').PositionMap} posMap
+ * @param {string} nodeId
+ * @param {number} pitch
+ * @returns {boolean}
+ */
+function pinPixelAt(posMap, nodeId, pitch) {
+  const m = /^px:(-?\d+),(-?\d+)$/.exec(nodeId);
+  if (!m) return false;
+  const gx = Number(m[1]);
+  const gy = Number(m[2]);
+  updatePosition(posMap, nodeId, gx * pitch, gy * pitch);
+  setLocked(posMap, nodeId, true);
+  return true;
+}
+
+/**
+ * Place every pixel / image-header node in `nodes` at its pinned
+ * position. Safe to call on a fully-populated graph after initialPlace.
+ *
+ * @param {Map<string, import('./core/types.js').Node>} nodes
+ * @param {import('./layout/positions.js').PositionMap} posMap
+ * @param {number} pitch
+ */
+function pinImageNodes(nodes, posMap, pitch) {
+  for (const [id, node] of nodes) {
+    if (node.kind === 'pixel') pinPixelAt(posMap, id, pitch);
+    else if (node.kind === 'image-header') {
+      updatePosition(posMap, id, -pitch, -pitch);
+      setLocked(posMap, id, true);
+    }
+  }
+}
 
 /**
  * Initialize the depgraph runtime.
@@ -140,6 +178,11 @@ export function init(opts = {}) {
   const posMap = opts.streamReplay
     ? createPositionMap()
     : initialPlace(graph.state.nodes, graph.state.edges, context.weights.physics).posMap;
+  // Pin + lock pixel nodes at their grid positions. Runs after initialPlace
+  // so the circle-seed + gradient descent burst doesn't fight the pins.
+  // Under streamReplay the graph is still empty here; seedNewNodePosition
+  // handles each pixel as its row arrives.
+  pinImageNodes(graph.state.nodes, posMap, PIXEL_PITCH);
 
   // --- Click-event sentinel ---
   // The `mouse-clicked` sentinel node is how we record user clicks as edges
@@ -553,6 +596,11 @@ export function init(opts = {}) {
       seedNewNodePosition(id);
       const ps = posMap.positions.get(id);
       if (!ps) continue;
+      // Image nodes derive their position from the id (px:X,Y) and are
+      // re-pinned on every boot by seedNewNodePosition — no need to
+      // persist x/y slot edges, which would bloat the CSV by ~3 rows per
+      // pixel and encode data that's already in the id.
+      if (node.kind === 'pixel' || node.kind === 'image-header') continue;
       const rows = positionRows(hlc, id, ps.x, ps.y);
       for (const r of rows) appendRow({ ...r, _userAuthored: true });
       seededCount++;
@@ -616,8 +664,16 @@ export function init(opts = {}) {
       const dx = ps.x - worldX;
       const dy = ps.y - worldY;
       const d = Math.sqrt(dx * dx + dy * dy);
-      const imp = (node.importance != null) ? node.importance : 1;
-      const r = (3 + Math.min(6, Math.sqrt(imp) * 2.2)) + slop;
+      // Pixels are square and live on a tight grid — use the rect's half-
+      // extent plus slop as the hit radius so clicks anywhere inside a
+      // pixel cell resolve to its center (nearest-center wins the tie).
+      let r;
+      if (node.kind === 'pixel') {
+        r = PIXEL_PITCH / 2 + slop;
+      } else {
+        const imp = (node.importance != null) ? node.importance : 1;
+        r = (3 + Math.min(6, Math.sqrt(imp) * 2.2)) + slop;
+      }
       if (d < r && d < closestDist) {
         closest = id;
         closestDist = d;
@@ -727,7 +783,26 @@ export function init(opts = {}) {
     return scope;
   }
 
+  // Pixel nodes (kind=pixel) live on a fixed grid. The id encodes the
+  // grid coord (`px:X,Y`); we pin each pixel at (X*PITCH, Y*PITCH) and
+  // lock it so gradient descent leaves it alone. PITCH must match the
+  // rect size the renderer paints so the image appears seamless when
+  // zoomed out.
+  function placePixelFromId(nodeId) {
+    return pinPixelAt(posMap, nodeId, PIXEL_PITCH);
+  }
+
   function seedNewNodePosition(nodeId) {
+    const node = graph.state.nodes.get(nodeId);
+    if (node && node.kind === 'pixel' && placePixelFromId(nodeId)) return;
+    if (node && node.kind === 'image-header') {
+      // Park the header one pitch above the top-left pixel so it sits
+      // just outside the image grid. Locked so it never drifts.
+      updatePosition(posMap, nodeId, -PIXEL_PITCH, -PIXEL_PITCH);
+      setLocked(posMap, nodeId, true);
+      return;
+    }
+
     let cx = 0, cy = 0, count = 0;
     for (const [, edge] of graph.state.edges) {
       let neighbor = null;
