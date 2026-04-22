@@ -2,28 +2,27 @@
 /**
  * Image → hypergraph producer.
  *
- * Emits a history.csv that represents a square image as a streaming
- * construction: pixels and edges are interwoven so the file reads as a
- * narrative where each new pixel "grows" from its already-placed neighbour(s).
+ * Emits rows that represent a square image as a streaming construction:
+ * pixels and edges are interwoven so the file reads as a narrative where
+ * each new pixel "grows" from its already-placed neighbour(s).
  *
- *   - one `image-header` node carrying "W,H" in its label
- *   - an `image-root` edge from the header to `px:0,0`
+ *   - one `image-header` node with id `img:<ox>,<oy>:meta`, label "W,H"
+ *   - an `image-root` edge from the header to the top-left pixel
  *   - for each pixel in row-major order:
- *       NODE add `px:X,Y` (kind=pixel, label="r,g,b")
- *       if X > 0: EDGE from `px:X-1,Y` (layer=next-x)   — grew from west
- *       if Y > 0: EDGE from `px:X,Y-1` (layer=next-y)   — grew from north
+ *       NODE add `px:<ox>,<oy>:<gx>,<gy>` (kind=pixel, label="r,g,b")
+ *       if gx > 0: EDGE from the west predecessor (layer=next-x)
+ *       if gy > 0: EDGE from the north predecessor (layer=next-y)
  *
- * Every non-corner pixel is born from 1-2 predecessors, giving a streaming
- * grid with interleaved nodes and edges rather than "all nodes, then all
- * edges". Each pixel still has one outgoing next-x and one outgoing next-y
- * edge (recorded by its *east* / *south* child when that child is born),
- * which preserves the full grid connectivity for traversal.
+ * The origin (ox, oy) is baked into every id so multiple images can
+ * coexist in one history file without colliding. main.js parses the
+ * origin from the id and pins each pixel at (ox + gx*PITCH, oy + gy*PITCH).
  *
  * Pixel positions are *not* emitted as x/y slot edges — main.js recognises
- * the `pixel` kind and pins + locks each pixel at (X*PIXEL_PITCH, Y*PIXEL_PITCH).
+ * the `pixel` kind and pins + locks each pixel from its id alone.
  *
  * CLI:
- *   node codegen/imagegen.mjs --size 32 --pattern gradient > runtime/image.csv
+ *   node codegen/imagegen.mjs --size 16 --pattern gradient > runtime/image.csv
+ *   node codegen/imagegen.mjs --size 16 --origin-x 1000 --origin-y 200 --out ...
  *
  * Patterns: gradient (default), checker, ring.
  *
@@ -62,7 +61,7 @@ function patternRing(x, y, size) {
   return [r, g, b];
 }
 
-const PATTERNS = {
+export const PATTERNS = {
   gradient: patternGradient,
   checker:  patternChecker,
   ring:     patternRing,
@@ -71,19 +70,28 @@ const PATTERNS = {
 /**
  * Build history rows for an image of `size`×`size` pixels.
  *
- * @param {number} size
- * @param {(x:number, y:number, size:number) => [number, number, number]} pickRGB
+ * @param {object}   opts
+ * @param {number}   opts.size      grid side length
+ * @param {(x:number,y:number,size:number)=>[number,number,number]} opts.pickRGB
+ * @param {number}  [opts.originX=0] world-coord origin x (top-left corner)
+ * @param {number}  [opts.originY=0] world-coord origin y
+ * @param {number}  [opts.tStart=0]  starting t offset (useful when splicing
+ *                                   into a larger stream that assigns t later)
  * @returns {import('../src/core/types.js').HistoryRow[]}
  */
-export function imageToRows(size, pickRGB) {
+export function imageToRows({ size, pickRGB, originX = 0, originY = 0, tStart = 0 }) {
   const rows = [];
-  let t = 0;
+  let t = tStart;
+  const ox = originX | 0;
+  const oy = originY | 0;
+  const headerId = `img:${ox},${oy}:meta`;
+  const pixId = (gx, gy) => `px:${ox},${oy}:${gx},${gy}`;
 
   rows.push({
     t: t++,
     type: 'NODE',
     op: 'add',
-    id: 'img:meta',
+    id: headerId,
     kind: 'image-header',
     label: `${size},${size}`,
     weight: 1,
@@ -93,9 +101,9 @@ export function imageToRows(size, pickRGB) {
     t: t++,
     type: 'EDGE',
     op: 'add',
-    id: 'img:root',
-    source: 'img:meta',
-    target: 'px:0,0',
+    id: `img:${ox},${oy}:root`,
+    source: headerId,
+    target: pixId(0, 0),
     layer: 'image-root',
     weight: 1,
   });
@@ -108,7 +116,7 @@ export function imageToRows(size, pickRGB) {
         t: t++,
         type: 'NODE',
         op: 'add',
-        id: `px:${x},${y}`,
+        id: pixId(x, y),
         kind: 'pixel',
         label: `${r},${g},${b}`,
         weight: brightness,
@@ -118,9 +126,9 @@ export function imageToRows(size, pickRGB) {
           t: t++,
           type: 'EDGE',
           op: 'add',
-          id: `nx:${x - 1},${y}`,
-          source: `px:${x - 1},${y}`,
-          target: `px:${x},${y}`,
+          id: `nx:${ox},${oy}:${x - 1},${y}`,
+          source: pixId(x - 1, y),
+          target: pixId(x, y),
           layer: 'next-x',
           weight: 1,
         });
@@ -130,9 +138,9 @@ export function imageToRows(size, pickRGB) {
           t: t++,
           type: 'EDGE',
           op: 'add',
-          id: `ny:${x},${y - 1}`,
-          source: `px:${x},${y - 1}`,
-          target: `px:${x},${y}`,
+          id: `ny:${ox},${oy}:${x},${y - 1}`,
+          source: pixId(x, y - 1),
+          target: pixId(x, y),
           layer: 'next-y',
           weight: 1,
         });
@@ -152,8 +160,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     return i !== -1 && i + 1 < args.length ? args[i + 1] : fallback;
   }
 
-  const size = Number(argVal('--size', '32'));
+  const size = Number(argVal('--size', '16'));
   const patternName = argVal('--pattern', 'gradient');
+  const originX = Number(argVal('--origin-x', '0'));
+  const originY = Number(argVal('--origin-y', '0'));
   const outPath = argVal('--out', null);
 
   const pickRGB = PATTERNS[patternName];
@@ -162,12 +172,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(1);
   }
 
-  const rows = imageToRows(size, pickRGB);
+  const rows = imageToRows({ size, pickRGB, originX, originY });
   const text = [HEADER, ...rows.map(writeRowLine)].join('\n') + '\n';
 
   if (outPath) {
     writeFileSync(resolve(outPath), text, 'utf-8');
-    console.error(`[imagegen] wrote ${rows.length} rows (${size}×${size} ${patternName}) → ${outPath}`);
+    console.error(`[imagegen] wrote ${rows.length} rows (${size}×${size} ${patternName} @ ${originX},${originY}) → ${outPath}`);
   } else {
     process.stdout.write(text);
   }

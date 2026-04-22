@@ -63,7 +63,8 @@ import { PIXEL_PITCH } from './render/image-constants.js';
 
 /**
  * Pin a pixel node at its grid coordinate and lock it out of layout.
- * Returns false if the id doesn't match the `px:X,Y` pattern.
+ * The id format is `px:<ox>,<oy>:<gx>,<gy>` — origin in world coords,
+ * grid index within the image. World pos = (ox + gx*pitch, oy + gy*pitch).
  *
  * @param {import('./layout/positions.js').PositionMap} posMap
  * @param {string} nodeId
@@ -71,11 +72,32 @@ import { PIXEL_PITCH } from './render/image-constants.js';
  * @returns {boolean}
  */
 function pinPixelAt(posMap, nodeId, pitch) {
-  const m = /^px:(-?\d+),(-?\d+)$/.exec(nodeId);
+  const m = /^px:(-?\d+),(-?\d+):(-?\d+),(-?\d+)$/.exec(nodeId);
   if (!m) return false;
-  const gx = Number(m[1]);
-  const gy = Number(m[2]);
-  updatePosition(posMap, nodeId, gx * pitch, gy * pitch);
+  const ox = Number(m[1]);
+  const oy = Number(m[2]);
+  const gx = Number(m[3]);
+  const gy = Number(m[4]);
+  updatePosition(posMap, nodeId, ox + gx * pitch, oy + gy * pitch);
+  setLocked(posMap, nodeId, true);
+  return true;
+}
+
+/**
+ * Pin an image-header node above its top-left pixel. The id format is
+ * `img:<ox>,<oy>:meta` — the header sits one pitch up-and-left of (ox, oy).
+ *
+ * @param {import('./layout/positions.js').PositionMap} posMap
+ * @param {string} nodeId
+ * @param {number} pitch
+ * @returns {boolean}
+ */
+function pinImageHeaderAt(posMap, nodeId, pitch) {
+  const m = /^img:(-?\d+),(-?\d+):meta$/.exec(nodeId);
+  if (!m) return false;
+  const ox = Number(m[1]);
+  const oy = Number(m[2]);
+  updatePosition(posMap, nodeId, ox - pitch, oy - pitch);
   setLocked(posMap, nodeId, true);
   return true;
 }
@@ -91,10 +113,7 @@ function pinPixelAt(posMap, nodeId, pitch) {
 function pinImageNodes(nodes, posMap, pitch) {
   for (const [id, node] of nodes) {
     if (node.kind === 'pixel') pinPixelAt(posMap, id, pitch);
-    else if (node.kind === 'image-header') {
-      updatePosition(posMap, id, -pitch, -pitch);
-      setLocked(posMap, id, true);
-    }
+    else if (node.kind === 'image-header') pinImageHeaderAt(posMap, id, pitch);
   }
 }
 
@@ -783,11 +802,11 @@ export function init(opts = {}) {
     return scope;
   }
 
-  // Pixel nodes (kind=pixel) live on a fixed grid. The id encodes the
-  // grid coord (`px:X,Y`); we pin each pixel at (X*PITCH, Y*PITCH) and
-  // lock it so gradient descent leaves it alone. PITCH must match the
-  // rect size the renderer paints so the image appears seamless when
-  // zoomed out.
+  // Pixel nodes (kind=pixel) live on a fixed grid. The id encodes origin
+  // and grid coord (`px:<ox>,<oy>:<gx>,<gy>`); we pin at (ox+gx*PITCH,
+  // oy+gy*PITCH) and lock so gradient descent leaves it alone. PITCH
+  // must match the rect size the renderer paints so the image appears
+  // seamless when zoomed out.
   function placePixelFromId(nodeId) {
     return pinPixelAt(posMap, nodeId, PIXEL_PITCH);
   }
@@ -795,13 +814,7 @@ export function init(opts = {}) {
   function seedNewNodePosition(nodeId) {
     const node = graph.state.nodes.get(nodeId);
     if (node && node.kind === 'pixel' && placePixelFromId(nodeId)) return;
-    if (node && node.kind === 'image-header') {
-      // Park the header one pitch above the top-left pixel so it sits
-      // just outside the image grid. Locked so it never drifts.
-      updatePosition(posMap, nodeId, -PIXEL_PITCH, -PIXEL_PITCH);
-      setLocked(posMap, nodeId, true);
-      return;
-    }
+    if (node && node.kind === 'image-header' && pinImageHeaderAt(posMap, nodeId, PIXEL_PITCH)) return;
 
     let cx = 0, cy = 0, count = 0;
     for (const [, edge] of graph.state.edges) {
