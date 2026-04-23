@@ -180,4 +180,10 @@ Git will most likely be a hugely important contributor to the hypergraph. It may
 ## and what if i add another section now
 
 With some text here?
-Salut
+
+## Images and Markdown
+
+Previously, implemented a markdown converter into the history. Uses markdown AST, glad to see it exists.
+
+Pushing it further though, images are now decomposed into individual pixels. In the hypergraph. Cool transition too. Each pixel is linked to its neighbours. Must check compression algorithms, it must be amazing to see how they're built, especially runtime in the hypergraph. I feel like I can *already* visualize it.
+

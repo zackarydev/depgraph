@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cute Subtle Beat</title>
+    <style>
+        body { 
+            display: flex; 
+            flex-direction: column;
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            margin: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background-color: #f7f9fc; 
+            color: #5c6ac4;
+        }
+        button { 
+            padding: 16px 36px; 
+            font-size: 20px; 
+            cursor: pointer; 
+            border: none; 
+            border-radius: 50px; 
+            background-color: #e0e7ff; 
+            color: #5c6ac4; 
+            font-weight: 600;
+            box-shadow: 0 4px 15px rgba(92, 106, 196, 0.15);
+            transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
+        }
+        button:hover { 
+            background-color: #c7d2fe;
+            box-shadow: 0 6px 20px rgba(92, 106, 196, 0.25);
+            transform: translateY(-2px);
+        }
+        button:active {
+            transform: scale(0.92) translateY(2px);
+            box-shadow: 0 2px 10px rgba(92, 106, 196, 0.1);
+        }
+        p {
+            margin-top: 24px;
+            font-size: 14px;
+            opacity: 0.8;
+            letter-spacing: 0.5px;
+        }
+    </style>
+</head>
+<body>
+
+    <button id="playBtn">Place & Connect</button>
+    <p>A soft 500ms sequence ✨</p>
+
+    <script>
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        const dest = audioCtx.createMediaStreamDestination();
+
+        // 3. Set up Recorder
+        const options = { mimeType: 'audio/mp4' };
+        const recorder = new MediaRecorder(dest.stream, options);
+        const chunks = [];
+
+        recorder.ondataavailable = (e) => chunks.push(e.data);
+        recorder.onstop = (e) => {
+            // 4. Create Blob and Download
+            const blob = new Blob(chunks, { type: 'audio/mp4' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'generated-audio.mp4';
+            a.click();
+        };
+
+
+        const playSingleBeat = (t) => {
+            // ==========================================
+            // PART 1: "Something being placed" (0ms - 150ms)
+            // A soft, low-pitched 'thunk' or 'plop'
+            // ==========================================
+            const placeOsc = audioCtx.createOscillator();
+            const placeGain = audioCtx.createGain();
+            placeOsc.connect(dest);
+            placeGain.connect(dest);
+            
+            // Triangle wave gives a slightly softer, woody sound
+            placeOsc.type = 'triangle'; 
+            
+            // Subtle frequency drop to mimic a placement impact
+            placeOsc.frequency.setValueAtTime(300, t);
+            placeOsc.frequency.exponentialRampToValueAtTime(150, t + 0.1);
+
+            // Volume envelope: quick attack, fast decay
+            placeGain.gain.setValueAtTime(0, t);
+            placeGain.gain.linearRampToValueAtTime(0.4, t + 0.02); // Quick fade in
+            placeGain.gain.exponentialRampToValueAtTime(0.01, t + 0.15); // Fade out
+
+            placeOsc.connect(placeGain);
+            placeGain.connect(audioCtx.destination);
+
+            placeOsc.start(t);
+            placeOsc.stop(t + 0.19); // 200ms
+
+
+            // // ==========================================
+            // // PART 2: "Getting connected" (200ms - 500ms)
+            // // A bright, pleasant 'ding' or 'chime'
+            // // ==========================================
+            // const connectOsc = audioCtx.createOscillator();
+            // const connectGain = audioCtx.createGain();
+            // connectOsc.connect(dest);
+            // connectGain.connect(dest);
+
+
+            // // Sine wave for a pure, smooth bell-like tone
+            // connectOsc.type = 'sine';
+            
+            // // Higher pitch for the 'connection' confirmation
+            // connectOsc.frequency.setValueAtTime(900, t + 0.2); 
+
+            // // Volume envelope: soft attack, lingering fade out
+            // connectGain.gain.setValueAtTime(0, t + 0.2);
+            // connectGain.gain.linearRampToValueAtTime(0.3, t + 0.23); // Gentle fade in
+            // connectGain.gain.exponentialRampToValueAtTime(0.01, t + 0.5); // Sweet lingering fade out
+
+            // connectOsc.connect(connectGain);
+            // connectGain.connect(audioCtx.destination);
+
+            // connectOsc.start(t + 0.2);
+            // connectOsc.stop(t + 0.5); 
+
+            return 200; // ms total 
+        }
+
+
+        document.getElementById('playBtn').addEventListener('click', async () => {
+            // Start recording
+            recorder.start();
+            
+            let a = 0;
+            while(a < 10000){ 
+                const t = audioCtx.currentTime;
+
+                const time = playSingleBeat(t);
+                a += time
+
+                await new Promise(resolve => setTimeout(resolve, time)); // Wait for the beat to finish before playing the next one
+            }
+
+            recorder.stop();
+        });
+    </script>
+
+</body>
+</html>

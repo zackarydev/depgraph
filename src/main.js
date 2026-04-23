@@ -61,6 +61,123 @@ import { createHLC } from './core/clock.js';
 import { startCinematic, stopCinematic } from './stream/cinematic.js';
 import { PIXEL_PITCH } from './render/image-constants.js';
 
+// 1. Standard WAV Encoder
+function encodeWAV(samples, sampleRate) {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    const writeString = (view, offset, string) => {
+        for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
+    };
+
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); 
+    view.setUint16(22, 1, true); 
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); 
+    view.setUint16(32, 2, true); 
+    view.setUint16(34, 16, true); 
+    writeString(view, 36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++, offset += 2) {
+        let s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+    return new Blob([view], { type: 'audio/wav' });
+}
+
+// 2. Set up Audio Context
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+const dest = audioCtx.createMediaStreamDestination();
+
+// 3. Set up the Live Raw Audio Interceptor
+let recordedChunks = [];
+const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+const mediaStreamSource = audioCtx.createMediaStreamSource(dest.stream);
+
+// Connect dest -> processor -> silent gain -> speakers 
+// (The silent gain keeps the processor running without doubling your audio)
+const dummyGain = audioCtx.createGain();
+dummyGain.gain.value = 0;
+mediaStreamSource.connect(processor);
+processor.connect(dummyGain);
+dummyGain.connect(audioCtx.destination);
+
+// Capture raw PCM data continuously
+processor.onaudioprocess = (e) => {
+    if (!recorder.running) return;
+    const inputData = e.inputBuffer.getChannelData(0);
+    recordedChunks.push(new Float32Array(inputData));
+};
+
+// 4. Adapt your recorder object to handle the WAV export on stop
+const recorder = {
+  running: false,
+  recorder: {
+    start: () => {
+        recordedChunks = [];
+        recorder.running = true;
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+    },
+    stop: () => {
+        recorder.running = false;
+        
+        // Flatten all recorded audio chunks into one array
+        const totalLength = recordedChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+        const samples = new Float32Array(totalLength);
+        let offset = 0;
+        for (let chunk of recordedChunks) {
+            samples.set(chunk, offset);
+            offset += chunk.length;
+        }
+        
+        // Create Blob and Download
+        const wavBlob = encodeWAV(samples, audioCtx.sampleRate);
+        const url = URL.createObjectURL(wavBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'generated-live-audio.wav'; // DaVinci ready!
+        a.click();
+        
+        URL.revokeObjectURL(url);
+    }
+  }
+};
+
+// 5. Your play function
+const playSingleBeat = () => {
+  if(!recorder.running) return;
+  const t = audioCtx.currentTime;
+
+  // ==========================================
+  // PART 1: "Something being placed"
+  // ==========================================
+  const placeOsc = audioCtx.createOscillator();
+  const placeGain = audioCtx.createGain();
+  
+  placeOsc.type = 'triangle'; 
+  placeOsc.frequency.setValueAtTime(300, t);
+  placeOsc.frequency.exponentialRampToValueAtTime(150, t + 0.1);
+
+  placeGain.gain.setValueAtTime(0, t);
+  placeGain.gain.linearRampToValueAtTime(0.4, t + 0.02); 
+  placeGain.gain.exponentialRampToValueAtTime(0.01, t + 0.15); 
+
+  // Fixed Routing: Osc -> Gain -> (Dest AND Speakers)
+  placeOsc.connect(placeGain);
+  placeGain.connect(dest);                 // Sends to recorder
+  placeGain.connect(audioCtx.destination); // Sends to your speakers to hear it live
+
+  placeOsc.start(t);
+  placeOsc.stop(t + 0.19); 
+}
+
+
 /**
  * Pin a pixel node at its grid coordinate and lock it out of layout.
  * The id format is `px:<ox>,<oy>:<gx>,<gy>` — origin in world coords,
@@ -257,7 +374,7 @@ export function init(opts = {}) {
 
   // --- Selection & interaction state ---
   let selection = createSelection();
-  let keyState = createKeyState();
+  let keyState = createKeyState(recorder);
   let traceState = null;
   let timeTravelState = null;
   const arrangements = createArrangementStack();
@@ -485,6 +602,8 @@ export function init(opts = {}) {
   // lives directly in the hypergraph as slot NODEs + property EDGEs — the
   // emitting callsite is responsible for producing those rows.
   function appendRow(row) {
+    playSingleBeat();
+
     const isUserAuthored = row._userAuthored === true;
     if (row._userAuthored !== undefined) delete row._userAuthored;
 

@@ -15,14 +15,6 @@
 3. Show how the importance was scored with an LLM
    1. Why have a score?
 
-### Observing AI changes
-
-1. Realtime feedback loop between AI changes + AST updates
-2. Live guiding AI changes via pulling things apart to create boundaries
-3. Code structure to graph to screen position to code structure (visual movement <-> information translation)
-4. Why observe the AI working?
-5. Storytelling for why I wanted this UI, how it helped me?
-
 ## Self-observing
 
 1. Plugging depgraph into itself
@@ -30,6 +22,14 @@
    1. From single file index.html with 8000 lines to many files
    2. Complexity overload without structure
    3. Rewritten for cleaner boundaries
+
+### Observing AI changes
+
+1. Realtime feedback loop between AI changes + AST updates
+2. Live guiding AI changes via pulling things apart to create boundaries
+3. Code structure to graph to screen position to code structure (visual movement <-> information translation)
+4. Why observe the AI working?
+5. Storytelling for why I wanted this UI, how it helped me?
 
 ## Pushing it to the hyper-level
 

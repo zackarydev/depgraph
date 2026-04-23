@@ -35,8 +35,9 @@ const OVERLAY_MODES = new Set([
  * Create a fresh key state.
  * @returns {KeyState}
  */
-export function createKeyState() {
+export function createKeyState(recorderState) {
   return {
+    r: recorderState,
     held: new Set(),
     activeMode: null,
     pointerDepth: 0,
@@ -119,6 +120,17 @@ export function keyDown(state, key, modifiers = {}) {
   }
   if (alt && key === 'arrowdown') {
     return { action: 'branch-switch', delta: 1 };
+  }
+
+  if(key === 'm') {
+    if(!state.r.running) {
+      state.r.recorder.start();
+      state.r.running = true;
+    } else {
+      state.r.recorder.stop();
+      state.r.running = false;
+    }
+    
   }
 
   return null;
