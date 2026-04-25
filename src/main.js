@@ -22,6 +22,7 @@ import {
   renderFull as legacyRenderFull,
   renderPositionsOnly as legacyRenderPositions,
   applySemanticZoom as legacyApplySemanticZoom,
+  applyFractalLod as legacyApplyFractalLod,
   setShowFlag as legacySetShowFlag,
   renderSelectionGlow as legacyRenderSelectionGlow,
   clusterColor,
@@ -29,6 +30,7 @@ import {
   isLowLodKind,
 } from './render/v3.js';
 import { generateDemoHistory } from './data/demo-history.js';
+import { generateAddFractalHistory } from './data/demo-add-fractal.js';
 import { EDGE_LAYERS, setLayerVisible, getLayer } from './edges/layers.js';
 import { createSelection, selectNode, toggleSelection, clearSelection } from './interact/select.js';
 import { endDrag, positionRows } from './interact/drag.js';
@@ -260,11 +262,22 @@ export function init(opts = {}) {
   }
 
   // --- History ---
-  // Priority: streamReplay > explicit CSV > localStorage > demo
+  // Priority: opts.demo > streamReplay > explicit CSV > localStorage > default demo
   // streamReplay starts empty; rows arrive via SSE replay and fill the
-  // history + graph + posMap progressively.
+  // history + graph + posMap progressively. opts.demo bypasses streamReplay so
+  // a hand-authored demo can boot synchronously without a server roundtrip.
   let history;
-  if (opts.streamReplay) {
+  if (opts.demo) {
+    history = createHistory();
+    const generators = {
+      'add-fractal': generateAddFractalHistory,
+      'default': generateDemoHistory,
+    };
+    const gen = generators[opts.demo] || generators['default'];
+    for (const row of gen()) {
+      historyAppend(history, row);
+    }
+  } else if (opts.streamReplay) {
     history = createHistory();
   } else if (opts.csv) {
     history = loadHistory(opts.csv);
@@ -998,9 +1011,9 @@ export function init(opts = {}) {
           // positive bias (things spread); zoomed out → negative (things pack).
           setStretchBias(Math.log2(currentZoom) * 0.25);
           if (legacyState) {
-            legacyApplySemanticZoom(legacyState, {
-              graph, posMap, derivation: graph.derivation, context, selection,
-            }, currentZoom);
+            const semDeps = { graph, posMap, derivation: graph.derivation, context, selection };
+            legacyApplySemanticZoom(legacyState, semDeps, currentZoom);
+            legacyApplyFractalLod(legacyState, semDeps, currentZoom);
           }
           // Crossing the LOD threshold flips whole classes of nodes/edges in
           // or out of existence, so a full render (not just opacity tweaks)
@@ -1873,7 +1886,11 @@ export function init(opts = {}) {
 // history.csv via SSE replay, so rows paint as they arrive instead of waiting
 // for a one-shot `/history` fetch + synchronous parse + initialPlace pass.
 if (typeof window !== 'undefined') {
-  const runtime = init({ streamReplay: true });
+  const params = new URLSearchParams(window.location.search);
+  const demoMode = params.get('demo');
+  const runtime = demoMode
+    ? init({ demo: demoMode, localStorage: false })
+    : init({ streamReplay: true });
   window.__depgraph = runtime;
-  console.log('depgraph runtime initialized (stream replay)', runtime);
+  console.log('depgraph runtime initialized', demoMode ? `(demo: ${demoMode})` : '(stream replay)', runtime);
 }

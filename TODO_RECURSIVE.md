@@ -18,3 +18,31 @@ As history is written sentinel nodes can be placed that marks time. As the progr
 User position in screenspace and in hypergraphspace is translatable. At least fractal height, but I'd go as far as putting their screen coordinates directly in the hypergraph. Each time they move the nodes and edges flow into the history file. Probably out of scope for first version. Write a doc for this expansion plan.
 
 Alas. Upon transitions from one fractal layer to another, these sentinel nodes would be used to look in the past/future of the hypergraph, at those locations. The reason this is hard to grasp is because the node positions in the hypergraph space is a combination of its previous positions (in history), but also the currently loaded hypergraph visual renderings (i.e. positions of the nodes on screen before the appearance of the next fractal layer). Note that the fractal layer is throughout the whole screen, in microdimensions everywhere, as opposed to directional, although it could certainly be directional, partial. I actually really love the idea of partial. I.e. all the black space is available for **fractalization**.
+
+----
+I think the right ideological approach for this is to manually create some examples. And a prime example of this type of fractal behaviour should be the concept of "abstraction" in software. Or more specifically: at the highest fractal height, the function may just be its signature:
+
+L0: (1 node)
+```
+add
+```
+
+L1: (4 nodes)
+```
+func add(X,Y) -> Z
+```
+
+L2: (7-8 nodes?)
+```
+func add(X,Y) -> Z {
+    Z = X + Y
+    return Z
+}
+```
+
+L3: (?)
+```
+some kind of assembly code? binary addition, etc.
+```
+
+You've attempted another version of this feature, but you ended up splitting up the history file in 3. I'd like us to focus on this fractal visual first.

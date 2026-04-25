@@ -21,7 +21,7 @@ async function startProcessing() {
       nextFn();
       
       // This is where the 10s wait actually works
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 10));
     } else {
       // Wait a bit if the buffer is empty before checking again
       await new Promise(r => setTimeout(r, 1000));

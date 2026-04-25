@@ -31,6 +31,8 @@
 import { getLayer } from '../edges/layers.js';
 import { buildClusterIndex } from '../data/derive.js';
 import { PIXEL_PITCH, parsePixelColor } from './image-constants.js';
+import { computeFractalLevels, applyFractalLod } from './fractal-lod.js';
+export { applyFractalLod };
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -199,6 +201,8 @@ export function renderFull(state, deps) {
   for (const [cid, cl] of derivation.clusters) {
     state.clusterMembers.set(cid, [...cl.members]);
   }
+  state.fractalLod = computeFractalLevels(derivation.clusters, graph.state.nodes);
+  state._lastFractalMaxLevel = -1; // force re-apply
 
   renderEdgesDiff(state, graph, posMap);
   renderNodesDiff(state, graph, posMap);
@@ -208,6 +212,7 @@ export function renderFull(state, deps) {
   rebuildHulls(state, posMap);
   positionClusterLabels(state, posMap);
   applySemanticZoom(state, deps, state.currentK);
+  applyFractalLod(state, deps, state.currentK);
   renderSelectionGlow(state, deps.selection);
 }
 
