@@ -1,6 +1,6 @@
-# Docs
+# depgraph
 
-Reference material, organized by audience.
+- [readme.md](../README.md) - journal
 
 ## Users
 - [controls.md](controls.md) — keyboard + mouse reference
