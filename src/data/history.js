@@ -180,6 +180,44 @@ export function append(history, row) {
 }
 
 /**
+ * Splice rows into the active branch immediately after the cursor, without
+ * forking the tail. Each row gets a fresh monotonic `t`. Rows past the
+ * cursor stay in place and continue to play when the cursor advances.
+ *
+ * Use case: scrub back to a position, splice in a positions snapshot or a
+ * gradient-descent result, then continue forward through the original tail
+ * with the new state in effect.
+ *
+ * Note: in-memory only — does not mirror to any persistence channel.
+ *
+ * @param {History} history
+ * @param {Partial<import('../core/types.js').HistoryRow>[]} partials
+ * @returns {import('../core/types.js').HistoryRow[]} rows as inserted (with t)
+ */
+export function insertRows(history, partials) {
+  if (!partials || partials.length === 0) return [];
+  const inserted = [];
+  for (const partial of partials) {
+    const fullRow = { ...partial, t: history.nextT++ };
+    const insertIdx = history.cursor + 1;
+
+    if (history.activeBranch === 'main') {
+      history.rows.splice(insertIdx, 0, fullRow);
+    } else {
+      const branch = history.branches.get(history.activeBranch);
+      if (!branch) continue;
+      const branchIdx = insertIdx - branch.forkCursor - 1;
+      branch.rows.splice(branchIdx, 0, fullRow);
+    }
+
+    history.cursor++;
+    applyRow(history.state, fullRow);
+    inserted.push(fullRow);
+  }
+  return inserted;
+}
+
+/**
  * Move the cursor to an absolute position.
  * Rebuilds state by replaying rows[0..position].
  *

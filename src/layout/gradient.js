@@ -32,6 +32,24 @@ let stretchBias = 0;
 export function setStretchBias(b) { stretchBias = b; }
 export function getStretchBias() { return stretchBias; }
 
+// Runtime-mode flag. When true, memberOf edges whose target node has kind
+// `structural-hyperedge` get a rigidity multiplier applied to their spring
+// weight — structural hulls (e.g. function signatures) stay tight while
+// the rest of the graph relaxes around them. Toggled from the UI.
+let runtimeMode = false;
+const STRUCTURAL_RIGIDITY = 5;
+export function setRuntimeMode(v) { runtimeMode = !!v; }
+export function getRuntimeMode() { return runtimeMode; }
+
+function rigidityMultiplier(edge, nodes) {
+  if (!runtimeMode) return 1;
+  if (edge.layer !== 'memberOf') return 1;
+  if (!nodes) return 1;
+  const tgt = nodes.get(edge.target);
+  if (!tgt || tgt.kind !== 'structural-hyperedge') return 1;
+  return STRUCTURAL_RIGIDITY;
+}
+
 // target = BASE * exp(stretch + bias). Free scalar, 0 = identity, ±∞ asymptotes.
 function stretchedTarget(edge, w) {
   const s = (edge.stretch || 0) + stretchBias;
@@ -48,7 +66,7 @@ function stretchedTarget(edge, w) {
  * @param {import('../core/types.js').WeightVector} [W]
  * @returns {number}
  */
-export function energy(posMap, edges, W) {
+export function energy(posMap, edges, W, nodes) {
   let E = 0;
   const positions = posMap.positions;
 
@@ -62,7 +80,7 @@ export function energy(posMap, edges, W) {
     const dx = ps.x - pt.x;
     const dy = ps.y - pt.y;
     const layerW = (W && W[edge.layer] != null) ? W[edge.layer] : 1.0;
-    const w = (edge.weight || 1) * layerW;
+    const w = (edge.weight || 1) * layerW * rigidityMultiplier(edge, nodes);
 
     if (edge.restDx != null || edge.restDy != null) {
       const rdx = edge.restDx || 0;
@@ -138,7 +156,7 @@ export function gradEnergy(posMap, edges, W, nodes) {
     const dx = ps.x - pt.x;
     const dy = ps.y - pt.y;
     const layerW = (W && W[edge.layer] != null) ? W[edge.layer] : 1.0;
-    const w = (edge.weight || 1) * layerW;
+    const w = (edge.weight || 1) * layerW * rigidityMultiplier(edge, nodes);
 
     let gx, gy;
     if (edge.restDx != null || edge.restDy != null) {
@@ -302,7 +320,7 @@ function scopedGradEnergy(posMap, edges, W, scope, collapse, nodes) {
     const dx = ps.x - pt.x;
     const dy = ps.y - pt.y;
     const layerW = (W && W[edge.layer] != null) ? W[edge.layer] : 1.0;
-    const w = (edge.weight || 1) * layerW;
+    const w = (edge.weight || 1) * layerW * rigidityMultiplier(edge, nodes);
 
     let gx, gy;
     if (edge.restDx != null || edge.restDy != null) {

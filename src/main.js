@@ -12,7 +12,7 @@ import { createScheduler } from './core/animation.js';
 import { createContext } from './core/context.js';
 import { createPropertyRegistry, registerProperty, getProperty } from './core/properties.js';
 import { createSpatialProperty, SPATIAL_PROPERTY } from './rules/spatial.js';
-import { createHistory, load as loadHistory, append as historyAppend, effectiveRows } from './data/history.js';
+import { createHistory, load as loadHistory, append as historyAppend, effectiveRows, insertRows, moveCursor } from './data/history.js';
 import { buildFromHistory, applyRowToGraph, rederive } from './data/graph-builder.js';
 import { initialPlace } from './layout/placement.js';
 import { isLayoutHub } from './layout/hub-policy.js';
@@ -34,7 +34,7 @@ import { createSelection, selectNode, toggleSelection, clearSelection } from './
 import { endDrag, positionRows } from './interact/drag.js';
 import { applyRow } from './core/state.js';
 import { toggleClusterStretchRule, clusterMembers as resolveClusterMembers } from './rules/cluster-rules.js';
-import { setStretchBias } from './layout/gradient.js';
+import { setStretchBias, setRuntimeMode, descentStep } from './layout/gradient.js';
 import { createKeyState, keyDown, keyUp } from './interact/keyboard.js';
 import { startTrace, updateTrace, revealedNodes, releaseTrace, holdTrace, changeDirection } from './interact/trace.js';
 import { createDispatcher, registerRule, emit as emitMoment, retract as retractMoment, tick as tickDispatcher } from './core/dispatcher.js';
@@ -458,6 +458,18 @@ export function init(opts = {}) {
       if (label) label.textContent = arrangements.stack.length
         ? `${arrangements.cursor + 1} / ${arrangements.stack.length}`
         : '—';
+    }
+    const slider = document.getElementById('t-slider');
+    const tVal = document.getElementById('t-val');
+    if (slider) {
+      const total = effectiveRows(history).length;
+      const cursor = history.cursor;
+      const max = Math.max(0, total - 1);
+      // Avoid clobbering an in-progress drag — only update value when not focused.
+      const userScrubbing = document.activeElement === slider;
+      slider.max = String(max);
+      if (!userScrubbing) slider.value = String(Math.max(0, cursor));
+      if (tVal) tVal.textContent = `${Math.max(0, cursor)}/${max}`;
     }
   }
 
@@ -1651,6 +1663,13 @@ export function init(opts = {}) {
       });
     }
 
+    const runtimeEl = document.getElementById('runtime-mode');
+    if (runtimeEl) {
+      runtimeEl.addEventListener('change', () => {
+        setRuntimeMode(runtimeEl.checked);
+      });
+    }
+
     const search = document.getElementById('search');
     if (search) {
       search.addEventListener('input', () => {
@@ -1772,6 +1791,103 @@ export function init(opts = {}) {
       });
     }
   }
+
+  // --- t-slider scrub + Snap@t / Descend@t ---
+  // Slider drives history.cursor; rebuildGraphFromHistory replays from the
+  // start up to the new cursor (preserving posMap so re-entering nodes don't
+  // lose their coords). Snap inserts current node positions as history rows
+  // at the cursor, without forking the tail. Descend runs N gradient-descent
+  // iterations on the live posMap, then snaps. Both leave the original tail
+  // in place so the user can scrub forward and replay it from the new state.
+  function isSnapshotCandidate(node) {
+    if (!node) return false;
+    if (isLayoutHub(node)) return false;
+    if (node.kind === 'slot') return false;
+    if (node.kind === 'pixel' || node.kind === 'image-header') return false;
+    return true;
+  }
+
+  function buildPositionRowsForCurrentNodes() {
+    const rows = [];
+    for (const [id, node] of graph.state.nodes) {
+      if (!isSnapshotCandidate(node)) continue;
+      const ps = posMap.positions.get(id);
+      if (!ps) continue;
+      rows.push(...positionRows(hlc, id, ps.x, ps.y));
+    }
+    return rows;
+  }
+
+  if (typeof document !== 'undefined') {
+    const slider = document.getElementById('t-slider');
+    if (slider) {
+      // Drag = preview the target index in the label; rebuild only on release
+      // (or keyboard adjustment). rebuildGraphFromHistory replays from row 0,
+      // so binding to 'input' would jank a multi-million-row history.
+      slider.addEventListener('input', () => {
+        const tValEl = document.getElementById('t-val');
+        if (tValEl) {
+          const total = effectiveRows(history).length;
+          tValEl.textContent = `${slider.value}/${Math.max(0, total - 1)}`;
+        }
+      });
+      const commit = () => {
+        const target = parseInt(slider.value, 10);
+        if (Number.isNaN(target)) return;
+        const prev = history.cursor;
+        const newCursor = moveCursor(history, target);
+        if (newCursor !== prev) {
+          rebuildGraphFromHistory();
+          bus.emit('cursor-moved', { from: prev, to: newCursor });
+          updateHud();
+        }
+      };
+      slider.addEventListener('change', commit);
+    }
+
+    const snapBtn = document.getElementById('t-snap');
+    if (snapBtn) {
+      snapBtn.addEventListener('click', () => {
+        const rows = buildPositionRowsForCurrentNodes();
+        if (rows.length === 0) return;
+        insertRows(history, rows);
+        for (const r of rows) applyRowToGraph(graph, r, context.weights.affinity);
+        rederive(graph, context.weights.affinity);
+        pushArrangement(arrangements, 'snap@t', posMap);
+        updateHud();
+        fullRender();
+      });
+    }
+
+    const descendBtn = document.getElementById('t-descend');
+    if (descendBtn) {
+      descendBtn.addEventListener('click', () => {
+        const iterEl = document.getElementById('t-iter');
+        const iters = Math.max(1, Math.min(2000, parseInt((iterEl && iterEl.value) || '200', 10) || 200));
+        for (let i = 0; i < iters; i++) {
+          descentStep(posMap, graph.state.edges, context.weights.physics, {
+            eta: 0.1,
+            nodes: graph.state.nodes,
+          });
+        }
+        const rows = buildPositionRowsForCurrentNodes();
+        if (rows.length > 0) {
+          insertRows(history, rows);
+          for (const r of rows) applyRowToGraph(graph, r, context.weights.affinity);
+          rederive(graph, context.weights.affinity);
+          pushArrangement(arrangements, 'descend@t', posMap);
+        }
+        updateHud();
+        fullRender();
+      });
+    }
+  }
+
+  // Cursor-moved (from time-travel, slider, alt-arrow) is the canonical signal
+  // to refresh chrome that mirrors the cursor.
+  bus.on('cursor-moved', () => {
+    dirtyHud = true;
+  });
 
   // --- Initial render ---
   // Under streamReplay the posMap is empty here; the initial arrangement is

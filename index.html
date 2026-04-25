@@ -187,6 +187,17 @@
     <label><input type="checkbox" id="show-cluster-labels" checked> Clusters</label>
     <label><input type="checkbox" id="show-boundary-labels" checked> Boundary</label>
     <label><input type="checkbox" id="show-meta-edges" checked> Meta</label>
+    <label title="Stiffen structural hyperedges (e.g. function signatures)"><input type="checkbox" id="runtime-mode"> Runtime</label>
+    <div class="sep"></div>
+    <label title="History cursor — drag to scrub through time">t
+      <input type="range" id="t-slider" min="0" max="0" value="0" style="width:200px">
+      <span class="val" id="t-val">0/0</span>
+    </label>
+    <button id="t-snap" title="Insert current node positions as history rows at this cursor">Snap @ t</button>
+    <label title="Gradient-descent iterations to run before snapping">iter
+      <input type="number" id="t-iter" min="1" max="2000" value="200" style="width:56px">
+    </label>
+    <button id="t-descend" title="Run gradient descent here, then insert resulting positions">Descend @ t</button>
     <div class="sep"></div>
     <!-- <label>Search: <input type="text" id="search" placeholder="node id..." style="width:140px"></label>
     <div class="sep"></div>

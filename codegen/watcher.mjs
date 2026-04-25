@@ -37,34 +37,42 @@ import { validateRow, writeRowLine, HEADER } from '../src/data/csv.js';
  * Compute the diff between two handler outputs (old vs new) for the same file.
  * Returns NODE/EDGE add/update/remove rows (no `t` assigned).
  *
+ * Accepts either the legacy `{nodes, edges}` shape or the newer interleaved
+ * `{rows}` shape (see repo-scanner.scanFile).
+ *
  * - id present in `next` but not `prev`         → add
  * - id present in `prev` but not `next`         → remove
  * - id present in both with different payload   → update
  *
- * @param {{nodes:Array,edges:Array}|null} prev
- * @param {{nodes:Array,edges:Array}} next
+ * @param {{nodes?:Array,edges?:Array,rows?:Array}|null} prev
+ * @param {{nodes?:Array,edges?:Array,rows?:Array}} next
  * @returns {Array}
  */
 export function diffHandlerOutput(prev, next) {
   const rows = [];
 
-  const indexNodes = (out) => {
-    const m = new Map();
-    if (!out) return m;
-    for (const n of out.nodes) m.set(n.id, n);
-    return m;
-  };
-  const indexEdges = (out) => {
-    const m = new Map();
-    if (!out) return m;
-    for (const e of out.edges) m.set(e.id, e);
-    return m;
+  // Handlers return one of two shapes: legacy {nodes, edges} or interleaved
+  // {rows} (each row tagged type:'NODE'|'EDGE'). Fold either into id→object
+  // maps, keeping only add/update rows — a remove in the source would just
+  // mean "not present", which the diff will rediscover.
+  const indexOut = (out) => {
+    const nodes = new Map();
+    const edges = new Map();
+    if (!out) return { nodes, edges };
+    if (Array.isArray(out.rows)) {
+      for (const r of out.rows) {
+        if (r.op === 'remove') continue;
+        if (r.type === 'NODE') nodes.set(r.id, r);
+        else if (r.type === 'EDGE') edges.set(r.id, r);
+      }
+    }
+    if (Array.isArray(out.nodes)) for (const n of out.nodes) nodes.set(n.id, n);
+    if (Array.isArray(out.edges)) for (const e of out.edges) edges.set(e.id, e);
+    return { nodes, edges };
   };
 
-  const prevNodes = indexNodes(prev);
-  const nextNodes = indexNodes(next);
-  const prevEdges = indexEdges(prev);
-  const nextEdges = indexEdges(next);
+  const { nodes: prevNodes, edges: prevEdges } = indexOut(prev);
+  const { nodes: nextNodes, edges: nextEdges } = indexOut(next);
 
   // Node adds + updates
   for (const [id, n] of nextNodes) {
