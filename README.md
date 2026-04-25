@@ -187,3 +187,12 @@ Previously, implemented a markdown converter into the history. Uses markdown AST
 
 Pushing it further though, images are now decomposed into individual pixels. In the hypergraph. Cool transition too. Each pixel is linked to its neighbours. Must check compression algorithms, it must be amazing to see how they're built, especially runtime in the hypergraph. I feel like I can *already* visualize it.
 
+## Runtime Execution via Fractalization UI
+
+View [./TODO_RECURSIVE](./TODO_RECURSIVE.md)
+
+This is really necessary for the runtime execution stuff.
+
+I'm kind of tempted to say two things about this. One is that the hypergraph UI maybe too disorganized. Perhaps its just because we're mapping N-Dimensional space onto 2D space. Even then though, I'd still expect a kind of structure to emerge naturally. The layered approach via fractalization may be the way to go to solve the incomprehensible visuals. At least partially.
+
+Now i'd be curious to actually have an AI encode that in the hypergraph directly. Because obviously it must be done using an intelligence. It could be a dumb intelligence though, like a semantic similarity map. This can be pre-encoded. Wait is that just transformer embedding-space for the trained model? I suspect VERY similar structure though, and indeed purpose.

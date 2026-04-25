@@ -1,5 +1,6 @@
+## Fractalization UI
+
 [Zack:]
-## Recursive / fractal displays.
 
 When clicking on a node and trying to move it, we should not see right away that a click occurred. It should appear "in the background" of the hypergraph. The user must scroll in to view the other layer of changes. This occurs progressively as the user zooms in. 
 
@@ -47,5 +48,7 @@ Partial fractalization in black space vs. the horizon. VISION uses black space a
 One flag for the expansion doc on screen-position-in-hypergraph: if every viewport change writes to history, the history file becomes mostly camera noise. Probably want viewport in the graph only at explicit checkpoints (user-dropped sentinels or significant transitions), not continuously. Otherwise the "oscillating participants" get drowned in pan events.
 
 I'd want your take on 2, 3, 4, and 6 before I draft the expansion doc — those four decisions constrain the sentinel schema and the loader/visualizer split.
-----
-This is really necessary for the runtime execution stuff.
+
+---
+Zack:
+Unknown... too complex.. need time.
