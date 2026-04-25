@@ -23,12 +23,14 @@
  * CLI:
  *   node codegen/imagegen.mjs --size 16 --pattern gradient > runtime/image.csv
  *   node codegen/imagegen.mjs --size 16 --origin-x 1000 --origin-y 200 --out ...
+ *   node codegen/imagegen.mjs --size 32 --url ./image.png > runtime/image.csv
  *
  * Patterns: gradient (default), checker, ring.
  *
  * @module codegen/imagegen
  */
 
+import * as Jimp from 'jimp';
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { writeRowLine, HEADER } from '../src/data/csv.js';
@@ -61,6 +63,39 @@ function patternRing(x, y, size) {
   return [r, g, b];
 }
 
+async function imageFromUrl(url, sizeArg) {
+  if (!url) {
+    return false;
+  }
+
+  try {
+    let image = await Jimp.Jimp.read(url);
+    
+    // If the user explicitly provided a size, resize to that square bounding box
+    // Otherwise, keep the image's intrinsic dimensions
+    if (sizeArg) {
+      image = await image.resize({
+        w: sizeArg,
+        h: sizeArg,
+        mode: Jimp.ResizeStrategy.NEAREST_NEIGHBOR,
+      });
+    }
+    
+    const width = image.bitmap.width;
+    const height = image.bitmap.height;
+
+    const pickRGB = (x, y) => {
+      const hex = image.getPixelColor(x, y);
+      const rgba = Jimp.intToRGBA(hex);
+      return [rgba.r, rgba.g, rgba.b];
+    };
+    return { pickRGB, width, height };
+  } catch (err) {
+    console.error(`Failed to load image from URL: ${url}\n`, err);
+    process.exit(1);
+  }
+}
+
 export const PATTERNS = {
   gradient: patternGradient,
   checker:  patternChecker,
@@ -79,7 +114,7 @@ export const PATTERNS = {
  *                                   into a larger stream that assigns t later)
  * @returns {import('../src/core/types.js').HistoryRow[]}
  */
-export function imageToRows({ size, pickRGB, originX = 0, originY = 0, tStart = 0 }) {
+export function imageToRows({ width, height, pickRGB, originX = 0, originY = 0, tStart = 0 }) {
   const rows = [];
   let t = tStart;
   const ox = originX | 0;
@@ -93,7 +128,7 @@ export function imageToRows({ size, pickRGB, originX = 0, originY = 0, tStart = 
     op: 'add',
     id: headerId,
     kind: 'image-header',
-    label: `${size},${size}`,
+    label: `${width},${height}`,
     weight: 1,
   });
 
@@ -108,9 +143,9 @@ export function imageToRows({ size, pickRGB, originX = 0, originY = 0, tStart = 
     weight: 1,
   });
 
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const [r, g, b] = pickRGB(x, y, size);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const [r, g, b] = pickRGB(x, y, width);
       const brightness = (r + g + b) / 3 / 255;
       rows.push({
         t: t++,
@@ -160,24 +195,38 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     return i !== -1 && i + 1 < args.length ? args[i + 1] : fallback;
   }
 
-  const size = Number(argVal('--size', '16'));
+  const url = argVal('--url', null);
+  let size = Number(argVal('--size', '16'));
   const patternName = argVal('--pattern', 'gradient');
   const originX = Number(argVal('--origin-x', '0'));
   const originY = Number(argVal('--origin-y', '0'));
   const outPath = argVal('--out', null);
 
-  const pickRGB = PATTERNS[patternName];
+  let width = size;
+  let height = size;
+
+  let pickRGB;
+  if(url) {
+    const { pickRGB: _pickRGB, width: imgWidth, height: imgHeight } = await imageFromUrl(url, size);
+    pickRGB = _pickRGB;
+    width = imgWidth;
+    height = imgHeight;
+  } else {
+    pickRGB = PATTERNS[patternName];
+  }
+
   if (!pickRGB) {
     console.error(`unknown pattern: ${patternName}. options: ${Object.keys(PATTERNS).join(', ')}`);
     process.exit(1);
   }
 
-  const rows = imageToRows({ size, pickRGB, originX, originY });
+  const rows = imageToRows({ width, height, pickRGB, originX, originY });
   const text = [HEADER, ...rows.map(writeRowLine)].join('\n') + '\n';
 
   if (outPath) {
-    writeFileSync(resolve(outPath), text, 'utf-8');
-    console.error(`[imagegen] wrote ${rows.length} rows (${size}×${size} ${patternName} @ ${originX},${originY}) → ${outPath}`);
+    const fullPath = resolve(outPath);
+    writeFileSync(fullPath, text, 'utf-8');
+    console.error(`[imagegen] wrote ${rows.length} rows (${size}×${size} ${patternName} @ ${originX},${originY}) → ${fullPath}`);
   } else {
     process.stdout.write(text);
   }
