@@ -24,6 +24,11 @@ const PIN_K = 0.1;
 const REPULSION_K = 500;
 const BH_THETA = 0.7;
 const MAX_DISPLACEMENT = 10; // clamp per-node step to prevent explosion
+// Sub-pixel deadband: Barnes-Hut COM approximation produces small gradient
+// noise even at equilibrium; high-mass scaffolding nodes amplify this into
+// visible jitter at rest. Drop displacements below this threshold (world
+// units) so near-equilibrium nodes settle instead of oscillating.
+const DEADBAND = 0.05;
 
 // Global bias added to every edge's stretch at gradient time. Driven by the
 // zoom wiring in main.js so that zooming in amplifies the expand gesture and
@@ -246,8 +251,13 @@ export function descentStep(posMap, edges, W, options) {
     if (!g) continue;
 
     const stepScale = ps.sticky ? eta * STICKY_DAMPEN : eta;
-    let dx = stepScale * g.gx;
-    let dy = stepScale * g.gy;
+    const m = ps.mass || 1;
+    let dx = (stepScale * g.gx) / m;
+    let dy = (stepScale * g.gy) / m;
+
+    if (Math.abs(dx) < DEADBAND) dx = 0;
+    if (Math.abs(dy) < DEADBAND) dy = 0;
+    if (dx === 0 && dy === 0) continue;
 
     const mag = Math.sqrt(dx * dx + dy * dy);
     if (mag > MAX_DISPLACEMENT) {

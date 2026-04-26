@@ -22,6 +22,10 @@ const DEFAULT_WEIGHTS = {
   sharedWrites: 0.5,
   sharedName: 1.5,
   spatial: 0.1,
+  // Identifier binding: same-name occurrences link across the function.
+  // Low physics weight so the long-distance bindings (e.g. body Z → signature
+  // Z) don't yank the hand-authored fractal layout out of shape.
+  binds: 0.2,
   // Event layers are structural markers for queries, not springs.
   // Zero weight in both physics and affinity so clicks don't warp layout.
   'event:click': 0,

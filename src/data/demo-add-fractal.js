@@ -175,5 +175,19 @@ export function generateAddFractalHistory() {
   chain('shared', 1, 'L2_func', 'L2_name', 'L2_args', 'L2_arrow_z');
   chain('shared', 1, 'L1_decl', 'L1_args', 'L1_ret', 'L1_body');
 
+  // ─── Binding edges: link every occurrence of the same identifier. ───
+  // Without these the L3 atoms are 2× X, 2× Y, 3× Z floating independently.
+  // The binds layer carries the data flow: param → use → op → assignment →
+  // return → signature output → exit through the closing brace. Runtime
+  // value-nodes ride these edges from the call site through the body and
+  // back out — they make the function actually executable as a hypergraph.
+  function bind(a, b) { addEdge(a, b, 'binds', 1); }
+  bind('tok_X',          'tok_X_use');         // param X → body use
+  bind('tok_Y',          'tok_Y_use');         // param Y → body use
+  bind('tok_plus',       'tok_Z_assign');      // op result → Z (LHS of assign)
+  bind('tok_Z_assign',   'tok_Z_returned');    // Z (assigned) → Z (in return)
+  bind('tok_Z_returned', 'tok_brace_r');       // exit through closing brace
+  bind('tok_brace_r',    'tok_Z_ret');         // bubble up to signature → Z
+
   return rows;
 }

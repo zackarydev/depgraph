@@ -8075,3 +8075,11 @@ t,type,op,id,kind,source,target,layer,weight,label
 81,EDGE,add,click:81:add,,mouse-clicked,add,event:click,0,
 81,EDGE,add,click:81:cluster:add,,mouse-clicked,cluster:add,event:click,0,
 102,EDGE,add,click:102:cluster:add,,mouse-clicked,cluster:add,event:click,0,
+0,NODE,add,mouse-clicked,sentinel,,,,0.1,mouse-clicked
+0,NODE,add,mouse-clicked,sentinel,,,,0.1,mouse-clicked
+643,EDGE,add,click:643:cluster:file:README.md#h3:videos/p:1/s:1->memberOf->file:README.md#h3:videos/p:1,,mouse-clicked,cluster:file:README.md#h3:videos/p:1/s:1->memberOf->file:README.md#h3:videos/p:1,event:click,0,
+2050,EDGE,add,"click:2050:img:900,168:meta",,mouse-clicked,"img:900,168:meta",event:click,0,
+2274,EDGE,add,click:2274:cluster:file:README.md,,mouse-clicked,cluster:file:README.md,event:click,0,
+2334,EDGE,add,click:2334:cluster:file:README.md#h2:philosophy/p:1/s:1->memberOf->file:README.md#h2:philosophy/p:1,,mouse-clicked,cluster:file:README.md#h2:philosophy/p:1/s:1->memberOf->file:README.md#h2:philosophy/p:1,event:click,0,
+2869,EDGE,add,"click:2869:px:900,168:13,9",,mouse-clicked,"px:900,168:13,9",event:click,0,
+2960,EDGE,add,click:2960:file:README.md#h2:philosophy/p:3,,mouse-clicked,file:README.md#h2:philosophy/p:3,event:click,0,

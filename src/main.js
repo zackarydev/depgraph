@@ -31,6 +31,13 @@ import {
 } from './render/v3.js';
 import { generateDemoHistory } from './data/demo-history.js';
 import { generateAddFractalHistory } from './data/demo-add-fractal.js';
+import {
+  generateRuntimeAddHistory,
+  RUNTIME_ADD_POSITIONS,
+  createRuntimeEngine,
+  attachRuntimeUI,
+} from './data/demo-runtime-add.js';
+import { createDragEventStream } from './agent/drag-events.js';
 import { EDGE_LAYERS, setLayerVisible, getLayer } from './edges/layers.js';
 import { createSelection, selectNode, toggleSelection, clearSelection } from './interact/select.js';
 import { endDrag, positionRows } from './interact/drag.js';
@@ -272,6 +279,7 @@ export function init(opts = {}) {
     history = createHistory();
     const generators = {
       'add-fractal': generateAddFractalHistory,
+      'runtime-add': generateRuntimeAddHistory,
       'default': generateDemoHistory,
     };
     const gen = generators[opts.demo] || generators['default'];
@@ -340,6 +348,15 @@ export function init(opts = {}) {
   // descent can still nudge them, but they stay near the authored layout.
   if (opts.demo === 'add-fractal') {
     for (const [id, p] of Object.entries(ADD_FRACTAL_POSITIONS)) {
+      if (graph.state.nodes.has(id)) {
+        updatePosition(posMap, id, p.x, p.y);
+        setSticky(posMap, id, true);
+      }
+    }
+  }
+
+  if (opts.demo === 'runtime-add') {
+    for (const [id, p] of Object.entries(RUNTIME_ADD_POSITIONS)) {
       if (graph.state.nodes.has(id)) {
         updatePosition(posMap, id, p.x, p.y);
         setSticky(posMap, id, true);
@@ -646,10 +663,13 @@ export function init(opts = {}) {
     if (isNewNodeRow) {
       const node = graph.state.nodes.get(row.id);
       seedNewNodePosition(row.id);
-      if (!isLayoutHub(node)) {
+      if (!isLayoutHub(node) && node.kind !== 'runtime') {
         // Visibility branch: LOD-hidden kinds (slot) at low zoom don't need
         // a descent burst — the user can't see them move. Park them on the
         // centroid seed; the LOD-flip reveal burst will settle them later.
+        // Runtime kinds are excluded entirely: they are meant to flow under
+        // ordinary descent, and the burst would snap them to equilibrium
+        // before any motion is visible.
         const hidden = isLowLodKind(node.kind) && currentZoom < LOD_SLOT_THRESHOLD;
         if (hidden) pendingHiddenNew.add(row.id);
         else pendingDescentSeeds.add(row.id);
@@ -786,6 +806,19 @@ export function init(opts = {}) {
   bus.on('row-appended', () => {
     dirtyGraph = true;
     dirtyHud = true;
+  });
+
+  // --- Agent layer: package each drag with neighbor context ---
+  // Local code only packages; classification ("split", "merge", etc.) is the
+  // model's job. For now the events go to console — wire to a model later.
+  const dragEvents = createDragEventStream({
+    bus,
+    state: graph.state,
+    posMap,
+    getZoom: () => currentZoom,
+  });
+  dragEvents.onEvent((event) => {
+    console.log('[drag-event]', event);
   });
 
   bus.on('context-changed', ({ context: ctx }) => {
@@ -1137,6 +1170,19 @@ export function init(opts = {}) {
             isGroup: setup.isGroup,
             clusterId: setup.clusterId,
           };
+          // Snapshot pre-drag positions so the agent layer can compute a real
+          // delta on drag-ended. The drag rule will mutate posMap in place.
+          const startPositions = new Map();
+          for (const id of setup.memberIds) {
+            const ps = posMap.positions.get(id);
+            if (ps) startPositions.set(id, { x: ps.x, y: ps.y });
+          }
+          bus.emit('drag-started', {
+            primaryId: setup.primaryId,
+            memberIds: setup.memberIds,
+            flavor: setup.flavor,
+            positions: startPositions,
+          });
         } else {
           activeDragMoment.payload.anchorX = world.x;
           activeDragMoment.payload.anchorY = world.y;
@@ -1174,6 +1220,11 @@ export function init(opts = {}) {
           pushArrangement(arrangements, dctx.flavor === 'cluster' ? 'cluster-drag' : 'drag', posMap);
           updateHud();
         }
+        bus.emit('drag-ended', {
+          primaryId: dctx.primaryId,
+          memberIds: dctx.memberIds,
+          flavor: dctx.flavor,
+        });
       } else if (mouseDownTarget && !isDragging) {
         if (e.shiftKey) {
           selection = toggleSelection(selection, mouseDownTarget);
@@ -1907,4 +1958,10 @@ if (typeof window !== 'undefined') {
     : init({ streamReplay: true });
   window.__depgraph = runtime;
   console.log('depgraph runtime initialized', demoMode ? `(demo: ${demoMode})` : '(stream replay)', runtime);
+
+  if (demoMode === 'runtime-add') {
+    const engine = createRuntimeEngine(runtime);
+    attachRuntimeUI(engine);
+    runtime.runtimeEngine = engine;
+  }
 }

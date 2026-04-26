@@ -82,6 +82,7 @@ const KIND_COLOR = {
   cluster:  '#9b59b6',
   parameter:'#f39c12',
   value:    '#1abc9c',
+  runtime:  '#1abc9c',
 };
 
 function nodeKindColor(kind) {

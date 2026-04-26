@@ -70,14 +70,19 @@ export function computeFractalLevels(clusters, nodes) {
   // (so cluster:<id> exists and the node is a "cluster representative").
   const clusterTargets = new Set();
   for (const cid of clusters.keys()) {
-    clusterTargets.add(cid.replace(/^cluster:/, ''));
+    clusterTargets.add(cid.replace(/^(cluster:)+/, ''));
   }
 
-  // Walk parent-cluster chain from each node up to the root.
+  // Walk parent-cluster chain from each node up to the root. A VISITING
+  // sentinel breaks cycles (a node clustered into its own ancestor — can
+  // happen when affinity-based clustering ties two nodes to each other).
   const levels = new Map();
+  const VISITING = -1;
   let maxLevel = 0;
   function levelOf(id) {
-    if (levels.has(id)) return levels.get(id);
+    const cached = levels.get(id);
+    if (cached === VISITING) return 0; // cycle — treat as root
+    if (cached != null) return cached;
     const parentClusterId = memberToCluster.get(id);
     if (!parentClusterId) {
       // Not a member of any cluster. If it's a cluster target itself, it's
@@ -85,8 +90,9 @@ export function computeFractalLevels(clusters, nodes) {
       levels.set(id, 0);
       return 0;
     }
-    const parentTarget = parentClusterId.replace(/^cluster:/, '');
-    const parentLevel = levelOf(parentTarget);
+    levels.set(id, VISITING);
+    const parentTarget = parentClusterId.replace(/^(cluster:)+/, '');
+    const parentLevel = parentTarget === id ? 0 : levelOf(parentTarget);
     const lvl = parentLevel + 1;
     levels.set(id, lvl);
     if (lvl > maxLevel) maxLevel = lvl;
@@ -151,8 +157,8 @@ export function applyFractalLod(state, deps, k) {
           // both endpoint-clusters are currently representing a level.
           const sep = key.indexOf('\0');
           if (sep > 0) {
-            const a = key.slice(2, sep).replace(/^cluster:/, '');
-            const b = key.slice(sep + 1).replace(/^cluster:/, '');
+            const a = key.slice(2, sep).replace(/^(cluster:)+/, '');
+            const b = key.slice(sep + 1).replace(/^(cluster:)+/, '');
             v = levels.get(a) === maxLvl && levels.get(b) === maxLvl;
           }
         }
@@ -165,14 +171,14 @@ export function applyFractalLod(state, deps, k) {
     // Hulls — show only for clusters whose members are currently visible
     // (i.e. clusters at level < maxLvl).
     for (const [cid, he] of state.hullElements) {
-      const target = cid.replace(/^cluster:/, '');
+      const target = cid.replace(/^(cluster:)+/, '');
       const targetLvl = levels.get(target);
       const expanded = targetLvl != null && targetLvl < maxLvl;
       he.path.style.display = expanded ? '' : 'none';
     }
 
     for (const [cid, t] of state.clusterLabelElements) {
-      const target = cid.replace(/^cluster:/, '');
+      const target = cid.replace(/^(cluster:)+/, '');
       const targetLvl = levels.get(target);
       const expanded = targetLvl != null && targetLvl < maxLvl;
       t.style.display = expanded ? '' : 'none';

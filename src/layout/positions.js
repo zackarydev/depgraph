@@ -37,6 +37,7 @@ export function createPositionState(x, y) {
     t0y: y,
     sticky: false,
     locked: false,
+    mass: 1,
   };
 }
 
@@ -87,6 +88,20 @@ export function ensurePosition(posMap, nodeId, x, y) {
 export function setSticky(posMap, nodeId, sticky) {
   const ps = posMap.positions.get(nodeId);
   if (ps) ps.sticky = sticky;
+}
+
+/**
+ * Set mass for a node. Higher mass = less per-frame displacement under the
+ * same accumulated forces. Structural nodes get mass ~1000 so the runtime
+ * value-nodes (mass ~1) can flow through a near-rigid scaffold. See
+ * RUNTIME_RULES.md (Inertia).
+ * @param {PositionMap} posMap
+ * @param {string} nodeId
+ * @param {number} mass
+ */
+export function setMass(posMap, nodeId, mass) {
+  const ps = posMap.positions.get(nodeId);
+  if (ps) ps.mass = mass;
 }
 
 /**
