@@ -11,8 +11,60 @@
  * fractal LOD pass can hide everything below the current zoom level by
  * walking memberOf parent edges.
  *
+ * Positions are hand-authored to mimic how source code is read on a page:
+ * - Top row holds the signature (decl, args, ret) left-to-right.
+ * - Body sits below the signature, with one stacked row per statement.
+ * Children of a parent cluster are placed inside that parent's footprint
+ * so each fractal layer reveals interior structure without disrupting the
+ * spatial story of the previous layer.
+ *
  * @module data/demo-add-fractal
  */
+
+const POSITIONS = {
+  // L0
+  'add':            { x:    0, y:    0 },
+
+  // L1: signature row across the top, body below
+  'L1_decl':        { x: -300, y: -150 },
+  'L1_args':        { x: -100, y: -150 },
+  'L1_ret':         { x:  100, y: -150 },
+  'L1_body':        { x:    0, y:  120 },
+
+  // L2: each L2 lives within its L1 parent's footprint
+  // signature pieces (left to right, on the same row as their L1 parent)
+  'L2_func':        { x: -340, y: -150 },
+  'L2_name':        { x: -260, y: -150 },
+  'L2_args':        { x: -100, y: -150 },
+  'L2_arrow_z':     { x:  100, y: -150 },
+  // body statements, stacked vertically like code lines
+  'L2_brace_l':     { x: -120, y:   30 },
+  'L2_assign':      { x:  -40, y:   90 },
+  'L2_return':      { x:  -40, y:  150 },
+  'L2_brace_r':     { x: -120, y:  210 },
+
+  // L3: atoms inside their L2 parent's footprint
+  'tok_func':       { x: -340, y: -150 },
+  'tok_add':        { x: -260, y: -150 },
+  'tok_paren_l':    { x: -150, y: -150 },
+  'tok_X':          { x: -125, y: -150 },
+  'tok_comma':      { x: -100, y: -150 },
+  'tok_Y':          { x:  -75, y: -150 },
+  'tok_paren_r':    { x:  -50, y: -150 },
+  'tok_arrow':      { x:   85, y: -150 },
+  'tok_Z_ret':      { x:  115, y: -150 },
+  'tok_brace_l':    { x: -120, y:   30 },
+  'tok_Z_assign':   { x:  -90, y:   90 },
+  'tok_eq':         { x:  -65, y:   90 },
+  'tok_X_use':      { x:  -40, y:   90 },
+  'tok_plus':       { x:  -15, y:   90 },
+  'tok_Y_use':      { x:   10, y:   90 },
+  'tok_return':     { x:  -65, y:  150 },
+  'tok_Z_returned': { x:  -15, y:  150 },
+  'tok_brace_r':    { x: -120, y:  210 },
+};
+
+export const ADD_FRACTAL_POSITIONS = POSITIONS;
 
 /**
  * @returns {import('../core/types.js').HistoryRow[]}

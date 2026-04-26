@@ -111,7 +111,7 @@ export function applyFractalLod(state, deps, k) {
   if (!fl) return;
 
   const maxLvl = currentMaxLevel(k);
-  if (state._lastFractalMaxLevel === maxLvl) return;
+  const levelChanged = state._lastFractalMaxLevel !== maxLvl;
   state._lastFractalMaxLevel = maxLvl;
 
   const { levels, clusterTargets } = fl;
@@ -125,45 +125,66 @@ export function applyFractalLod(state, deps, k) {
     return true;
   }
 
-  // Nodes
-  for (const [id, g] of state.nodeElements) {
-    const v = visible(id);
-    g.style.display = v ? '' : 'none';
-  }
+  if (levelChanged) {
+    // Nodes
+    for (const [id, g] of state.nodeElements) {
+      g.style.display = visible(id) ? '' : 'none';
+    }
 
-  // Labels
-  for (const [id, t] of state.labelElements) {
-    const v = visible(id);
-    t.style.display = v ? '' : 'none';
-  }
+    // Labels
+    for (const [id, t] of state.labelElements) {
+      t.style.display = visible(id) ? '' : 'none';
+    }
 
-  // Edges — visible iff both endpoints are visible. edgeElements is keyed
-  // by an edge key; the underlying edge has source/target on the line.
-  // We look up via graph.state.edges keyed by id.
-  if (deps && deps.graph) {
-    for (const [key, line] of state.edgeElements) {
-      const edge = deps.graph.state.edges.get(key);
-      if (!edge) { line.style.display = ''; continue; }
-      const v = visible(edge.source) && visible(edge.target);
-      line.style.display = v ? '' : 'none';
+    // Edges — edgeElements is keyed `e:<edgeId>` (regular) or
+    // `m:<clusterA>\0<clusterB>` (meta). Strip the prefix to look the edge
+    // up; `graph.state.edges.get(key)` directly was the original bug —
+    // every key missed and we fell into the "leave displayed" branch.
+    if (deps && deps.graph) {
+      for (const [key, line] of state.edgeElements) {
+        let v = true;
+        if (key.startsWith('e:')) {
+          const edge = deps.graph.state.edges.get(key.slice(2));
+          if (edge) v = visible(edge.source) && visible(edge.target);
+        } else if (key.startsWith('m:')) {
+          // Meta edges connect cluster centroids. Only meaningful when
+          // both endpoint-clusters are currently representing a level.
+          const sep = key.indexOf('\0');
+          if (sep > 0) {
+            const a = key.slice(2, sep).replace(/^cluster:/, '');
+            const b = key.slice(sep + 1).replace(/^cluster:/, '');
+            v = levels.get(a) === maxLvl && levels.get(b) === maxLvl;
+          }
+        }
+        line.style.display = v ? '' : 'none';
+        const arrow = state.arrowElements && state.arrowElements.get(key);
+        if (arrow) arrow.style.display = v ? '' : 'none';
+      }
+    }
+
+    // Hulls — show only for clusters whose members are currently visible
+    // (i.e. clusters at level < maxLvl).
+    for (const [cid, he] of state.hullElements) {
+      const target = cid.replace(/^cluster:/, '');
+      const targetLvl = levels.get(target);
+      const expanded = targetLvl != null && targetLvl < maxLvl;
+      he.path.style.display = expanded ? '' : 'none';
+    }
+
+    for (const [cid, t] of state.clusterLabelElements) {
+      const target = cid.replace(/^cluster:/, '');
+      const targetLvl = levels.get(target);
+      const expanded = targetLvl != null && targetLvl < maxLvl;
+      t.style.display = expanded ? '' : 'none';
     }
   }
 
-  // Hulls — only show hulls of clusters that are "currently expanded",
-  // i.e. their members are visible. A cluster:X is expanded iff X.level <
-  // maxLvl (so X itself is hidden and its members render).
-  for (const [cid, he] of state.hullElements) {
-    const target = cid.replace(/^cluster:/, '');
-    const targetLvl = levels.get(target);
-    const expanded = targetLvl != null && targetLvl < maxLvl;
-    he.path.style.display = expanded ? '' : 'none';
-  }
-
-  // Cluster floating labels — same rule as hulls.
-  for (const [cid, t] of state.clusterLabelElements) {
-    const target = cid.replace(/^cluster:/, '');
-    const targetLvl = levels.get(target);
-    const expanded = targetLvl != null && targetLvl < maxLvl;
-    t.style.display = expanded ? '' : 'none';
+  // Always-on: force labels of currently-visible nodes to full opacity.
+  // applySemanticZoom otherwise fades labels by screen-radius (screenR < 6
+  // → opacity 0), which makes a single zoomed-out cluster representative
+  // unreadable. If a node is the only stand-in for an entire cluster, its
+  // label has to be legible regardless of camera scale.
+  for (const [id, t] of state.labelElements) {
+    if (visible(id)) t.setAttribute('opacity', '1');
   }
 }

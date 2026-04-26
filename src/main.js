@@ -51,7 +51,8 @@ import {
   sentinelRow,
   lastClickTarget,
 } from './rules/click-events.js';
-import { updatePosition, setLocked, createPositionMap } from './layout/positions.js';
+import { updatePosition, setLocked, setSticky, createPositionMap } from './layout/positions.js';
+import { ADD_FRACTAL_POSITIONS } from './data/demo-add-fractal.js';
 import { startTimeTravel, updateTimeTravel, stopTimeTravel, stepOnce, switchBranchByDirection } from './interact/time-travel.js';
 import { createArrangementStack, pushArrangement, startTravel as startArrangementTravel, stopTravel as stopArrangementTravel } from './interact/arrangements.js';
 import { loadFromLocal, wirePersistence } from './stream/local-persistence.js';
@@ -333,6 +334,19 @@ export function init(opts = {}) {
   // handles each pixel as its row arrives.
   pinImageNodes(graph.state.nodes, posMap, PIXEL_PITCH);
 
+  // Hand-authored fractal demos publish a positions table so each level
+  // reads like the source it represents (signature top, body below). We
+  // overwrite initialPlace's circle-seed and stick the nodes — gradient
+  // descent can still nudge them, but they stay near the authored layout.
+  if (opts.demo === 'add-fractal') {
+    for (const [id, p] of Object.entries(ADD_FRACTAL_POSITIONS)) {
+      if (graph.state.nodes.has(id)) {
+        updatePosition(posMap, id, p.x, p.y);
+        setSticky(posMap, id, true);
+      }
+    }
+  }
+
   // --- Click-event sentinel ---
   // The `mouse-clicked` sentinel node is how we record user clicks as edges
   // in the graph. Seed it once per history (idempotent) and lock it far off
@@ -348,7 +362,7 @@ export function init(opts = {}) {
     // Place the sentinel at the world origin and lock it. It renders like any
     // other node so the user can see which node/cluster was last clicked via
     // the outgoing event:click edge. Locked so physics can't drag it around.
-    updatePosition(posMap, SENTINEL_MOUSE_CLICKED, 0, 0);
+    updatePosition(posMap, SENTINEL_MOUSE_CLICKED, -1000, -1000);
     setLocked(posMap, SENTINEL_MOUSE_CLICKED, true);
   }
 

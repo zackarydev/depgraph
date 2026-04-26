@@ -88,9 +88,16 @@ function nodeKindColor(kind) {
   return KIND_COLOR[kind] || '#95a5a6';
 }
 
-function nodeRadius(node) {
+function nodeRadius(node, k) {
   const imp = (node && node.importance != null) ? node.importance : 1;
-  return 3 + Math.min(6, Math.sqrt(imp) * 2.2);
+  const baseRadius = 3 + Math.min(6, Math.sqrt(imp) * 2.2);
+
+  // Scale inversely to k so circles get larger in coordinate space as you zoom out.
+  // Math.max(0.05, k) prevents the nodes from scaling to infinity at deep zoom-outs.
+  const boundedK = Math.max(0.05, k);
+  
+  // The '6' here is a scaling factor. Adjust it to tune how wide the circles get.
+  return baseRadius + (50 / boundedK); 
 }
 
 function brighten(hex, amount) {
@@ -449,7 +456,7 @@ function renderNodesDiff(state, graph, posMap) {
 
     const cid = clusterIndex.get(id);
     const baseColor = cid ? clusterColor(cid) : nodeKindColor(node.kind);
-    const r = nodeRadius(node);
+    const r = nodeRadius(node, k);
 
     let circle = nodeCircleElements.get(id);
     if (!circle) {
@@ -744,18 +751,31 @@ export function applySemanticZoom(state, deps, k) {
 
   const fLabOp = !f.clusterLabels ? 0
     : k < 0.7 ? 0.4 : k < 2.5 ? 0.7 : Math.max(0.2, 0.7 - (k - 2.5) * 0.7);
-  const fFont = k <= 2 ? 13 / Math.max(0.3, k) : 13 / (2 * Math.pow(k / 2, 0.75));
+  const fFont = 50 / k;
   const fLabOpStr = String(fLabOp);
   const fFontStr = String(fFont);
   for (const [, text] of state.clusterLabelElements) {
     setAttrIfChanged(text, 'opacity', fLabOpStr, '_lastOp');
     setAttrIfChanged(text, 'font-size', fFontStr, '_lastFs');
   }
+  // Dynamically resize standard node circles on zoom
+  const nodes = deps.graph.state.nodes;
+  for (const [id, circle] of state.nodeCircleElements) {
+    
+    // Skip pixel nodes (they have their own peek-behind transition logic below)
+    if (state.pixelNodeIds.has(id)) continue;
+
+    const node = nodes.get(id);
+    if (node) {
+      const r = String(nodeRadius(node, k));
+      setAttrIfChanged(circle, 'r', r, '_lastR');
+    }
+  }
 
   const screenR = 5 * k;
   const labelOp = !f.labels ? 0
     : screenR < 6 ? 0 : Math.min(1, (screenR - 6) / 10);
-  const labelFs = Math.max(2, Math.min(8, 7 / k));
+  const labelFs = 20/k;
   const labelOpStr = String(labelOp);
   const labelFsStr = String(labelFs);
   const labelsOff = !f.labels;

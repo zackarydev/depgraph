@@ -11,6 +11,7 @@
     "static": "node depgraph-server.mjs",
     "stream": "node depgraph-server.mjs --watch src/",
     "image": "node depgraph-server.mjs --history runtime/image.csv",
+    "readme": "node depgraph-server.mjs --history runtime/history.readme.csv",
     "serve": "node depgraph-server.mjs --port 3000",
     "generate": "node codegen/graphgen.mjs --out runtime/history.csv",
     "scan": "node codegen/repo-scanner.mjs . --out runtime/history.csv",

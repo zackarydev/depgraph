@@ -8071,5 +8071,7 @@ t,type,op,id,kind,source,target,layer,weight,label
 8177,EDGE,add,click:8177:cluster:file:README.md#h2:immediate-next-steps-for-interesting-results-going-forwards/p:3/s:1:pos:x,,mouse-clicked,cluster:file:README.md#h2:immediate-next-steps-for-interesting-results-going-forwards/p:3/s:1:pos:x,event:click,0,
 0,NODE,add,mouse-clicked,sentinel,,,,0.1,mouse-clicked
 0,NODE,add,mouse-clicked,sentinel,,,,0.1,mouse-clicked
-1260,EDGE,add,click:1260:file:README.md#h3:hypergraph-of-codemap-ast,,mouse-clicked,file:README.md#h3:hypergraph-of-codemap-ast,event:click,0,
-1296,EDGE,add,click:1296:file:README.md#h1:depgraph,,mouse-clicked,file:README.md#h1:depgraph,event:click,0,
+0,NODE,add,mouse-clicked,sentinel,,,,0.1,mouse-clicked
+81,EDGE,add,click:81:add,,mouse-clicked,add,event:click,0,
+81,EDGE,add,click:81:cluster:add,,mouse-clicked,cluster:add,event:click,0,
+102,EDGE,add,click:102:cluster:add,,mouse-clicked,cluster:add,event:click,0,
