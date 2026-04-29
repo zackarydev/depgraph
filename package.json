@@ -5,24 +5,22 @@
   "type": "module",
   "main": "src/main.js",
   "scripts": {
-    "test": "node --test --test-reporter=spec --test-concurrency=1 test/*.test.mjs",
-    "test:visual": "npx playwright test",
-    "test:visual:show": "npx playwright test --headed",
-    "start": "node depgraph-server.mjs --port 3000",
-    "runtime-add": "node depgraph-server.mjs --port 3000",
-    "static": "node depgraph-server.mjs",
-    "stream": "node depgraph-server.mjs --watch src/",
-    "image": "node depgraph-server.mjs --history runtime/image.csv",
-    "readme": "node depgraph-server.mjs --history runtime/history.readme.csv",
-    "serve": "node depgraph-server.mjs --port 3000",
-    "generate": "node codegen/graphgen.mjs --out runtime/history.csv",
-    "scan": "node codegen/repo-scanner.mjs . --out runtime/history.csv",
-    "watch": "node codegen/watcher.mjs --root . --out runtime/history.csv"
+    "start":        "node depgraph-server.mjs --port 3000 & open 'http://localhost:3000/?stream'",
+    "image":        "node depgraph-server.mjs --port 3000 --history runtime/image.csv & open 'http://localhost:3000/?stream'",
+    "readme":       "node depgraph-server.mjs --port 3000 --history runtime/history.readme.csv & open 'http://localhost:3000/?stream'",
+    "demo":         "node depgraph-server.mjs --port 3000 & sleep 1 && open 'http://localhost:3000/'",
+    "demo:fractal": "node depgraph-server.mjs --port 3000 & sleep 1 && open 'http://localhost:3000/?demo=fractal'",
+    "gen":          "node codegen/graphgen.mjs --out runtime/history.csv",
+    "gen:readme":   "node codegen/readmegen.mjs --out runtime/history.readme.csv",
+    "scan":         "node codegen/repo-scanner.mjs . --out runtime/history.csv",
+    "watch":        "node codegen/watcher.mjs --root . --out runtime/history.csv",
+    "test":         "node --test --test-reporter=spec --test-concurrency=1 test/*.test.mjs",
+    "test:ui":      "npx playwright test --headed"
   },
   "keywords": [
     "hypergraph"
   ],
-  "author": "",
+  "author": "zackary.dev",
   "license": "ISC",
   "dependencies": {
     "acorn": "^8.16.0",

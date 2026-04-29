@@ -72,7 +72,12 @@ function main() {
 
   const tree = fromMarkdown(source);
   for (const child of tree.children) {
-    visitBlock(child, parentForBlock(ctx, child), 1, ctx);
+    const parentId = parentForBlock(ctx, child);
+    const top = ctx.headingStack[ctx.headingStack.length - 1];
+    const blockDepth = child.type === 'heading'
+      ? child.depth
+      : (top ? top.depth + 1 : 1);
+    visitBlock(child, parentId, blockDepth, ctx);
   }
 
   // Assign t and validate.
@@ -232,7 +237,7 @@ function emitImageBlock(imgNode, parentId, depth, ctx) {
   // Image-header + pixels + edges. tStart=0 — the final stamping pass
   // renumbers every row in ctx.rows sequentially, so these t values
   // are just placeholders.
-  const imgRows = imageToRows({ size, pickRGB, originX, originY });
+  const imgRows = imageToRows({ width: size, height: size, pickRGB, originX, originY });
   for (const row of imgRows) {
     const { t: _t, ...rest } = row;
     emitRaw(ctx, rest);

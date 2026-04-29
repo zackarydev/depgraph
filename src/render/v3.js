@@ -798,38 +798,23 @@ export function applySemanticZoom(state, deps, k) {
   const linksDisplay = f.edges ? '' : 'none';
   if (gLinks.style.display !== linksDisplay) gLinks.style.display = linksDisplay;
 
-  // Pixel "peek-behind" transition. Below k=1.2 the rect tiles seamlessly
-  // and the circle is hidden; as the user zooms in the rect shrinks + fades
-  // and a small color-matched circle emerges so the linked-list edges
-  // running between pixel centers become visible.
+  // Pixel rect/circle opacity is now driven by render-rules.js (pixel-rect /
+  // pixel-circle rules). Rect geometry shrink lives here because it's about
+  // sizing, not visibility, and applySemanticZoom is the canonical place for
+  // zoom-driven geometry tweaks.
   if (state.pixelNodeIds.size > 0) {
-    const rectOp = k <= 1.2 ? 1
-      : k >= 4 ? 0.1
-      : 1 - ((k - 1.2) / (4 - 1.2)) * 0.9;
     const shrink = k <= 1.2 ? 1
       : k >= 4 ? 0.55
       : 1 - ((k - 1.2) / (4 - 1.2)) * 0.45;
-    const circleOp = k <= 1.5 ? 0
-      : k >= 3.5 ? 1
-      : (k - 1.5) / (3.5 - 1.5);
-    const rectOpStr = String(rectOp);
-    const circleOpStr = String(circleOp);
-
     for (const id of state.pixelNodeIds) {
       const rect = state.nodeRectElements.get(id);
-      if (rect) {
-        const half = rect._baseHalf * shrink;
-        const w = half * 2;
-        setAttrIfChanged(rect, 'x', String(-half), '_lastX');
-        setAttrIfChanged(rect, 'y', String(-half), '_lastY');
-        setAttrIfChanged(rect, 'width', String(w), '_lastW');
-        setAttrIfChanged(rect, 'height', String(w), '_lastH');
-        setAttrIfChanged(rect, 'opacity', rectOpStr, '_lastOp');
-      }
-      const circle = state.nodeCircleElements.get(id);
-      if (circle) {
-        setAttrIfChanged(circle, 'opacity', circleOpStr, '_lastOp');
-      }
+      if (!rect) continue;
+      const half = rect._baseHalf * shrink;
+      const w = half * 2;
+      setAttrIfChanged(rect, 'x', String(-half), '_lastX');
+      setAttrIfChanged(rect, 'y', String(-half), '_lastY');
+      setAttrIfChanged(rect, 'width', String(w), '_lastW');
+      setAttrIfChanged(rect, 'height', String(w), '_lastH');
     }
   }
 

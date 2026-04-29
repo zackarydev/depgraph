@@ -29,6 +29,14 @@ const DEFAULT_WEIGHTS = {
   // Event layers are structural markers for queries, not springs.
   // Zero weight in both physics and affinity so clicks don't warp layout.
   'event:click': 0,
+  // Position-metadata layers — x/y slots persist a node's coordinates as
+  // history rows, and `stretch` slots persist cluster stretch scalars. They
+  // are not real edges; their gradient pull would drift dragged clusters
+  // every time the drag's slot rows replay. Zero weight in physics keeps
+  // the persistence honest without warping the layout.
+  x: 0,
+  y: 0,
+  stretch: 0,
 };
 
 /**

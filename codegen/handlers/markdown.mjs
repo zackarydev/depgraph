@@ -45,7 +45,12 @@ export function handle(absPath, relPath, scanState) {
 
   const tree = fromMarkdown(source);
   for (const child of tree.children) {
-    visitBlock(child, parentForBlock(ctx, child), 1, ctx);
+    const parentId = parentForBlock(ctx, child);
+    const top = ctx.headingStack[ctx.headingStack.length - 1];
+    const blockDepth = child.type === 'heading'
+      ? child.depth
+      : (top ? top.depth + 1 : 1);
+    visitBlock(child, parentId, blockDepth, ctx);
   }
 
   if (scanState) scanState.yCursor = baseY + ctx.yIndex * DY + FILE_GAP;

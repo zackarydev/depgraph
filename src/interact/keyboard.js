@@ -122,6 +122,15 @@ export function keyDown(state, key, modifiers = {}) {
     return { action: 'branch-switch', delta: 1 };
   }
 
+  // PageUp/PageDown: step through fractal zoom layers without using the
+  // wheel. Coexists with d3.zoom — wheel-zoom still works.
+  if (key === 'pageup') {
+    return { action: 'fractal-layer-step', delta: 1 };
+  }
+  if (key === 'pagedown') {
+    return { action: 'fractal-layer-step', delta: -1 };
+  }
+
   if(key === 'm') {
     if(!state.r.running) {
       state.r.recorder.start();

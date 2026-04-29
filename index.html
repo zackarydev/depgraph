@@ -202,7 +202,19 @@
       <input type="range" id="t-speed" min="100" max="3000" step="50" value="1000" style="width:56px">
       <span class="val" id="t-speed-val">1.0s</span>
     </label> -->
+    <button id="export-fractal" title="Export the current fractal-layer hierarchy as text + JSON">Export layers</button>
     <div class="hint">hold Z · hold X · T = trace · Space = gather · drag</div>
+  </div>
+
+  <div id="fractal-export-panel" style="display:none; position:fixed; top:56px; right:12px; z-index:20; background:#0f0f17; border:1px solid #3a3a50; border-radius:8px; padding:12px 14px; width:min(440px, 92vw); height:calc(100vh - 80px); flex-direction:column; font-size:12px;">
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-shrink:0; flex-wrap:wrap;">
+      <strong style="color:#e8e8f0;">Fractal Layers</strong>
+      <button id="fractal-export-download" style="background:#1a1a25; color:#aac; border:1px solid #333; border-radius:4px; padding:3px 8px; font:inherit; cursor:pointer;">JSON</button>
+      <button id="fractal-export-copy" style="background:#1a1a25; color:#aac; border:1px solid #333; border-radius:4px; padding:3px 8px; font:inherit; cursor:pointer;">Copy MD</button>
+      <span style="flex:1;"></span>
+      <button id="fractal-export-close" style="background:transparent; color:#888; border:none; font-size:16px; cursor:pointer;">&times;</button>
+    </div>
+    <pre id="fractal-export-out" style="white-space:pre; color:#cde; background:#08080d; border:1px solid #222; border-radius:4px; padding:10px; margin:0; font-family:inherit; font-size:11px; line-height:1.45; flex:1; min-height:0; overflow:auto;"></pre>
   </div>
 
   <div id="viewport">

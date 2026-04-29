@@ -1,0 +1,245 @@
+{
+  "summary": {
+    "totalNodes": 24,
+    "totalClusters": 7,
+    "totalClusterTargets": 7,
+    "maxLevel": 3,
+    "countsPerLevel": {
+      "0": 1,
+      "1": 19,
+      "2": 3,
+      "3": 1
+    },
+    "rootCount": 1,
+    "orphanCount": 1
+  },
+  "tree": [
+    {
+      "id": "mouse-clicked",
+      "kind": "sentinel",
+      "label": "mouse-clicked",
+      "level": 0,
+      "isClusterTarget": false,
+      "children": []
+    }
+  ],
+  "byLevel": {
+    "0": [
+      {
+        "id": "mouse-clicked",
+        "kind": "sentinel",
+        "label": "mouse-clicked",
+        "level": 0,
+        "isClusterTarget": false
+      }
+    ],
+    "1": [
+      {
+        "id": "computeHull",
+        "kind": "function",
+        "label": "computeHull",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "descentStep",
+        "kind": "function",
+        "label": "descentStep",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "energy",
+        "kind": "function",
+        "label": "energy",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "initialPlace",
+        "kind": "function",
+        "label": "initialPlace",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "keyDispatch",
+        "kind": "function",
+        "label": "keyDispatch",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "parseCSV",
+        "kind": "function",
+        "label": "parseCSV",
+        "level": 1,
+        "isClusterTarget": true
+      },
+      {
+        "id": "quadtree",
+        "kind": "function",
+        "label": "quadtree",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "renderEdges",
+        "kind": "function",
+        "label": "renderEdges",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "renderGraph",
+        "kind": "function",
+        "label": "renderGraph",
+        "level": 1,
+        "isClusterTarget": true
+      },
+      {
+        "id": "renderHulls",
+        "kind": "function",
+        "label": "renderHulls",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "renderLabels",
+        "kind": "function",
+        "label": "renderLabels",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "renderNodes",
+        "kind": "function",
+        "label": "renderNodes",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "renderPositions",
+        "kind": "function",
+        "label": "renderPositions",
+        "level": 1,
+        "isClusterTarget": true
+      },
+      {
+        "id": "selectNode",
+        "kind": "function",
+        "label": "selectNode",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "startDrag",
+        "kind": "function",
+        "label": "startDrag",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "startGather",
+        "kind": "function",
+        "label": "startGather",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "startTrace",
+        "kind": "function",
+        "label": "startTrace",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "streamPlace",
+        "kind": "function",
+        "label": "streamPlace",
+        "level": 1,
+        "isClusterTarget": false
+      },
+      {
+        "id": "warmRestart",
+        "kind": "function",
+        "label": "warmRestart",
+        "level": 1,
+        "isClusterTarget": false
+      }
+    ],
+    "2": [
+      {
+        "id": "currentZoom",
+        "kind": "global",
+        "label": "currentZoom",
+        "level": 2,
+        "isClusterTarget": false
+      },
+      {
+        "id": "loadHistory",
+        "kind": "function",
+        "label": "loadHistory",
+        "level": 2,
+        "isClusterTarget": true
+      },
+      {
+        "id": "nodePositions",
+        "kind": "global",
+        "label": "nodePositions",
+        "level": 2,
+        "isClusterTarget": false
+      }
+    ],
+    "3": [
+      {
+        "id": "createBus",
+        "kind": "function",
+        "label": "createBus",
+        "level": 3,
+        "isClusterTarget": false
+      }
+    ]
+  },
+  "raw": {
+    "levels": {
+      "renderGraph": 1,
+      "render": 0,
+      "renderNodes": 1,
+      "renderEdges": 1,
+      "renderHulls": 1,
+      "renderLabels": 1,
+      "computeHull": 1,
+      "renderPositions": 1,
+      "descentStep": 1,
+      "layout": 0,
+      "energy": 1,
+      "initialPlace": 1,
+      "streamPlace": 1,
+      "warmRestart": 1,
+      "quadtree": 1,
+      "selectNode": 1,
+      "interact": 0,
+      "startDrag": 1,
+      "startGather": 1,
+      "startTrace": 1,
+      "keyDispatch": 1,
+      "createBus": 3,
+      "loadHistory": 2,
+      "parseCSV": 1,
+      "currentZoom": 2,
+      "nodePositions": 2,
+      "mouse-clicked": 0
+    },
+    "clusterTargets": [
+      "render",
+      "layout",
+      "interact",
+      "loadHistory",
+      "parseCSV",
+      "renderGraph",
+      "renderPositions"
+    ],
+    "maxLevel": 3
+  }
+}

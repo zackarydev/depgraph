@@ -149,6 +149,12 @@ export function deriveAffinities(nodeId, edges, W, nodeToCluster) {
 export function deriveClusters(nodes, edges, affinities) {
   const clusters = new Map();
 
+  // Position/metadata kinds — slots, value internings, sentinels, agents —
+  // are not graph content. Including them in clusters drifts the centroid
+  // (and any UI anchored to it) every time a drag persists x/y slots.
+  const isMetadataKind = (kind) =>
+    kind === 'slot' || kind === 'value' || kind === 'sentinel' || kind === 'agent';
+
   // First: use memberOf edges to form explicit clusters
   const memberOfTargets = new Set();
   for (const [, edge] of edges) {
@@ -164,6 +170,8 @@ export function deriveClusters(nodes, edges, affinities) {
         };
         clusters.set(clusterId, cluster);
       }
+      const sourceNode = nodes.get(edge.source);
+      if (sourceNode && isMetadataKind(sourceNode.kind)) continue;
       cluster.members.add(edge.source);
     }
   }
@@ -174,9 +182,10 @@ export function deriveClusters(nodes, edges, affinities) {
     for (const m of cluster.members) clustered.add(m);
   }
 
-  for (const [nodeId] of nodes) {
+  for (const [nodeId, node] of nodes) {
     if (clustered.has(nodeId)) continue;
     if (memberOfTargets.has(nodeId)) continue; // cluster-target nodes aren't members of themselves
+    if (node && isMetadataKind(node.kind)) continue; // metadata isn't cluster content
 
     const aff = affinities.get(nodeId);
     if (!aff || aff.size === 0) continue;

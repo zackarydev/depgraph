@@ -634,20 +634,18 @@ function renderClusterLabelsFull(state, graph, posMap) {
 
   for (const [cid, members] of clusterMembers) {
     if (!members || members.length === 0) continue;
-    let cx = 0, cy = 0, n = 0;
-    let minY = Infinity;
-    for (const mid of members) {
-      const p = posMap.positions.get(mid);
-      if (!p) continue;
-      cx += p.x; cy += p.y; n++;
-      if (p.y < minY) minY = p.y;
-    }
-    if (n === 0) continue;
-    cx /= n; cy /= n;
+    // The label's anchor IS the cluster — pinned to the target node (the
+    // hyperedge's common member). Centroid-based anchoring drifted whenever
+    // slot nodes from drag persistence joined the cluster via affinity, since
+    // freshly-added slots get a random seed position. The target is stable.
+    const targetId = String(cid).replace(/^(cluster:)+/, '');
+    const targetPos = posMap.positions.get(targetId);
+    if (!targetPos) continue;
     if (!clusterLabelOffset.has(cid)) {
-      clusterLabelOffset.set(cid, { dx: 0, dy: (minY - 18) - cy });
+      clusterLabelOffset.set(cid, { dx: 0, dy: 0 });
     }
     const off = clusterLabelOffset.get(cid);
+    const cx = targetPos.x, cy = targetPos.y;
     seen.add(cid);
 
     let text = clusterLabelElements.get(cid);
@@ -961,12 +959,15 @@ function rebuildHullPaths(state) {
 }
 
 function positionClusterLabelsFromDisplay(state, centroids) {
+  // Anchor labels at the cluster TARGET node (not centroid). Tracks the
+  // target's display position so smooth-motion lerp carries the label too.
   for (const [cid, text] of state.clusterLabelElements) {
-    const c = centroids.get(cid);
-    if (!c) continue;
-    const off = state.clusterLabelOffset.get(cid) || { dx: 0, dy: -30 };
-    const tx = c.x + off.dx;
-    const ty = c.y + off.dy;
+    const targetId = String(cid).replace(/^(cluster:)+/, '');
+    const dp = state.displayPositions.get(targetId);
+    if (!dp) continue;
+    const off = state.clusterLabelOffset.get(cid) || { dx: 0, dy: 0 };
+    const tx = dp.x + off.dx;
+    const ty = dp.y + off.dy;
     if (Math.abs(tx - text._lastX) < 0.05 && Math.abs(ty - text._lastY) < 0.05) continue;
     text.setAttribute('transform', `translate(${tx},${ty})`);
     text._lastX = tx; text._lastY = ty;

@@ -17,6 +17,7 @@ import { buildFromHistory, applyRowToGraph, rederive } from './data/graph-builde
 import { initialPlace } from './layout/placement.js';
 import { isLayoutHub } from './layout/hub-policy.js';
 import { initSVG } from './render/svg.js';
+import { computeFractalLevels, exportFractalLayers } from './render/fractal-lod.js';
 import {
   createRenderer as createLegacyRenderer,
   renderFull as legacyRenderFull,
@@ -423,6 +424,11 @@ export function init(opts = {}) {
   let timeTravelState = null;
   const arrangements = createArrangementStack();
   let currentZoom = 1;
+  // Discrete fractal layer index, decoupled from zoom k. PageUp/PageDown
+  // step it; visibility filter hides nodes at deeper levels and collapses
+  // cluster targets shallower than the active layer. Infinity = show all
+  // (preserves the pre-PageUp/Down default behavior).
+  let currentFractalLayer = Infinity;
   let highlightedSearchIds = new Set();
 
   // Live moments — every motion-producing interaction is a moment under the
@@ -468,6 +474,16 @@ export function init(opts = {}) {
   // --- Legacy render state (port of old_versions/index.html visuals) ---
   if (svgCtx) {
     legacyState = createLegacyRenderer(svgCtx);
+    // ?debug=lod keeps render-rules.js "hidden" elements faintly visible
+    // so the structure can be inspected. Toggleable at runtime via
+    // window.lodDebug = true|false then a re-render.
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('debug') === 'lod') {
+        legacyState.lodDebug = true;
+        window.lodDebug = true;
+      }
+    }
   }
 
   // --- HUD: populated lazily if the page has #hud-bar / #arr-nav elements ---
@@ -502,6 +518,63 @@ export function init(opts = {}) {
       if (label) label.textContent = arrangements.stack.length
         ? `${arrangements.cursor + 1} / ${arrangements.stack.length}`
         : '—';
+    }
+  }
+
+  // --- Fractal-layer export: text + JSON of current cluster hierarchy ---
+  let refreshFractalExport = () => {};
+  if (typeof document !== 'undefined') {
+    const exportBtn = document.getElementById('export-fractal');
+    const panel = document.getElementById('fractal-export-panel');
+    const out = document.getElementById('fractal-export-out');
+    const closeBtn = document.getElementById('fractal-export-close');
+    const dlBtn = document.getElementById('fractal-export-download');
+    const copyBtn = document.getElementById('fractal-export-copy');
+    let lastExport = null;
+    function rebuildExport() {
+      lastExport = exportFractalLayers(
+        graph.derivation.clusters,
+        graph.state.nodes,
+        graph.derivation.hyperEdges,
+      );
+      const activeLayer = legacyState && isFinite(legacyState.fractalLayer)
+        ? legacyState.fractalLayer
+        : null;
+      const header = activeLayer != null
+        ? `active layer: L${activeLayer} (PageUp/PageDown to step · Infinity = show all)\n\n`
+        : `active layer: ALL (PageDown to step into hierarchy)\n\n`;
+      out.textContent = header + lastExport.markdown;
+    }
+    refreshFractalExport = () => {
+      if (!panel || panel.style.display === 'none') return;
+      rebuildExport();
+    };
+    if (exportBtn && panel && out) {
+      exportBtn.addEventListener('click', () => {
+        rebuildExport();
+        panel.style.display = 'flex';
+      });
+      closeBtn?.addEventListener('click', () => { panel.style.display = 'none'; });
+      dlBtn?.addEventListener('click', () => {
+        if (!lastExport) return;
+        const blob = new Blob([JSON.stringify({
+          summary: lastExport.summary,
+          tree: lastExport.tree,
+          byLevel: lastExport.byLevel,
+          hyperByLayer: lastExport.hyperByLayer,
+          raw: lastExport.raw,
+        }, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'fractal-layers.json';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      });
+      copyBtn?.addEventListener('click', () => {
+        if (!lastExport) return;
+        navigator.clipboard?.writeText(lastExport.markdown);
+      });
     }
   }
 
@@ -853,7 +926,10 @@ export function init(opts = {}) {
     let closest = null;
     let closestDist = Infinity;
     const k = Math.max(0.1, currentZoom);
-    const slop = 4 / k;
+    // Slop is in world units; dividing by k keeps it constant in screen px.
+    // 12 screen px feels right for clicking small nodes — 4 was too tight,
+    // d3-zoom would steal the gesture and pan the page instead.
+    const slop = 12 / k;
     for (const [id, ps] of posMap.positions) {
       const node = graph.state.nodes.get(id);
       if (!node) continue;
@@ -1115,6 +1191,10 @@ export function init(opts = {}) {
       const clusterId = clusterLabelFromEvent(e);
       if (clusterId) {
         const memberSet = resolveClusterMembers(clusterId, graph);
+        // The label sits at the cluster target node — dragging the label is
+        // dragging the cluster, so the target must move with the members.
+        const targetId = String(clusterId).replace(/^(cluster:)+/, '');
+        if (graph.state.nodes.has(targetId)) memberSet.add(targetId);
         const offsets = clusterDragOffsets(memberSet, world.x, world.y, posMap);
         pendingDragSetup = {
           flavor: 'cluster',
@@ -1275,6 +1355,7 @@ export function init(opts = {}) {
       const mods = { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey };
       const action = keyDown(keyState, key, mods);
       if (!action) return;
+      if (action.action === 'fractal-layer-step') e.preventDefault();
 
       switch (action.action) {
         case 'gather-start': {
@@ -1456,6 +1537,43 @@ export function init(opts = {}) {
           switchBranchByDirection(history, action.delta);
           rebuildGraphFromHistory();
           break;
+
+        case 'fractal-layer-step': {
+          // Page Up/Down: step the discrete fractal layer (cluster nesting
+          // depth) without touching the d3 zoom transform. PageDown goes
+          // deeper (more layers visible); PageUp collapses one layer back
+          // toward the root. Layer = Infinity means "show all" (the
+          // pre-PageUp/Down default), preserved unless the user explicitly
+          // pages up out of it.
+          if (!legacyState) break;
+          // Refresh per-node levels — the cluster set can change as the
+          // user adds nodes or edits the graph between key presses.
+          legacyState.fractalLod = computeFractalLevels(
+            graph.derivation.clusters,
+            graph.state.nodes,
+          );
+          const maxLevel = legacyState.fractalLod.maxLevel || 0;
+          const cur = isFinite(currentFractalLayer) ? currentFractalLayer : maxLevel;
+          let next = cur + action.delta;
+          if (next < 0) next = 0;
+          if (next >= maxLevel) {
+            // Stepping past the deepest level returns us to the unfiltered
+            // "show all" sentinel — same as the boot state.
+            currentFractalLayer = Infinity;
+          } else {
+            currentFractalLayer = next;
+          }
+          legacyState.fractalLayer = currentFractalLayer;
+          const flDeps = { graph, posMap, derivation: graph.derivation, context, selection };
+          // Re-run semantic-zoom first so its screen-radius opacities are
+          // current for the new layer; the fractal-layer filter then
+          // overrides labels of nodes it's keeping visible.
+          legacyApplySemanticZoom(legacyState, flDeps, currentZoom);
+          legacyApplyFractalLod(legacyState, flDeps, currentZoom);
+          updateHud();
+          refreshFractalExport();
+          break;
+        }
 
         case 'escape':
           if (traceState) {
@@ -1953,11 +2071,14 @@ export function init(opts = {}) {
 if (typeof window !== 'undefined') {
   const params = new URLSearchParams(window.location.search);
   const demoMode = params.get('demo');
+  const streamMode = params.has('stream');
   const runtime = demoMode
     ? init({ demo: demoMode, localStorage: false })
-    : init({ streamReplay: true });
+    : streamMode
+      ? init({ streamReplay: true })
+      : init({ demo: 'default', localStorage: false });
   window.__depgraph = runtime;
-  console.log('depgraph runtime initialized', demoMode ? `(demo: ${demoMode})` : '(stream replay)', runtime);
+  console.log('depgraph runtime initialized', demoMode ? `(demo: ${demoMode})` : streamMode ? '(stream replay)' : '(demo: default)', runtime);
 
   if (demoMode === 'runtime-add') {
     const engine = createRuntimeEngine(runtime);

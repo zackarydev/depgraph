@@ -6,5 +6,6 @@
       "Bash(rtk read *)",
       "Bash(node depgraph-server.mjs --port 3111)"
     ]
-  }
+  },
+  "showThinkingSummaries": true
 }
